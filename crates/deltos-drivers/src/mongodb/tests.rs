@@ -214,7 +214,8 @@ async fn runs_shell_statements() {
             "db.getCollection('{name}').find({{}}).sort({{_id: -1}})"
         ))
         .await;
-    assert_eq!(names, ["_id", "a", "nested"]);
+    // Columns are the fields of the first batch, in the order they were first seen.
+    assert_eq!(names, ["_id", "a", "nested", "when"]);
     assert_eq!(rows[0][0], Value::Int(2));
     assert_eq!(rows[0][2], Value::Json(r#"{"b":[1,2]}"#.into()));
     let (_, rows, _) = fx

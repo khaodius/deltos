@@ -71,14 +71,15 @@ cargo +1.88 check --workspace --locked    # the minimum Rust version job
   dependency to its last compatible version and run `cargo update -p <crate> --precise <version>`.
 - Run `cargo fmt --all` after every edit, including small ones. A formatting failure is the
   most common way `main` turns red.
-- The driver tests against real servers need the databases running. With Docker:
+- The driver tests against real servers need the databases running. The MySQL tests create and drop
+  their own databases, so they connect as root. With Docker:
 
   ```sh
   docker run -d -p 5432:5432 -e POSTGRES_USER=deltos -e POSTGRES_PASSWORD=deltos -e POSTGRES_DB=deltos postgres:16
   docker run -d -p 3306:3306 -e MYSQL_ROOT_PASSWORD=root -e MYSQL_USER=deltos -e MYSQL_PASSWORD=deltos -e MYSQL_DATABASE=deltos mysql:8.4
   docker run -d -p 27017:27017 mongo:7
   DELTOS_TEST_POSTGRES_URL=postgres://deltos:deltos@localhost:5432/deltos \
-  DELTOS_TEST_MYSQL_URL=mysql://deltos:deltos@localhost:3306/deltos \
+  DELTOS_TEST_MYSQL_URL=mysql://root:root@localhost:3306/deltos \
   DELTOS_TEST_MONGODB_URL=mongodb://localhost:27017 \
   cargo test -p deltos-drivers
   ```

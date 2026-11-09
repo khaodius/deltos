@@ -136,8 +136,8 @@ jobs:
           --health-retries 30
     env:
       DELTOS_TEST_POSTGRES_URL: postgres://deltos:deltos@localhost:5432/deltos
-      DELTOS_TEST_MYSQL_URL: mysql://deltos:deltos@localhost:3306/deltos
-      DELTOS_TEST_MARIADB_URL: mysql://deltos:deltos@localhost:3307/deltos
+      DELTOS_TEST_MYSQL_URL: mysql://root:root@localhost:3306/deltos
+      DELTOS_TEST_MARIADB_URL: mysql://root:root@localhost:3307/deltos
       DELTOS_TEST_MONGODB_URL: mongodb://localhost:27017
     steps:
       - uses: actions/checkout@v5
