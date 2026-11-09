@@ -1,0 +1,18 @@
+[package]
+name = "deltos-data"
+description = "Driver trait, values and schema types shared by every Deltos database driver"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+futures.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

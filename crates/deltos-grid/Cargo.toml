@@ -1,0 +1,18 @@
+[package]
+name = "deltos-grid"
+description = "Bounded row cache and on-disk spill store behind the Deltos table view"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+deltos-data.workspace = true
+futures.workspace = true
+parking_lot.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,19 @@
+[package]
+name = "deltos-drivers"
+description = "Database drivers for Deltos"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+deltos-data.workspace = true
+futures.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,30 @@
+[package]
+name = "deltos"
+description = "A fast, native database client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "deltos"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+deltos-data.workspace = true
+deltos-dock.workspace = true
+deltos-drivers.workspace = true
+deltos-grid.workspace = true
+deltos-settings.workspace = true
+deltos-updater.workspace = true
+gpui.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true
