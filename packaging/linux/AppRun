@@ -1,0 +1,5 @@
+#!/bin/sh
+# Entry point of the AppImage: starts the deltos binary inside the mounted image. The AppImage
+# runtime sets APPIMAGE to the image's path, which the in-app updater uses to replace it.
+here=$(dirname "$(readlink -f "$0")")
+exec "$here/usr/bin/deltos" "$@"

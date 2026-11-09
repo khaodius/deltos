@@ -1,0 +1,188 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Check (${{ matrix.platform.name }})
+    runs-on: ${{ matrix.platform.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { name: Linux, os: ubuntu-22.04 }
+          - { name: Windows, os: windows-latest }
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Linux system libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+            libx11-xcb-dev libxcb1-dev libfontconfig-dev libfreetype-dev libvulkan-dev libgbm-dev \
+            libclang-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Formatting
+        if: runner.os == 'Linux'
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace --locked
+
+  msrv:
+    name: Minimum Rust version
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Linux system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+            libx11-xcb-dev libxcb1-dev libfontconfig-dev libfreetype-dev libvulkan-dev libgbm-dev \
+            libclang-dev
+
+      - name: Read rust-version from Cargo.toml
+        id: msrv
+        run: echo "version=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv
+
+      - run: cargo check --workspace --locked
+
+  drivers:
+    name: Drivers against live databases
+    runs-on: ubuntu-22.04
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: deltos
+          POSTGRES_PASSWORD: deltos
+          POSTGRES_DB: deltos
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U deltos"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_USER: deltos
+          MYSQL_PASSWORD: deltos
+          MYSQL_DATABASE: deltos
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -proot"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
+      mariadb:
+        image: mariadb:11
+        env:
+          MARIADB_ROOT_PASSWORD: root
+          MARIADB_USER: deltos
+          MARIADB_PASSWORD: deltos
+          MARIADB_DATABASE: deltos
+        ports:
+          - 3307:3306
+        options: >-
+          --health-cmd "healthcheck.sh --connect --innodb_initialized"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
+      mongodb:
+        image: mongo:7
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.runCommand({ ping: 1 }).ok' localhost:27017/test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      DELTOS_TEST_POSTGRES_URL: postgres://deltos:deltos@localhost:5432/deltos
+      DELTOS_TEST_MYSQL_URL: mysql://deltos:deltos@localhost:3306/deltos
+      DELTOS_TEST_MARIADB_URL: mysql://deltos:deltos@localhost:3307/deltos
+      DELTOS_TEST_MONGODB_URL: mongodb://localhost:27017
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: drivers
+
+      - name: Test the drivers
+        run: cargo test -p deltos-drivers --locked
+
+  build:
+    name: Build (${{ matrix.platform.name }})
+    needs: check
+    runs-on: ${{ matrix.platform.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { name: Linux, os: ubuntu-22.04, binary: target/release/deltos }
+          - { name: Windows, os: windows-latest, binary: target/release/deltos.exe }
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Linux system libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+            libx11-xcb-dev libxcb1-dev libfontconfig-dev libfreetype-dev libvulkan-dev libgbm-dev \
+            libclang-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release
+
+      - run: cargo build --release --locked -p deltos
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deltos-${{ runner.os }}
+          path: ${{ matrix.platform.binary }}
+          if-no-files-found: error
+          retention-days: 14

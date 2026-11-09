@@ -1,0 +1,377 @@
+name: Release
+
+# Builds the Linux and Windows packages from one commit and publishes them with SHA-256
+# checksums, signed build provenance and a signed update manifest, with the release notes taken
+# from CHANGELOG.md. latest.json lists every package with its hash and size, and latest.json.sig
+# is its Ed25519 signature from the DELTOS_UPDATE_KEY secret; the in-app updater accepts only a
+# manifest signed by the key whose public half is committed in packaging/update-key.pub.
+# A push to main that carries a version with no release yet publishes it and tags the commit
+# it built; pushes whose version is already released do nothing. Pushing a tag named after the
+# version (v0.1.0 for 0.1.0), or running the workflow by hand, publishes that version too.
+on:
+  push:
+    branches: [main]
+    paths:
+      - Cargo.toml
+      - .github/workflows/release.yml
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  version:
+    name: Version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      release: ${{ steps.version.outputs.release }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Check the version and tag
+        id: version
+        run: |
+          version=$(sed -n '/^\[workspace.package\]/,/^\[/ s/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          if [ -z "$version" ]; then
+            echo "::error::No version in [workspace.package] of Cargo.toml"
+            exit 1
+          fi
+          tag="v$version"
+          lock_version=$(awk '$0 == "name = \"deltos\"" { getline; gsub(/version = |"/, ""); print; exit }' Cargo.lock)
+          if [ "$lock_version" != "$version" ]; then
+            echo "::error::Cargo.lock has deltos $lock_version, Cargo.toml has $version; run cargo check and commit Cargo.lock"
+            exit 1
+          fi
+          release=true
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            if [ "$GITHUB_REF_NAME" != "$tag" ]; then
+              echo "::error::Tag $GITHUB_REF_NAME does not match the version $version"
+              exit 1
+            fi
+          elif git fetch --quiet --depth=1 origin "+refs/tags/$tag:refs/tags/$tag" 2> /dev/null; then
+            if [ "$GITHUB_EVENT_NAME" = push ]; then
+              echo "$tag is already released, nothing to publish"
+              release=false
+            elif [ "$(git rev-parse "$tag^{commit}")" != "$GITHUB_SHA" ]; then
+              echo "::error::$tag already exists on another commit; bump the version first"
+              exit 1
+            fi
+          fi
+          if [ "$release" = true ] &&
+            ! awk -v v="$version" '$1 == "##" && $2 == v { found = 1 } END { exit !found }' CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no section for $version"
+            exit 1
+          fi
+          {
+            echo "version=$version"
+            echo "tag=$tag"
+            echo "release=$release"
+          } >> "$GITHUB_OUTPUT"
+
+      # A release without a signed manifest would be one no installed copy can update to, so
+      # the key is checked before any package is built. docs/RELEASING.md explains the setup.
+      - name: Check the update signing key
+        if: steps.version.outputs.release == 'true'
+        env:
+          HAS_SIGNING_KEY: ${{ secrets.DELTOS_UPDATE_KEY != '' }}
+        run: |
+          if [ ! -s packaging/update-key.pub ] || [ -z "$(tr -d '[:space:]' < packaging/update-key.pub)" ]; then
+            echo "::error::packaging/update-key.pub is empty; run deltos-sign keygen and commit the public key (see docs/RELEASING.md)"
+            exit 1
+          fi
+          if [ "$HAS_SIGNING_KEY" != true ]; then
+            echo "::error::The DELTOS_UPDATE_KEY secret is not set (see docs/RELEASING.md)"
+            exit 1
+          fi
+
+  linux:
+    name: Package (Linux)
+    needs: version
+    if: needs.version.outputs.release == 'true'
+    runs-on: ubuntu-22.04
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    # Release builds start from a clean toolchain and no build cache, so nothing from an
+    # earlier run can end up in a package.
+    steps:
+      - uses: actions/checkout@v5
+
+      # desktop-file-utils is for appimagetool, which validates the .desktop file it bundles.
+      - name: Install Linux system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+            libx11-xcb-dev libxcb1-dev libfontconfig-dev libfreetype-dev libvulkan-dev libgbm-dev \
+            libclang-dev desktop-file-utils
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deb,cargo-generate-rpm
+
+      - name: Build
+        run: cargo build --release --locked -p deltos
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          cargo deb -p deltos --no-build --output "dist/deltos_${VERSION}_amd64.deb"
+          cargo generate-rpm -p crates/deltos --output "dist/deltos-${VERSION}-1.x86_64.rpm"
+          root="deltos-${VERSION}-x86_64-linux"
+          mkdir -p "$root/share/applications"
+          install -m 755 target/release/deltos "$root/deltos"
+          install -m 644 packaging/linux/deltos.desktop "$root/share/applications/deltos.desktop"
+          for size in 16 24 32 48 64 128 256 512; do
+            install -D -m 644 "assets/icons/png/deltos-$size.png" "$root/share/icons/hicolor/${size}x${size}/apps/deltos.png"
+          done
+          install -m 644 LICENSE README.md CHANGELOG.md "$root/"
+          tar -czf "dist/$root.tar.gz" "$root"
+          packaging/linux/appimage.sh "$VERSION" target/release/deltos dist
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-linux
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  windows:
+    name: Package (Windows)
+    needs: version
+    if: needs.version.outputs.release == 'true'
+    runs-on: windows-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build
+        run: cargo build --release --locked -p deltos
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
+          if (-not $iscc) { $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress
+            $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          }
+          & $iscc /Qp "/DVersion=$env:VERSION" "/DSource=$PWD\target\release" packaging\windows\deltos.iss
+          if ($LASTEXITCODE -ne 0) { throw "iscc failed with $LASTEXITCODE" }
+          $portable = "deltos-$env:VERSION-x64-windows"
+          New-Item -ItemType Directory -Force $portable | Out-Null
+          Copy-Item target\release\deltos.exe, LICENSE, README.md, CHANGELOG.md $portable
+          Compress-Archive -Path $portable -DestinationPath "dist\$portable.zip"
+          Get-ChildItem dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-windows
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish
+    needs: [version, linux, windows]
+    if: needs.version.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      TAG: ${{ needs.version.outputs.tag }}
+      PRIVATE: ${{ github.event.repository.private }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: packages
+
+      - name: Collect the packages
+        run: |
+          mkdir release
+          find packages -type f -exec mv -n -t release {} +
+          if [ "$(find packages -type f | wc -l)" -ne 0 ]; then
+            echo "::error::Two packages share a file name"
+            exit 1
+          fi
+          for pattern in '*.deb' '*.rpm' '*-linux.tar.gz' '*.AppImage' '*-setup.exe' '*-windows.zip'; do
+            count=$(find release -name "$pattern" | wc -l)
+            if [ "$count" -ne 1 ]; then
+              echo "::error::Expected one $pattern package, found $count"
+              exit 1
+            fi
+          done
+          ls -l release
+
+      - name: Write checksums
+        working-directory: release
+        run: |
+          sha256sum -- * > "$RUNNER_TEMP/SHA256SUMS.txt"
+          mv "$RUNNER_TEMP/SHA256SUMS.txt" .
+          cat SHA256SUMS.txt
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # deltos-sign has no UI dependencies, so it builds here in a minute without system libraries.
+      - name: Build deltos-sign
+        run: cargo build --release --locked -p deltos-updater --bin deltos-sign
+
+      # The manifest names this version and every package with its hash. It is signed with the
+      # private key and then checked against the committed public key: a signature from any other
+      # key would publish an update that every installed copy rejects.
+      - name: Write and sign the update manifest
+        env:
+          DELTOS_UPDATE_KEY: ${{ secrets.DELTOS_UPDATE_KEY }}
+        run: |
+          if [ -z "$(tr -d '[:space:]' < packaging/update-key.pub)" ]; then
+            echo "::error::packaging/update-key.pub is empty (see docs/RELEASING.md)"
+            exit 1
+          fi
+          if [ -z "$DELTOS_UPDATE_KEY" ]; then
+            echo "::error::The DELTOS_UPDATE_KEY secret is not set (see docs/RELEASING.md)"
+            exit 1
+          fi
+          sign=target/release/deltos-sign
+          if [ "$("$sign" public-key | tr -d '[:space:]')" != "$(tr -d '[:space:]' < packaging/update-key.pub)" ]; then
+            echo "::error::The DELTOS_UPDATE_KEY secret does not belong to the public key in packaging/update-key.pub"
+            exit 1
+          fi
+          mkdir updater
+          packages=()
+          for file in release/*; do
+            case "$file" in
+              */SHA256SUMS.txt) ;;
+              *) packages+=("$file") ;;
+            esac
+          done
+          "$sign" manifest \
+            --version "$VERSION" \
+            --notes-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$TAG" \
+            --base-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$TAG" \
+            --output updater/latest.json \
+            "${packages[@]}"
+          "$sign" sign updater/latest.json --output updater/latest.json.sig
+          "$sign" verify updater/latest.json updater/latest.json.sig packaging/update-key.pub
+          if [ "$(jq -r .version updater/latest.json)" != "$VERSION" ]; then
+            echo "::error::latest.json names version $(jq -r .version updater/latest.json), not $VERSION"
+            exit 1
+          fi
+          if [ "$(jq '.assets | length' updater/latest.json)" -ne "${#packages[@]}" ]; then
+            echo "::error::latest.json does not list every package"
+            exit 1
+          fi
+          cat updater/latest.json
+
+      # GitHub records attestations only for public repositories (and private ones on paid
+      # organization plans), so a private repository publishes without them.
+      - name: Attest build provenance
+        if: ${{ !github.event.repository.private }}
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            release/*
+            updater/latest.json
+
+      - name: Extract the changes from CHANGELOG.md
+        run: |
+          awk -v v="$VERSION" '$1 == "##" { if (found) exit; found = ($2 == v); next } found' CHANGELOG.md > changes.md
+
+      - name: Write release notes
+        run: |
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          tree_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/tree/$TAG"
+          {
+            cat changes.md
+            echo
+            echo "## Downloads"
+            echo
+            echo "| File | For | SHA-256 |"
+            echo "| ---- | --- | ------- |"
+            while read -r hash file; do
+              case "$file" in
+                *-setup.exe) kind="Windows setup (recommended for Windows)" ;;
+                *-windows.zip) kind="Windows, portable, no install needed" ;;
+                *.deb) kind="Debian, Ubuntu, Linux Mint" ;;
+                *.rpm) kind="Fedora, RHEL, openSUSE" ;;
+                *.AppImage) kind="Any x86-64 Linux, one file, no install needed" ;;
+                *-linux.tar.gz) kind="Any x86-64 Linux, no root needed" ;;
+                *) kind="" ;;
+              esac
+              echo "| \`$file\` | $kind | \`$hash\` |"
+            done < release/SHA256SUMS.txt
+            echo
+            echo "## Verifying a download"
+            echo
+            echo "\`SHA256SUMS.txt\` lists the SHA-256 checksum of every file above. If the checksum of"
+            echo "your copy matches, it is byte for byte the file published here and was not changed or"
+            echo "corrupted on the way to you."
+            echo
+            echo "On Linux, in the folder with your download and \`SHA256SUMS.txt\`:"
+            echo
+            echo '```sh'
+            echo "sha256sum --check --ignore-missing SHA256SUMS.txt"
+            echo '```'
+            echo
+            echo "On Windows, in PowerShell, then compare the result with the table (letter case does not matter):"
+            echo
+            echo '```powershell'
+            echo "Get-FileHash .\\deltos-${VERSION}-x64-setup.exe -Algorithm SHA256"
+            echo '```'
+            echo
+            if [ "$PRIVATE" != true ]; then
+              echo "Every file also carries a signed build provenance attestation, recorded in a public"
+              echo "transparency log, which proves it was built by this repository's release workflow from"
+              echo "the \`$TAG\` tag and not uploaded by hand. With the [GitHub CLI](https://cli.github.com):"
+              echo
+              echo '```sh'
+              echo "gh attestation verify deltos_${VERSION}_amd64.deb --repo $GITHUB_REPOSITORY"
+              echo '```'
+              echo
+            fi
+            echo "\`latest.json\` describes this release to the in-app updater, and \`latest.json.sig\` is its"
+            echo "Ed25519 signature. Deltos installs an update only when that signature verifies with the key"
+            echo "built into it and the download matches the hash in the manifest."
+            echo
+            echo "Checksums and attestations prove where a file came from and that it is unaltered; they"
+            echo "are not a virus scan. Everything in the packages is built from the source at"
+            echo "[\`$TAG\`]($tree_url) by [this workflow run]($run_url)."
+            echo
+            echo "The Windows builds are not code-signed yet, so SmartScreen may warn about an"
+            echo "unknown publisher. Choose **More info** and then **Run anyway** once the checksum matches."
+          } > notes.md
+          cat notes.md
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          verify=()
+          if [ "$GITHUB_REF_TYPE" = tag ]; then verify=(--verify-tag); fi
+          gh release create "$TAG" release/* updater/latest.json updater/latest.json.sig \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Deltos $VERSION" \
+            --notes-file notes.md \
+            "${verify[@]}"

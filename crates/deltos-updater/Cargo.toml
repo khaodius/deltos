@@ -9,11 +9,25 @@ repository.workspace = true
 authors.workspace = true
 publish.workspace = true
 
+[lib]
+path = "src/lib.rs"
+
+# Signs and verifies the update manifest; the release workflow runs it.
+[[bin]]
+name = "deltos-sign"
+path = "src/bin/deltos-sign.rs"
+
 [dependencies]
-anyhow.workspace = true
+base64 = "0.22"
+ed25519-dalek = { version = "3", default-features = false, features = ["alloc", "fast"] }
+getrandom = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2", "charset"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["fs"] }
+tracing.workspace = true
 
 [lints]
 workspace = true
