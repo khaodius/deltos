@@ -326,6 +326,17 @@ pub struct Filter {
 /// Which rows of an object to read: `limit` rows starting at row `offset` of the object
 /// as sorted and filtered. `raw_where` is a condition in the database's own language,
 /// typed by the person, and is used as given.
+///
+/// Rows come back in a total order: the `sort` columns, then the primary key (or the
+/// database's row identity, such as `ctid`, `rowid` or `_id`) as a tie break, so pages
+/// never overlap or skip rows.
+///
+/// `seek_after` is a hint for reading the page that follows one already read: the values,
+/// by column name, of the order columns (sort columns, then the tie break key) of the row
+/// just before `offset`. A driver that can should then seek by key (`WHERE (a, b) > (..)`)
+/// instead of skipping `offset` rows, which keeps scrolling through a table of any size
+/// as fast at row 50,000,000 as at row 0. A driver that cannot ignores it and uses
+/// `offset`. [`BrowsePage::last_key`] gives the values for the next request.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct BrowseRequest {
     pub offset: u64,
@@ -333,6 +344,7 @@ pub struct BrowseRequest {
     pub sort: Vec<Sort>,
     pub filters: Vec<Filter>,
     pub raw_where: Option<String>,
+    pub seek_after: Option<Vec<(String, Value)>>,
 }
 
 /// A page of rows from [`Connection::browse`].
@@ -342,6 +354,9 @@ pub struct BrowsePage {
     pub rows: Vec<Row>,
     /// Whether rows exist past this page.
     pub more: bool,
+    /// The order column values of the last row, for [`BrowseRequest::seek_after`] of the
+    /// next page. `None` when the driver cannot seek.
+    pub last_key: Option<Vec<(String, Value)>>,
 }
 
 /// One row: a value per column, in column order. Documents are one row per document with
