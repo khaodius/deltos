@@ -522,6 +522,9 @@ impl AppState {
 }
 
 /// Connects on the runtime and returns the connection or an error message.
+/// How long a connection attempt may take before it is given up.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
 pub fn open_connection(
     kind: DriverKind,
     config: ConnectionConfig,
@@ -534,7 +537,15 @@ pub fn open_connection(
                 kind.label()
             ));
         };
-        driver.connect(&config).await.map_err(|e| e.to_string())
+        // Not every driver bounds its own connect: a firewall that drops packets would
+        // otherwise keep the attempt open for minutes.
+        match tokio::time::timeout(CONNECT_TIMEOUT, driver.connect(&config)).await {
+            Ok(result) => result.map_err(|e| e.to_string()),
+            Err(_) => Err(format!(
+                "the server did not answer within {} seconds",
+                CONNECT_TIMEOUT.as_secs()
+            )),
+        }
     });
     async move {
         job.await

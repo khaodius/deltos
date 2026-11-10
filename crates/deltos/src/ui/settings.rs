@@ -1,14 +1,17 @@
 //! Settings, grouped into sections down the left. Every change applies at once and is
 //! written to `settings.toml` a moment later.
 
-use deltos_settings::{DateFormat, Density, KEYBIND_ACTIONS, NullStyle, Settings, ThemeMode};
+use deltos_settings::{
+    Appearance, DateFormat, Density, HeaderStyle, KEYBIND_ACTIONS, NullStyle, Palette, Settings,
+    TabStyle, ThemeMode, TitleBarStyle,
+};
 use gpui::{
     AnyElement, App, AppContext, Context, Div, ElementId, Entity, FontWeight, IntoElement, Render,
     SharedString, Subscription, Window, div, prelude::*, px,
 };
 
 use crate::state::{AppState, StateEvent};
-use crate::theme::{Theme, color, theme};
+use crate::theme::{BUNDLED_MONO_FONTS, BUNDLED_UI_FONTS, Theme, color, colors, theme};
 use crate::ui::icons::{Icon, icon};
 use crate::ui::text_input::{InputEvent, TextInput};
 use crate::ui::{ButtonStyle, MenuItem, button, field, menu, segmented, switch};
@@ -58,16 +61,29 @@ impl Section {
 }
 
 /// Accent presets, as 0xRRGGBB.
-const ACCENTS: [u32; 8] = [
-    0x2F7CF6, 0x7C5CF6, 0xD9467A, 0xE5484D, 0xEE7D2B, 0x2E9F5E, 0x12A0A0, 0x6E6E73,
+const ACCENTS: [u32; 12] = [
+    0x2F7CF6, 0x4F5BD5, 0x7C5CF6, 0xB45AF2, 0xD9467A, 0xE5484D, 0xEE7D2B, 0xD4A20F, 0x2E9F5E,
+    0x12A0A0, 0x0EA5E9, 0x6E6E73,
 ];
+
+/// Accent tint steps: off, subtle, medium, strong.
+const TINTS: [(&str, u32); 4] = [("Off", 0), ("Subtle", 5), ("Medium", 10), ("Strong", 18)];
+
+/// Which font a font menu sets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FontTarget {
+    Ui,
+    Mono,
+    Editor,
+}
 
 pub struct SettingsPanel {
     state: Entity<AppState>,
     section: Section,
-    ui_font: Entity<TextInput>,
-    mono_font: Entity<TextInput>,
-    editor_font: Entity<TextInput>,
+    accent_hex: Entity<TextInput>,
+    font_menu: Option<FontTarget>,
+    /// The system's font families, read when a font menu first opens.
+    system_fonts: Option<Vec<String>>,
     keys: Vec<(&'static str, Entity<TextInput>)>,
     theme_menu: bool,
     _subs: Vec<Subscription>,
@@ -86,9 +102,7 @@ impl SettingsPanel {
                     i
                 })
             };
-        let ui_font = text_input("Inter", s.appearance.ui_font.clone(), cx);
-        let mono_font = text_input("JetBrains Mono", s.appearance.mono_font.clone(), cx);
-        let editor_font = text_input("Same as the grid", s.editor.font.clone(), cx);
+        let accent_hex = text_input("#2F7CF6", Some(format!("#{:06X}", s.appearance.accent)), cx);
         let keys: Vec<_> = KEYBIND_ACTIONS
             .iter()
             .map(|(action, default, _)| {
@@ -103,21 +117,18 @@ impl SettingsPanel {
                 cx.notify();
             }
         })];
-        let font_setter = |which: fn(&mut Settings, Option<String>)| {
-            move |this: &mut Self,
-                  input: Entity<TextInput>,
-                  e: &InputEvent,
-                  cx: &mut Context<Self>| {
-                if let InputEvent::Submit = e {
-                    let text = input.read(cx).text().trim().to_owned();
-                    let value = (!text.is_empty()).then_some(text);
-                    this.set(cx, move |s| which(s, value));
+        // A typed accent applies on Enter; anything that is not a color puts the current
+        // one back.
+        subs.push(cx.subscribe(&accent_hex, |this, input, e, cx| {
+            if matches!(e, InputEvent::Submit | InputEvent::Cancel) {
+                let parsed = deltos_settings::parse_color(input.read(cx).text());
+                if let (InputEvent::Submit, Some(rgba)) = (e, parsed) {
+                    this.set(cx, move |s| s.appearance.accent = rgba >> 8);
                 }
+                let current = this.state.read(cx).settings.appearance.accent;
+                input.update(cx, |i, cx| i.set_text(format!("#{current:06X}"), cx));
             }
-        };
-        subs.push(cx.subscribe(&ui_font, font_setter(|s, v| s.appearance.ui_font = v)));
-        subs.push(cx.subscribe(&mono_font, font_setter(|s, v| s.appearance.mono_font = v)));
-        subs.push(cx.subscribe(&editor_font, font_setter(|s, v| s.editor.font = v)));
+        }));
         for (action, input) in &keys {
             let action = *action;
             subs.push(cx.subscribe(input, move |this, input, e, cx| match e {
@@ -150,9 +161,9 @@ impl SettingsPanel {
         Self {
             state,
             section: Section::Appearance,
-            ui_font,
-            mono_font,
-            editor_font,
+            accent_hex,
+            font_menu: None,
+            system_fonts: None,
             keys,
             theme_menu: false,
             _subs: subs,
@@ -161,6 +172,451 @@ impl SettingsPanel {
 
     fn set(&self, cx: &mut App, f: impl FnOnce(&mut Settings)) {
         self.state.update(cx, |s, cx| s.update_settings(cx, f));
+    }
+
+    /// The font picker for one setting: the fonts Deltos ships first, then the system's.
+    fn font_picker(
+        &mut self,
+        target: FontTarget,
+        current: Option<String>,
+        t: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (bundled, default): (&[&str], &str) = match target {
+            FontTarget::Ui => (&BUNDLED_UI_FONTS, BUNDLED_UI_FONTS[0]),
+            FontTarget::Mono => (&BUNDLED_MONO_FONTS, BUNDLED_MONO_FONTS[0]),
+            FontTarget::Editor => (&BUNDLED_MONO_FONTS, "Same as the grid"),
+        };
+        let shown: SharedString = current.clone().unwrap_or_else(|| default.into()).into();
+        let id: &'static str = match target {
+            FontTarget::Ui => "font-ui",
+            FontTarget::Mono => "font-mono",
+            FontTarget::Editor => "font-editor",
+        };
+        let family = match target {
+            FontTarget::Ui => t.ui_font.clone(),
+            FontTarget::Mono => t.mono_font.clone(),
+            FontTarget::Editor => t.editor_font.clone(),
+        };
+        let mut picker = div()
+            .id(id)
+            .relative()
+            .w(px(200.))
+            .h(t.s(26.))
+            .px(px(8.))
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(8.))
+            .rounded(t.radius_small)
+            .bg(t.input)
+            .border_1()
+            .border_color(t.border_strong)
+            .cursor_pointer()
+            .child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .font_family(family)
+                    .child(shown),
+            )
+            .child(
+                icon(Icon::ChevronDown)
+                    .size(px(12.))
+                    .text_color(t.text_faint),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if this.system_fonts.is_none() {
+                    let mut names = cx.text_system().all_font_names();
+                    names.sort_by_key(|n| n.to_lowercase());
+                    names.dedup();
+                    this.system_fonts = Some(names);
+                }
+                this.font_menu = Some(target);
+                cx.notify();
+            }));
+        if self.font_menu == Some(target) {
+            let weak = cx.entity().downgrade();
+            let choose = |value: Option<String>| {
+                let w = weak.clone();
+                move |_: &mut Window, cx: &mut App| {
+                    let value = value.clone();
+                    w.update(cx, |this, cx| {
+                        this.set(cx, move |s| match target {
+                            FontTarget::Ui => s.appearance.ui_font = value,
+                            FontTarget::Mono => s.appearance.mono_font = value,
+                            FontTarget::Editor => s.editor.font = value,
+                        })
+                    })
+                    .ok();
+                }
+            };
+            let mut items = Vec::new();
+            if target == FontTarget::Editor {
+                items.push(
+                    MenuItem::new("Same as the grid", choose(None)).checked(current.is_none()),
+                );
+            }
+            for (i, name) in bundled.iter().enumerate() {
+                // The first bundled font is the default, kept as no setting at all.
+                let value = (target == FontTarget::Editor || i > 0).then(|| (*name).to_owned());
+                let checked = match (&current, &value) {
+                    (None, None) => true,
+                    (Some(c), _) => c == name,
+                    _ => false,
+                };
+                items.push(
+                    MenuItem::new(*name, choose(value))
+                        .checked(checked)
+                        .detail("built in"),
+                );
+            }
+            for name in self.system_fonts.iter().flatten() {
+                if bundled.contains(&name.as_str()) || name.starts_with('.') {
+                    continue;
+                }
+                items.push(
+                    MenuItem::new(name.clone(), choose(Some(name.clone())))
+                        .checked(current.as_deref() == Some(name.as_str())),
+                );
+            }
+            let close = weak.clone();
+            picker = picker.child(menu(
+                ("font-menu", target as usize),
+                items,
+                220.,
+                move |_, cx| {
+                    close
+                        .update(cx, |this, cx| {
+                            this.font_menu = None;
+                            cx.notify();
+                        })
+                        .ok();
+                },
+                t,
+            ));
+        }
+        picker.into_any_element()
+    }
+
+    /// One tile per palette on one side, each a small picture of the window in it.
+    fn palette_tiles(
+        &self,
+        dark: bool,
+        current: Palette,
+        t: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let accent = t.accent;
+        let list: &[Palette] = if dark {
+            &Palette::DARK
+        } else {
+            &Palette::LIGHT
+        };
+        let mut row = div().flex().flex_wrap().gap(px(8.));
+        for (i, palette) in list.iter().copied().enumerate() {
+            let c = colors(palette);
+            let on = palette == current;
+            let w = cx.entity().downgrade();
+            row = row.child(
+                div()
+                    .id((if dark { "pal-dark" } else { "pal-light" }, i))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap(px(4.))
+                    .cursor_pointer()
+                    .on_click(move |_, _, cx| {
+                        w.update(cx, |this, cx| {
+                            this.set(cx, move |s| {
+                                if dark {
+                                    s.appearance.dark_palette = palette;
+                                } else {
+                                    s.appearance.light_palette = palette;
+                                }
+                            })
+                        })
+                        .ok();
+                    })
+                    .child(
+                        div()
+                            .w(px(66.))
+                            .h(px(44.))
+                            .rounded(px(6.))
+                            .overflow_hidden()
+                            .border_2()
+                            .border_color(if on { accent } else { color(c.border) })
+                            .bg(color(c.base))
+                            .flex()
+                            .flex_col()
+                            .child(div().h(px(7.)).bg(color(c.title_bar)))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .flex()
+                                    .child(div().w(px(16.)).h_full().bg(color(c.sidebar)))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .h_full()
+                                            .bg(color(c.surface))
+                                            .p(px(4.))
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(3.))
+                                            .child(
+                                                div()
+                                                    .w(px(26.))
+                                                    .h(px(3.))
+                                                    .rounded(px(1.))
+                                                    .bg(color(c.text)),
+                                            )
+                                            .child(
+                                                div()
+                                                    .w(px(18.))
+                                                    .h(px(3.))
+                                                    .rounded(px(1.))
+                                                    .bg(color(c.text_muted)),
+                                            )
+                                            .child(
+                                                div()
+                                                    .w(px(12.))
+                                                    .h(px(3.))
+                                                    .rounded(px(1.))
+                                                    .bg(accent),
+                                            ),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_size(t.small_size)
+                            .text_color(if on { t.text } else { t.text_muted })
+                            .child(palette.label()),
+                    ),
+            );
+        }
+        row.into_any_element()
+    }
+
+    /// A small picture of the window in the current settings, so each change shows at
+    /// once without leaving the page.
+    fn preview(&self, a: &Appearance, t: &Theme) -> AnyElement {
+        let bar = div()
+            .h(t.s(22.))
+            .px(px(8.))
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .bg(t.title_bar)
+            .border_b_1()
+            .border_color(t.border)
+            .when_some(t.title_bar_line, |el, line| {
+                el.border_b_2().border_color(line)
+            })
+            .child(icon(Icon::Logo).size(px(11.)).text_color(t.accent))
+            .child(
+                div()
+                    .text_size(t.small_size)
+                    .text_color(t.text_muted)
+                    .child("Deltos"),
+            )
+            .child(div().flex_1())
+            .child(div().size(px(7.)).rounded_full().bg(t.text_faint))
+            .child(div().size(px(7.)).rounded_full().bg(t.text_faint))
+            .child(div().size(px(7.)).rounded_full().bg(t.danger));
+        let tab = |label: &'static str, active: bool| {
+            let el = div()
+                .px(px(10.))
+                .flex()
+                .items_center()
+                .gap(px(5.))
+                .text_size(t.small_size)
+                .text_color(if active { t.text } else { t.text_muted })
+                .child(icon(Icon::Table).size(px(11.)).text_color(if active {
+                    t.accent
+                } else {
+                    t.text_faint
+                }))
+                .child(label);
+            match (t.tab_style, active) {
+                (TabStyle::Card, true) => el
+                    .h_full()
+                    .bg(t.surface)
+                    .border_r_1()
+                    .border_color(t.border),
+                (TabStyle::Card, false) => el.h_full().border_r_1().border_color(t.border),
+                (TabStyle::Underline, true) => el.h_full().border_b_2().border_color(t.accent),
+                (TabStyle::Underline, false) => el.h_full(),
+                (TabStyle::Pill, true) => {
+                    el.h(t.s(18.)).mx(px(2.)).rounded(t.radius).bg(t.selected)
+                }
+                (TabStyle::Pill, false) => el.h(t.s(18.)).mx(px(2.)),
+            }
+        };
+        let tabs = div()
+            .h(t.s(24.))
+            .flex()
+            .items_center()
+            .bg(t.base)
+            .border_b_1()
+            .border_color(t.border)
+            .child(tab("orders", true))
+            .child(tab("customers", false));
+        let rows: [[&str; 3]; 4] = [
+            ["1001", "Ada Lovelace", "2024-03-09"],
+            ["1002", "Grace Hopper", ""],
+            ["1003", "Edsger Dijkstra", "2024-03-11"],
+            ["1004", "Barbara Liskov", "2024-03-12"],
+        ];
+        let cell = |text: SharedString, w: f32, numeric: bool, color: gpui::Hsla| {
+            div()
+                .w(px(w))
+                .h_full()
+                .px(px(6.))
+                .flex()
+                .items_center()
+                .when(numeric, |el| el.justify_end())
+                .when(t.grid_lines, |el| el.border_r_1().border_color(t.grid_line))
+                .text_color(color)
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .child(text)
+        };
+        let widths = [52., 132., 96.];
+        let mut header = div()
+            .h(t.row_height)
+            .flex()
+            .bg(t.grid_header)
+            .border_b_1()
+            .border_color(t.border)
+            .text_size(t.small_size)
+            .font_weight(t.header_weight());
+        for (name, w) in ["id", "name", "joined"].iter().zip(widths) {
+            header = header.child(cell(t.header_text(name), w, *name == "id", t.text_muted));
+        }
+        let mut grid = div()
+            .flex()
+            .flex_col()
+            .font_family(t.mono_font.clone())
+            .text_size(t.mono_size)
+            .child(header);
+        for (i, r) in rows.iter().enumerate() {
+            let selected = i == 2;
+            let mut line = div()
+                .h(t.row_height)
+                .flex()
+                .when(t.zebra && i % 2 == 1, |el| el.bg(t.surface_alt))
+                .when(selected, |el| el.bg(t.selected_row))
+                .when(t.grid_lines, |el| el.border_b_1().border_color(t.grid_line));
+            for (j, (v, w)) in r.iter().zip(widths).enumerate() {
+                let (text, c): (SharedString, _) = if v.is_empty() {
+                    (t.null_text.into(), t.text_faint)
+                } else {
+                    ((*v).into(), t.text)
+                };
+                line = line.child(cell(text, w, j == 0, c));
+            }
+            grid = grid.child(line);
+        }
+        let sidebar = div()
+            .w(px(104.))
+            .h_full()
+            .flex_none()
+            .bg(t.sidebar)
+            .border_r_1()
+            .border_color(t.border)
+            .p(px(4.))
+            .flex()
+            .flex_col()
+            .gap(px(1.))
+            .text_size(t.small_size)
+            .children(["customers", "orders", "products"].iter().map(|name| {
+                let on = *name == "orders";
+                div()
+                    .h(t.list_row)
+                    .px(px(6.))
+                    .flex()
+                    .items_center()
+                    .gap(px(5.))
+                    .rounded(t.radius_small)
+                    .when(on, |el| el.bg(t.selected))
+                    .text_color(if on { t.text } else { t.text_muted })
+                    .child(icon(Icon::Table).size(px(11.)).text_color(if on {
+                        t.accent
+                    } else {
+                        t.text_faint
+                    }))
+                    .child(*name)
+            }));
+        let footer = div()
+            .px(px(8.))
+            .py(px(6.))
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .border_t_1()
+            .border_color(t.border)
+            .child(
+                div()
+                    .h(t.s(20.))
+                    .px(px(8.))
+                    .flex()
+                    .items_center()
+                    .rounded(t.radius_small)
+                    .bg(t.accent)
+                    .text_color(t.accent_text)
+                    .text_size(t.small_size)
+                    .child("Run"),
+            )
+            .child(
+                div()
+                    .font_family(t.editor_font.clone())
+                    .text_size(t.small_size)
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(4.))
+                            .child(div().text_color(t.syntax_keyword).child("SELECT"))
+                            .child(div().text_color(t.text).child("*"))
+                            .child(div().text_color(t.syntax_keyword).child("FROM"))
+                            .child(div().text_color(t.text).child("orders"))
+                            .child(div().text_color(t.syntax_keyword).child("LIMIT"))
+                            .child(div().text_color(t.syntax_number).child("50")),
+                    ),
+            );
+        div()
+            .mb(px(18.))
+            .rounded(t.radius)
+            .overflow_hidden()
+            .border_1()
+            .border_color(t.border_strong)
+            .bg(t.base)
+            .when(a.window_opacity < 0.999, |el| {
+                el.opacity(a.window_opacity.max(0.5))
+            })
+            .font_family(t.ui_font.clone())
+            .child(bar)
+            .child(
+                div()
+                    .h(t.row_height * 5. + t.s(24.))
+                    .flex()
+                    .child(sidebar)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .bg(t.surface)
+                            .child(tabs)
+                            .child(grid),
+                    ),
+            )
+            .child(div().bg(t.surface).child(footer))
+            .into_any_element()
     }
 
     fn appearance(&mut self, t: &Theme, window: &Window, cx: &mut Context<Self>) -> Div {
@@ -178,6 +634,9 @@ impl SettingsPanel {
         let densities: Vec<_> = Density::ALL.iter().map(|d| (d.label(), *d)).collect();
         let nulls: Vec<_> = NullStyle::ALL.iter().map(|n| (n.label(), *n)).collect();
         let dates: Vec<_> = DateFormat::ALL.iter().map(|d| (d.label(), *d)).collect();
+        let bars: Vec<_> = TitleBarStyle::ALL.iter().map(|b| (b.label(), *b)).collect();
+        let tabs: Vec<_> = TabStyle::ALL.iter().map(|b| (b.label(), *b)).collect();
+        let headers: Vec<_> = HeaderStyle::ALL.iter().map(|b| (b.label(), *b)).collect();
         let state = self.state.clone();
         let theme_control = {
             let current: SharedString = a
@@ -260,10 +719,11 @@ impl SettingsPanel {
             }
             picker
         };
-        let mut swatches = div().flex().gap(px(6.));
+        let mut swatches = div().flex().flex_wrap().gap(px(6.)).max_w(px(240.));
         for (i, c) in ACCENTS.iter().copied().enumerate() {
             let selected = a.accent == c;
             let w = cx.entity().downgrade();
+            let hex = self.accent_hex.clone();
             swatches = swatches.child(
                 div()
                     .id(("accent", i))
@@ -278,16 +738,46 @@ impl SettingsPanel {
                         gpui::transparent_black()
                     })
                     .on_click(move |_, _, cx| {
+                        hex.update(cx, |i, cx| i.set_text(format!("#{c:06X}"), cx));
                         w.update(cx, |this, cx| this.set(cx, |s| s.appearance.accent = c))
                             .ok();
                     }),
             );
         }
-        let s1 = state.clone();
-        let s2 = state.clone();
-        let s3 = state.clone();
-        let s4 = state.clone();
+        let accent_control = div()
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .child(swatches)
+            .child(
+                div()
+                    .w(px(84.))
+                    .child(field(&self.accent_hex, t, window, cx)),
+            );
+        let tint_now = (a.accent_tint * 100.0).round() as u32;
+        let tint_current = TINTS
+            .iter()
+            .map(|(_, v)| *v)
+            .min_by_key(|v| v.abs_diff(tint_now))
+            .unwrap_or(0);
+        let ui_picker = self.font_picker(FontTarget::Ui, a.ui_font.clone(), t, cx);
+        let mono_picker = self.font_picker(FontTarget::Mono, a.mono_font.clone(), t, cx);
+        let light_tiles = self.palette_tiles(false, a.light_palette, t, cx);
+        let dark_tiles = self.palette_tiles(true, a.dark_palette, t, cx);
+        let preview = self.preview(&a, t);
+        let (s1, s2, s3, s4, s5, s6, s7, s8) = (
+            state.clone(),
+            state.clone(),
+            state.clone(),
+            state.clone(),
+            state.clone(),
+            state.clone(),
+            state.clone(),
+            state.clone(),
+        );
+        let hex_reset = self.accent_hex.clone();
         group("Theme", t)
+            .child(preview)
             .child(row(
                 "Appearance",
                 Some("Follow the system, or always light or dark."),
@@ -305,13 +795,81 @@ impl SettingsPanel {
                 .into_any_element(),
                 t,
             ))
+            .child(stacked_row(
+                "Light palette",
+                Some("Used in light mode."),
+                light_tiles,
+                t,
+            ))
+            .child(stacked_row(
+                "Dark palette",
+                Some("Used in dark mode."),
+                dark_tiles,
+                t,
+            ))
+            .child(row(
+                "Accent",
+                Some("Pick one, or type a hex color and press Enter."),
+                accent_control.into_any_element(),
+                t,
+            ))
+            .child(row(
+                "Accent tint",
+                Some("Washes the accent into the window's surfaces."),
+                segmented(
+                    "tint",
+                    &TINTS,
+                    tint_current,
+                    move |v, _, cx| {
+                        s5.update(cx, |s, cx| {
+                            s.update_settings(cx, |st| st.appearance.accent_tint = v as f32 / 100.0)
+                        })
+                    },
+                    t,
+                )
+                .into_any_element(),
+                t,
+            ))
+            .child(row(
+                "Title bar",
+                None,
+                segmented(
+                    "bar-style",
+                    &bars,
+                    a.title_bar_style,
+                    move |v, _, cx| {
+                        s6.update(cx, |s, cx| {
+                            s.update_settings(cx, |st| st.appearance.title_bar_style = v)
+                        })
+                    },
+                    t,
+                )
+                .into_any_element(),
+                t,
+            ))
+            .child(row(
+                "Tabs",
+                None,
+                segmented(
+                    "tab-style",
+                    &tabs,
+                    a.tab_style,
+                    move |v, _, cx| {
+                        s7.update(cx, |s, cx| {
+                            s.update_settings(cx, |st| st.appearance.tab_style = v)
+                        })
+                    },
+                    t,
+                )
+                .into_any_element(),
+                t,
+            ))
             .child(row(
                 "Theme file",
-                Some("Colors from a .toml file in the themes folder, over the light or dark base."),
+                Some("Colors from a .toml file in the themes folder, over the palette."),
                 theme_control.into_any_element(),
                 t,
             ))
-            .child(row("Accent", None, swatches.into_any_element(), t))
             .child(toggle_row(
                 "Window title bar",
                 Some("Draw Deltos' own title bar instead of the system's."),
@@ -345,12 +903,7 @@ impl SettingsPanel {
                 ),
                 t,
             ))
-            .child(row(
-                "Interface font",
-                Some("Empty for Inter."),
-                font_field(&self.ui_font, t, window, cx),
-                t,
-            ))
+            .child(row("Interface font", None, ui_picker, t))
             .child(row(
                 "Interface size",
                 None,
@@ -363,12 +916,7 @@ impl SettingsPanel {
                 ),
                 t,
             ))
-            .child(row(
-                "Grid font",
-                Some("Empty for JetBrains Mono."),
-                font_field(&self.mono_font, t, window, cx),
-                t,
-            ))
+            .child(row("Grid font", None, mono_picker, t))
             .child(row(
                 "Grid size",
                 None,
@@ -379,6 +927,13 @@ impl SettingsPanel {
                     pick(|s| s.appearance.mono_font_size += 1.0),
                     t,
                 ),
+                t,
+            ))
+            .child(toggle_row(
+                "High contrast text",
+                Some("Brighter secondary text and labels."),
+                ("contrast-text", a.high_contrast),
+                pick(|s| s.appearance.high_contrast = !s.appearance.high_contrast),
                 t,
             ))
             .child(gap())
@@ -393,6 +948,23 @@ impl SettingsPanel {
                     move |d, _, cx| {
                         s2.update(cx, |s, cx| {
                             s.update_settings(cx, |st| st.appearance.density = d)
+                        })
+                    },
+                    t,
+                )
+                .into_any_element(),
+                t,
+            ))
+            .child(row(
+                "Column headers",
+                None,
+                segmented(
+                    "header-style",
+                    &headers,
+                    a.header_style,
+                    move |v, _, cx| {
+                        s8.update(cx, |s, cx| {
+                            s.update_settings(cx, |st| st.appearance.header_style = v)
                         })
                     },
                     t,
@@ -479,6 +1051,29 @@ impl SettingsPanel {
                 pick(|s| s.appearance.sidebar_row_counts = !s.appearance.sidebar_row_counts),
                 t,
             ))
+            .child(
+                div().pt(px(14.)).child(
+                    button(
+                        "appearance-reset",
+                        "Restore default appearance",
+                        ButtonStyle::Secondary,
+                        t,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.set(cx, |s| {
+                            // The title bar setting is about the window, not the look, so
+                            // it stays as the person set it.
+                            let own_bar = s.appearance.custom_title_bar;
+                            s.appearance = Appearance {
+                                custom_title_bar: own_bar,
+                                ..Appearance::default()
+                            };
+                        });
+                        let accent = Appearance::default().accent;
+                        hex_reset.update(cx, |i, cx| i.set_text(format!("#{accent:06X}"), cx));
+                    })),
+                ),
+            )
     }
 
     fn data(&mut self, t: &Theme, cx: &mut Context<Self>) -> Div {
@@ -599,8 +1194,9 @@ impl SettingsPanel {
             ))
     }
 
-    fn editor(&mut self, t: &Theme, window: &Window, cx: &mut Context<Self>) -> Div {
+    fn editor(&mut self, t: &Theme, cx: &mut Context<Self>) -> Div {
         let e = self.state.read(cx).settings.editor.clone();
+        let editor_picker = self.font_picker(FontTarget::Editor, e.font.clone(), t, cx);
         let w = cx.entity().downgrade();
         let pick = move |f: fn(&mut Settings)| {
             let w = w.clone();
@@ -609,12 +1205,7 @@ impl SettingsPanel {
             }
         };
         group("Editor", t)
-            .child(row(
-                "Font",
-                Some("Empty for the grid font."),
-                font_field(&self.editor_font, t, window, cx),
-                t,
-            ))
+            .child(row("Font", None, editor_picker, t))
             .child(row(
                 "Font size",
                 None,
@@ -986,6 +1577,37 @@ fn row(label: &'static str, detail: Option<&'static str>, control: AnyElement, t
         .child(div().flex_none().child(control))
 }
 
+/// A setting whose control is too wide for the right side: the name above, the control
+/// below.
+fn stacked_row(
+    label: &'static str,
+    detail: Option<&'static str>,
+    control: AnyElement,
+    t: &Theme,
+) -> Div {
+    div()
+        .py(px(10.))
+        .flex()
+        .flex_col()
+        .gap(px(8.))
+        .border_b_1()
+        .border_color(t.grid_line)
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(1.))
+                .child(div().text_size(t.ui_size).text_color(t.text).child(label))
+                .children(detail.map(|d| {
+                    div()
+                        .text_size(t.small_size)
+                        .text_color(t.text_faint)
+                        .child(d)
+                })),
+        )
+        .child(control)
+}
+
 fn toggle_row(
     label: &'static str,
     detail: Option<&'static str>,
@@ -1051,13 +1673,6 @@ fn stepper(
         .into_any_element()
 }
 
-fn font_field(input: &Entity<TextInput>, t: &Theme, window: &Window, cx: &App) -> AnyElement {
-    div()
-        .w(px(200.))
-        .child(field(input, t, window, cx))
-        .into_any_element()
-}
-
 impl Render for SettingsPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx).clone();
@@ -1105,7 +1720,7 @@ impl Render for SettingsPanel {
         let body = match self.section {
             Section::Appearance => self.appearance(&t, window, cx),
             Section::Data => self.data(&t, cx),
-            Section::Editor => self.editor(&t, window, cx),
+            Section::Editor => self.editor(&t, cx),
             Section::Updates => self.updates(&t, cx),
             Section::Keybindings => self.keybindings(&t, window, cx),
             Section::About => self.about(&t, cx),

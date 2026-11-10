@@ -614,10 +614,16 @@ impl TablePanel {
                 .border_b_1()
                 .border_color(t.border)
                 .text_size(t.small_size)
-                .font_weight(FontWeight::SEMIBOLD)
+                .font_weight(t.header_weight())
                 .text_color(t.text_muted);
             for (label, w) in cells {
-                row = row.child(div().w(px(*w)).px(px(8.)).flex_none().child(*label));
+                row = row.child(
+                    div()
+                        .w(px(*w))
+                        .px(px(8.))
+                        .flex_none()
+                        .child(t.header_text(label)),
+                );
             }
             row
         };

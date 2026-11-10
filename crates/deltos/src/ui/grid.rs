@@ -23,9 +23,8 @@ use deltos_settings::DateFormat;
 use futures::StreamExt;
 use gpui::{
     App, BorderStyle, Bounds, ClipboardItem, Context, ElementId, EventEmitter, FocusHandle,
-    Focusable, FontWeight, Hsla, IntoElement, KeyBinding, MouseButton, Pixels, Point, Render,
-    SharedString, Task, TextRun, Window, actions, canvas, div, fill, outline, point, prelude::*,
-    px, size,
+    Focusable, Hsla, IntoElement, KeyBinding, MouseButton, Pixels, Point, Render, SharedString,
+    Task, TextRun, Window, actions, canvas, div, fill, outline, point, prelude::*, px, size,
 };
 
 use crate::net::Net;
@@ -669,7 +668,7 @@ impl GridView {
                     .border_r_1()
                     .border_color(t.grid_line)
                     .text_size(t.small_size)
-                    .font_weight(FontWeight::SEMIBOLD)
+                    .font_weight(t.header_weight())
                     .text_color(t.text_muted)
                     .cursor_pointer()
                     .hover(|s| s.bg(t.hover))
@@ -683,7 +682,7 @@ impl GridView {
                             .overflow_hidden()
                             .whitespace_nowrap()
                             .text_ellipsis()
-                            .child(SharedString::from(column.name.clone())),
+                            .child(t.header_text(&column.name)),
                     )
                     .when_some(sorted, |el, d| {
                         el.child(

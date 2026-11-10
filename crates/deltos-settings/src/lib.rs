@@ -168,6 +168,137 @@ impl DateFormat {
     }
 }
 
+/// A color scheme. Light ones are offered for light mode and dark ones for dark mode, so
+/// following the system switches between the two the person picked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Palette {
+    /// Neutral light gray.
+    Classic,
+    /// Warm off-white.
+    Paper,
+    /// Cool blue-gray.
+    Frost,
+    /// Soft green-gray.
+    Sage,
+    /// Neutral dark gray.
+    Graphite,
+    /// Deep blue-black.
+    Midnight,
+    /// Warm brown-black.
+    Ember,
+    /// Green-black.
+    Forest,
+    /// Violet-black.
+    Plum,
+    /// Pure black, for OLED screens.
+    Obsidian,
+}
+
+impl Palette {
+    pub const LIGHT: [Self; 4] = [Self::Classic, Self::Paper, Self::Frost, Self::Sage];
+    pub const DARK: [Self; 6] = [
+        Self::Graphite,
+        Self::Midnight,
+        Self::Ember,
+        Self::Forest,
+        Self::Plum,
+        Self::Obsidian,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Classic => "Classic",
+            Self::Paper => "Paper",
+            Self::Frost => "Frost",
+            Self::Sage => "Sage",
+            Self::Graphite => "Graphite",
+            Self::Midnight => "Midnight",
+            Self::Ember => "Ember",
+            Self::Forest => "Forest",
+            Self::Plum => "Plum",
+            Self::Obsidian => "Obsidian",
+        }
+    }
+
+    pub const fn is_dark(self) -> bool {
+        !matches!(self, Self::Classic | Self::Paper | Self::Frost | Self::Sage)
+    }
+}
+
+/// How the title bar stands apart from the window below it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TitleBarStyle {
+    /// The palette's own bar color.
+    #[default]
+    Plain,
+    /// The bar is washed with the accent color.
+    Tinted,
+    /// A plain bar with an accent line along its bottom edge.
+    Line,
+}
+
+impl TitleBarStyle {
+    pub const ALL: [Self; 3] = [Self::Plain, Self::Tinted, Self::Line];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Plain => "Plain",
+            Self::Tinted => "Tinted",
+            Self::Line => "Accent line",
+        }
+    }
+}
+
+/// How the tabs of a panel stack are drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TabStyle {
+    /// The active tab is a raised card joined to the panel below it.
+    #[default]
+    Card,
+    /// Flat tabs; the active one is underlined in the accent color.
+    Underline,
+    /// The active tab is a rounded pill.
+    Pill,
+}
+
+impl TabStyle {
+    pub const ALL: [Self; 3] = [Self::Card, Self::Underline, Self::Pill];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Card => "Card",
+            Self::Underline => "Underline",
+            Self::Pill => "Pill",
+        }
+    }
+}
+
+/// How grid column headers are lettered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HeaderStyle {
+    #[default]
+    Bold,
+    Regular,
+    /// Capitals, as many dashboards letter them.
+    Caps,
+}
+
+impl HeaderStyle {
+    pub const ALL: [Self; 3] = [Self::Bold, Self::Regular, Self::Caps];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Bold => "Bold",
+            Self::Regular => "Regular",
+            Self::Caps => "CAPS",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Appearance {
@@ -177,11 +308,22 @@ pub struct Appearance {
     pub custom_theme: Option<String>,
     /// Accent color as 0xRRGGBB: selection, focus rings, the primary button.
     pub accent: u32,
-    /// Interface font family. `None` is Inter, which ships with the app.
+    /// The scheme used in light mode. Must be a light palette.
+    pub light_palette: Palette,
+    /// The scheme used in dark mode. Must be a dark palette.
+    pub dark_palette: Palette,
+    /// How much of the accent color washes into the window's surfaces, 0 to 0.3.
+    pub accent_tint: f32,
+    pub title_bar_style: TitleBarStyle,
+    pub tab_style: TabStyle,
+    pub header_style: HeaderStyle,
+    /// Brighter secondary text, for low-contrast screens and tired eyes.
+    pub high_contrast: bool,
+    /// Interface font family. `None` is Adwaita Sans, which ships with the app.
     pub ui_font: Option<String>,
     /// Interface font size in pixels, 11 to 16.
     pub ui_font_size: f32,
-    /// Grid and code font family. `None` is JetBrains Mono, which ships with the app.
+    /// Grid and code font family. `None` is Go Mono, which ships with the app.
     pub mono_font: Option<String>,
     /// Grid font size in pixels, 10 to 18.
     pub mono_font_size: f32,
@@ -216,6 +358,13 @@ impl Default for Appearance {
             theme: ThemeMode::System,
             custom_theme: None,
             accent: 0x2F7CF6,
+            light_palette: Palette::Classic,
+            dark_palette: Palette::Graphite,
+            accent_tint: 0.0,
+            title_bar_style: TitleBarStyle::Plain,
+            tab_style: TabStyle::Card,
+            header_style: HeaderStyle::Bold,
+            high_contrast: false,
             ui_font: None,
             ui_font_size: 13.0,
             mono_font: None,
@@ -490,6 +639,13 @@ impl Settings {
         let a = &mut self.appearance;
         let d = Appearance::default();
         a.accent &= 0xFF_FFFF;
+        a.accent_tint = finite_or(a.accent_tint, d.accent_tint).clamp(0.0, 0.3);
+        if a.light_palette.is_dark() {
+            a.light_palette = d.light_palette;
+        }
+        if !a.dark_palette.is_dark() {
+            a.dark_palette = d.dark_palette;
+        }
         a.zebra_color = a.zebra_color.map(|c| c & 0xFF_FFFF);
         a.ui_font_size = finite_or(a.ui_font_size, d.ui_font_size).clamp(11.0, 16.0);
         a.mono_font_size = finite_or(a.mono_font_size, d.mono_font_size).clamp(10.0, 18.0);
