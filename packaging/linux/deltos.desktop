@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Deltos
+GenericName=Database Client
+Comment=A fast, native database client
+Exec=deltos %U
+Icon=deltos
+Terminal=false
+Categories=Development;Database;
+Keywords=database;sql;postgres;postgresql;mysql;mariadb;sqlite;mongodb;query;table;
+StartupWMClass=deltos
+StartupNotify=true

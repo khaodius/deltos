@@ -1,0 +1,49 @@
+[package]
+name = "deltos-drivers"
+description = "Database drivers for Deltos"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[features]
+default = ["postgres", "mysql", "sqlite", "mongodb"]
+postgres = ["dep:tokio-postgres", "dep:tokio-postgres-rustls", "dep:bytes", "tls"]
+mysql = ["dep:mysql_async"]
+sqlite = ["dep:rusqlite"]
+mongodb = ["dep:mongodb", "dep:bson"]
+# Shared rustls setup. Every driver uses the ring provider, which builds with a plain C
+# compiler on Linux, macOS and Windows MSVC and needs no system OpenSSL.
+tls = ["dep:rustls", "dep:rustls-native-certs", "dep:webpki-roots"]
+
+[dependencies]
+deltos-data.workspace = true
+futures.workspace = true
+percent-encoding = "2"
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+tokio-postgres = { version = "0.7.16", optional = true }
+bytes = { version = "1", optional = true }
+tokio-postgres-rustls = { version = "0.14", optional = true }
+rustls = { version = "0.23.20", optional = true, default-features = false, features = ["ring", "std", "tls12"] }
+rustls-native-certs = { version = "0.8", optional = true }
+webpki-roots = { version = "1", optional = true }
+
+mysql_async = { version = "0.37", optional = true, default-features = false, features = ["minimal-rust", "rustls-tls", "ring", "tls12"] }
+
+# 0.41 needs Rust 1.89.
+rusqlite = { version = "0.40", optional = true, default-features = false, features = ["bundled", "column_decltype"] }
+
+mongodb = { version = "3.10", optional = true, default-features = false, features = ["compat-3-3-0", "bson-3", "rustls-tls", "dns-resolver"] }
+bson = { version = "3.1", optional = true, features = ["serde_json-1"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+
+[lints]
+workspace = true
