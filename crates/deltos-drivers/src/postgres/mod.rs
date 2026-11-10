@@ -32,6 +32,7 @@ use tokio_postgres_rustls::MakeRustlsConnect;
 use crate::sql::{self, Dialect};
 use crate::{runtime, tls, util};
 
+mod cancel;
 mod decode;
 mod introspect;
 
@@ -100,6 +101,8 @@ enum Role {
 struct Session {
     client: Client,
     cancel: CancelToken,
+    /// Where cancel requests go, when they can wait for the server (see [`cancel`]).
+    cancel_target: Option<cancel::Target>,
     notices: Arc<Mutex<Vec<String>>>,
     /// Held for each operation, so statements on a session never interleave.
     lock: Arc<tokio::sync::Mutex<()>>,
@@ -235,6 +238,7 @@ impl Session {
         });
         Ok(Session {
             cancel: client.cancel_token(),
+            cancel_target: cancel::Target::of(config),
             client,
             notices,
             lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -273,7 +277,7 @@ impl Session {
     }
 
     async fn send_cancel(&self, tls: &MakeRustlsConnect) {
-        if let Err(e) = self.cancel.cancel_query(tls.clone()).await {
+        if let Err(e) = cancel::cancel(&self.cancel, self.cancel_target.as_ref(), tls).await {
             tracing::debug!("could not cancel a PostgreSQL statement: {e}");
         }
     }
@@ -507,11 +511,8 @@ impl CancelHandle for Cancel {
             for session in inner.sessions() {
                 // Idle sessions are left alone.
                 if session.is_busy() {
-                    session
-                        .cancel
-                        .cancel_query(inner.tls.clone())
-                        .await
-                        .map_err(pg_error)?;
+                    cancel::cancel(&session.cancel, session.cancel_target.as_ref(), &inner.tls)
+                        .await?;
                 }
             }
             Ok(())

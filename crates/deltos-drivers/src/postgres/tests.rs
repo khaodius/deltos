@@ -271,9 +271,9 @@ async fn streams_and_cancels() {
     assert!(started.elapsed() < Duration::from_secs(20));
 
     let cancel = conn.cancel_handle().expect("cancel");
-    tokio::spawn(async move {
+    let cancelling = tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(300)).await;
-        let _ = cancel.cancel().await;
+        cancel.cancel().await
     });
     let result = conn.execute("SELECT pg_sleep(30)", &options).await;
     let error = match result {
@@ -281,6 +281,8 @@ async fn streams_and_cancels() {
         Err(e) => Some(e),
     };
     assert!(matches!(error, Some(Error::Cancelled)), "{error:?}");
+    // The request has been acted on once it returns, so it cannot reach what runs next.
+    cancelling.await.expect("join").expect("cancel request");
 
     // Scripts run every statement; a statement run while a result is still open closes
     // that result instead of waiting for it.
