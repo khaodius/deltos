@@ -83,6 +83,10 @@ updates are offered. It never falls back to unverified downloads.
 
 3. Commit `packaging/update-key.pub`. From then on every build verifies updates with it.
 
+4. Run the Release workflow by hand (**Actions → Release → Run workflow**) to publish the
+   current version. Until both halves exist, pushes to `main` publish nothing and the Version
+   job says so with a warning; with only one half in place it fails.
+
 To check that the secret and the file belong together without starting a release, run the
 workflow's own test locally:
 
