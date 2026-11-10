@@ -129,6 +129,10 @@ pub struct Drag {
     pub cursor: Point<Pixels>,
     pub active: bool,
     pub hover: Option<Hover>,
+    /// Smoothed pointer speed in pixels per move, and when the pointer last moved, for
+    /// the ghost's stretch.
+    pub velocity: (f32, f32),
+    pub moved_at: Instant,
 }
 
 /// Where a drop would land, and the area to highlight in that window.
@@ -197,6 +201,9 @@ pub struct Workspace {
     pub redock: Option<(WindowId, Hover)>,
     /// Where each popped-out panel came from, so docking puts it back there.
     homes: HashMap<PanelId, DropTarget>,
+    /// The panel that last landed in a stack, and a count that changes with every
+    /// landing, so its settle animation plays once per landing.
+    pub landed: Option<(PanelId, u64)>,
     /// The table tab that the next table opened from the sidebar replaces, as in a
     /// file browser's preview. Opening it for good, or editing it, keeps it.
     preview: Option<PanelId>,
@@ -233,6 +240,7 @@ impl Workspace {
             window_move: None,
             redock: None,
             homes: HashMap::new(),
+            landed: None,
             preview: None,
             last_document: None,
             generation: 0,
@@ -639,6 +647,8 @@ impl Workspace {
             cursor: at,
             active: false,
             hover: None,
+            velocity: (0.0, 0.0),
+            moved_at: Instant::now(),
         });
         if self
             .layout
@@ -696,6 +706,12 @@ impl Workspace {
             cx.notify();
             return;
         }
+        let step = e.position - drag.cursor;
+        drag.velocity = (
+            drag.velocity.0 * 0.55 + f32::from(step.x) * 0.45,
+            drag.velocity.1 * 0.55 + f32::from(step.y) * 0.45,
+        );
+        drag.moved_at = Instant::now();
         drag.cursor = e.position;
         if !drag.active {
             let d = e.position - drag.origin;
@@ -765,11 +781,18 @@ impl Workspace {
         if let Some(h) = drag.hover {
             self.pin(drag.panel, cx);
             if self.layout.dock.move_panel(drag.panel, h.target).is_ok() {
+                self.land(drag.panel);
                 self.show(drag.panel, cx);
                 self.changed(cx);
             }
         }
         true
+    }
+
+    /// Marks `panel` as just landed, so its stack plays the settle animation.
+    fn land(&mut self, panel: PanelId) {
+        self.generation += 1;
+        self.landed = Some((panel, self.generation));
     }
 
     /// The point `p` of the window of `tree`, on the screen.
@@ -966,6 +989,9 @@ impl Workspace {
         let Ok(id) = self.layout.dock.detach(panel, Some(rect)) else {
             return;
         };
+        // The new window plays its own entrance; a landing still pending would play a
+        // second one there.
+        self.landed = None;
         if let Some(home) = home {
             self.homes.insert(panel, home);
         }
@@ -1037,7 +1063,7 @@ impl Workspace {
     /// Opens the window for panel window `id` at its saved bounds. GPUI draws a new
     /// window as it opens, and drawing reads this workspace, so the window opens just
     /// after the current update. If it cannot open, its panels go back to the main
-    /// window. With `keep_moving` (Linux), the press that tore the panel off goes on
+    /// window. With `keep_moving`, the press that tore the panel off goes on
     /// moving the new window.
     fn open_window(&mut self, id: WindowId, keep_moving: bool, cx: &mut Context<Self>) {
         let Some(saved) = self.layout.dock.window(id).map(|w| w.bounds) else {
@@ -1078,15 +1104,18 @@ impl Workspace {
                 Ok(handle) => {
                     tracing::debug!("panel window {} opened", id.0);
                     this.floating.insert(id, handle);
-                    if keep_moving && cfg!(target_os = "linux") {
-                        // Once the window is mapped, the press still down moves it, so
-                        // tearing off and placing is one motion.
+                    if keep_moving {
+                        // Once the window is shown, the press still down moves it, so
+                        // tearing off and placing is one motion: the window stays under
+                        // the pointer as it leaves.
                         cx.spawn(async move |_, cx| {
                             cx.background_executor()
-                                .timer(Duration::from_millis(24))
+                                .timer(Duration::from_millis(16))
                                 .await;
                             handle
-                                .update(cx, |_, window, _| window.start_window_move())
+                                .update(cx, |_, window, _| {
+                                    crate::ui::motion::follow_pointer(window)
+                                })
                                 .ok();
                         })
                         .detach();
@@ -1290,6 +1319,7 @@ impl Workspace {
                 self.homes.remove(p);
             }
             if let Some(first) = panels.first() {
+                self.land(*first);
                 self.show(*first, cx);
             }
             if let Some(main) = cx

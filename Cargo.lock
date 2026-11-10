@@ -1486,12 +1486,14 @@ dependencies = [
  "futures",
  "gpui",
  "parking_lot",
+ "raw-window-handle",
  "serde",
  "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
  "unicode-segmentation",
+ "windows 0.61.3",
  "winresource",
 ]
 

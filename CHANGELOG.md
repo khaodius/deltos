@@ -27,3 +27,15 @@ update manifest.
   in it. The check can be turned off in Settings.
 - **Packages**: a `.deb`, an `.rpm`, an AppImage and a `.tar.gz` for Linux; a per-user setup
   program and a portable `.zip` for Windows; one-line install scripts for both.
+- **Connections in a few keystrokes.** Paste a connection URL into the form and the fields
+  fill themselves in; a URL on the clipboard is offered when you start a new connection. Pick
+  the database from a row of tiles, type `host:port` in one go, move between fields with Tab,
+  and show the password to check it. A test reports the server version and how long it took,
+  and a failed one says what to check.
+- **Ten palettes** for light and dark mode, any accent color with an optional tint across the
+  window, title bar, tab and column header styles, high contrast text and a live preview of
+  every change. Adwaita Sans and Go Mono are the new default fonts, and any installed font can
+  be picked from a list.
+- **Panels move like objects.** A dragged panel stretches with the pointer, a torn-off window
+  stays under the pointer as it leaves on Windows and Linux, and a panel settles into place
+  with a short squash and stretch when it docks or gets its own window.

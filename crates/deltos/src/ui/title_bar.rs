@@ -3,6 +3,12 @@
 //! middle and on the right, then minimize, maximize and close. On Windows the buttons and
 //! the drag area are handed to the system, which keeps snap layouts and double-click to
 //! maximize; on Linux Deltos asks the compositor to move, resize and maximize.
+//!
+//! The controls in the bar occlude the drag area beneath them. Without that, Windows would
+//! report the whole bar as caption, including the buttons, and a press on a button would
+//! start moving the window instead of clicking it. For the same reason nothing that covers
+//! the bar may take a plain left press: on Windows a press that any element handles, such
+//! as a focusable ancestor taking focus, is kept from the system and the window never moves.
 
 use std::rc::Rc;
 
@@ -26,6 +32,7 @@ pub fn window_buttons(window: &Window, t: &Theme, on_close: OnClose) -> AnyEleme
     let button = |id: &'static str, which: Icon, area: WindowControlArea, danger: bool| {
         div()
             .id(id)
+            .occlude()
             .flex_none()
             .w(px(44.))
             .h_full()
@@ -44,9 +51,13 @@ pub fn window_buttons(window: &Window, t: &Theme, on_close: OnClose) -> AnyEleme
         .flex()
         .flex_none()
         .h_full()
+        // On Windows the system acts on these areas itself (and closing goes through the
+        // window's should-close hook), so a click handler would act a second time.
         .child(
             button("win-min", Icon::Minimize, WindowControlArea::Min, false)
-                .on_click(|_, window, _| window.minimize_window()),
+                .when(!cfg!(windows), |el| {
+                    el.on_click(|_, window, _| window.minimize_window())
+                }),
         )
         .child(
             button(
@@ -59,11 +70,15 @@ pub fn window_buttons(window: &Window, t: &Theme, on_close: OnClose) -> AnyEleme
                 WindowControlArea::Max,
                 false,
             )
-            .on_click(|_, window, _| window.zoom_window()),
+            .when(!cfg!(windows), |el| {
+                el.on_click(|_, window, _| window.zoom_window())
+            }),
         )
         .child(
             button("win-close", Icon::Close, WindowControlArea::Close, true)
-                .on_click(move |_, window, cx| on_close(window, cx)),
+                .when(!cfg!(windows), |el| {
+                    el.on_click(move |_, window, cx| on_close(window, cx))
+                }),
         )
         .into_any_element()
 }
@@ -110,6 +125,9 @@ pub fn title_bar(
         .bg(t.title_bar)
         .border_b_1()
         .border_color(t.border)
+        .when_some(t.title_bar_line, |el, line| {
+            el.border_b_2().border_color(line)
+        })
         .child(
             // The drag area sits under everything, so the bar moves the window wherever
             // nothing else takes the press.
@@ -122,7 +140,7 @@ pub fn title_bar(
                 .gap(px(8.))
                 .pl(px(12.))
                 .child(icon(Icon::Logo).size(px(15.)).text_color(t.accent))
-                .child(left),
+                .child(div().id("title-left").occlude().child(left)),
         )
         .child(
             div()
@@ -138,12 +156,15 @@ pub fn title_bar(
         )
         .child(div().flex_1())
         .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(2.))
-                .pr(px(8.))
-                .child(right),
+            div().flex().items_center().gap(px(2.)).pr(px(8.)).child(
+                div()
+                    .id("title-right")
+                    .occlude()
+                    .flex()
+                    .items_center()
+                    .gap(px(2.))
+                    .child(right),
+            ),
         )
         .child(window_buttons(window, t, on_close))
         .into_any_element()

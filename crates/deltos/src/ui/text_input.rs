@@ -33,6 +33,8 @@ actions!(
         Copy,
         Submit,
         Cancel,
+        FocusNext,
+        FocusPrev,
     ]
 );
 
@@ -56,6 +58,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("end", End, ctx),
         KeyBinding::new("enter", Submit, ctx),
         KeyBinding::new("escape", Cancel, ctx),
+        KeyBinding::new("tab", FocusNext, ctx),
+        KeyBinding::new("shift-tab", FocusPrev, ctx),
     ]);
 }
 
@@ -84,7 +88,8 @@ impl EventEmitter<InputEvent> for TextInput {}
 impl TextInput {
     pub fn new(placeholder: impl Into<SharedString>, cx: &mut Context<Self>) -> Self {
         Self {
-            focus_handle: cx.focus_handle(),
+            // Every field is a tab stop, in the order the window paints them.
+            focus_handle: cx.focus_handle().tab_stop(true),
             content: SharedString::default(),
             placeholder: placeholder.into(),
             masked: false,
@@ -100,6 +105,19 @@ impl TextInput {
     pub fn masked(mut self) -> Self {
         self.masked = true;
         self
+    }
+
+    /// Shows or hides the text of a masked field.
+    pub fn set_masked(&mut self, masked: bool, cx: &mut Context<Self>) {
+        if self.masked != masked {
+            self.masked = masked;
+            self.last_layout = None;
+            cx.notify();
+        }
+    }
+
+    pub fn is_masked(&self) -> bool {
+        self.masked
     }
 
     pub fn text(&self) -> &str {
@@ -177,6 +195,14 @@ impl TextInput {
     fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
         self.move_to(0, cx);
         self.select_to(self.content.len(), cx)
+    }
+
+    fn focus_next(&mut self, _: &FocusNext, window: &mut Window, _: &mut Context<Self>) {
+        window.focus_next();
+    }
+
+    fn focus_prev(&mut self, _: &FocusPrev, window: &mut Window, _: &mut Context<Self>) {
+        window.focus_prev();
     }
 
     fn home(&mut self, _: &Home, _: &mut Window, cx: &mut Context<Self>) {
@@ -710,6 +736,8 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::submit))
             .on_action(cx.listener(Self::cancel))
+            .on_action(cx.listener(Self::focus_next))
+            .on_action(cx.listener(Self::focus_prev))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))

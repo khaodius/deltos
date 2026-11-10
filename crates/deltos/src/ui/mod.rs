@@ -7,6 +7,7 @@ pub mod grid;
 pub mod history;
 pub mod icons;
 pub mod inspector;
+pub mod motion;
 pub mod panel_window;
 pub mod query;
 pub mod settings;

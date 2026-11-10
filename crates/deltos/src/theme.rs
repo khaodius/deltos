@@ -6,9 +6,18 @@
 //! border contrast setting scales.
 
 use deltos_settings::{
-    Appearance, COLOR_KEYS, DateFormat, Editor, NullStyle, ThemeBase, ThemeFile, ThemeMode,
+    Appearance, COLOR_KEYS, DateFormat, Editor, HeaderStyle, NullStyle, Palette, TabStyle,
+    ThemeBase, ThemeFile, ThemeMode, TitleBarStyle,
 };
 use gpui::{App, Global, Hsla, Pixels, Rgba, SharedString, px, rgb, rgba};
+
+/// The interface font when the setting is empty. Ships with the app.
+pub const DEFAULT_UI_FONT: &str = "Adwaita Sans";
+/// The grid and code font when the setting is empty. Ships with the app.
+pub const DEFAULT_MONO_FONT: &str = "Go Mono";
+/// Every font that ships with the app, offered first in the font pickers.
+pub const BUNDLED_UI_FONTS: [&str; 2] = ["Adwaita Sans", "Inter"];
+pub const BUNDLED_MONO_FONTS: [&str; 2] = ["Go Mono", "JetBrains Mono"];
 
 #[derive(Debug, Clone)]
 pub struct Theme {
@@ -71,31 +80,37 @@ pub struct Theme {
     pub null_text: &'static str,
     pub date_format: DateFormat,
     pub scale: f32,
+    /// A line in this color along the title bar's bottom edge, for the accent line style.
+    pub title_bar_line: Option<Hsla>,
+    pub tab_style: TabStyle,
+    pub header_style: HeaderStyle,
+    /// Panels animate as they leave and join windows; off with reduced motion.
+    pub motion: bool,
 }
 
 impl Global for Theme {}
 
-struct Palette {
-    base: u32,
-    title_bar: u32,
-    sidebar: u32,
-    surface: u32,
-    surface_alt: u32,
-    grid_header: u32,
-    floating: u32,
-    input: u32,
-    border: u32,
-    grid_line: u32,
-    text: u32,
-    text_muted: u32,
-    text_faint: u32,
-    keyword: u32,
-    string: u32,
-    number: u32,
-    comment: u32,
+pub(crate) struct Colors {
+    pub(crate) base: u32,
+    pub(crate) title_bar: u32,
+    pub(crate) sidebar: u32,
+    pub(crate) surface: u32,
+    pub(crate) surface_alt: u32,
+    pub(crate) grid_header: u32,
+    pub(crate) floating: u32,
+    pub(crate) input: u32,
+    pub(crate) border: u32,
+    pub(crate) grid_line: u32,
+    pub(crate) text: u32,
+    pub(crate) text_muted: u32,
+    pub(crate) text_faint: u32,
+    pub(crate) keyword: u32,
+    pub(crate) string: u32,
+    pub(crate) number: u32,
+    pub(crate) comment: u32,
 }
 
-const LIGHT: Palette = Palette {
+const CLASSIC: Colors = Colors {
     base: 0xefeff1,
     title_bar: 0xe8e8ea,
     sidebar: 0xf6f6f7,
@@ -115,7 +130,67 @@ const LIGHT: Palette = Palette {
     comment: 0x8a8a90,
 };
 
-const DARK: Palette = Palette {
+const PAPER: Colors = Colors {
+    base: 0xf1ede6,
+    title_bar: 0xebe6dd,
+    sidebar: 0xf7f4ee,
+    surface: 0xfffdf9,
+    surface_alt: 0xf8f4ec,
+    grid_header: 0xf4f0e8,
+    floating: 0xfffdf9,
+    input: 0xfffdf9,
+    border: 0xddd5c8,
+    grid_line: 0xece6dc,
+    text: 0x2a251f,
+    text_muted: 0x6f675c,
+    text_faint: 0xa79e91,
+    keyword: 0x8250df,
+    string: 0xa3402a,
+    number: 0x2f7a3e,
+    comment: 0x988f82,
+};
+
+const FROST: Colors = Colors {
+    base: 0xe9eef4,
+    title_bar: 0xe2e8f0,
+    sidebar: 0xf2f5f9,
+    surface: 0xffffff,
+    surface_alt: 0xf4f7fb,
+    grid_header: 0xeef2f7,
+    floating: 0xffffff,
+    input: 0xffffff,
+    border: 0xd2dae5,
+    grid_line: 0xe5ebf2,
+    text: 0x1b2430,
+    text_muted: 0x5c6b7e,
+    text_faint: 0x9aa7b8,
+    keyword: 0x0b57d0,
+    string: 0xc2410c,
+    number: 0x0f766e,
+    comment: 0x8794a6,
+};
+
+const SAGE: Colors = Colors {
+    base: 0xe9eee9,
+    title_bar: 0xe2e8e2,
+    sidebar: 0xf2f5f1,
+    surface: 0xfcfdfb,
+    surface_alt: 0xf3f6f2,
+    grid_header: 0xedf1ec,
+    floating: 0xfcfdfb,
+    input: 0xfcfdfb,
+    border: 0xd3dcd2,
+    grid_line: 0xe4eae3,
+    text: 0x1f2a22,
+    text_muted: 0x5f6e62,
+    text_faint: 0x9caa9f,
+    keyword: 0x1d6fb8,
+    string: 0xa13d2d,
+    number: 0x2e7d32,
+    comment: 0x8a988c,
+};
+
+const GRAPHITE: Colors = Colors {
     base: 0x252527,
     title_bar: 0x2a2a2c,
     sidebar: 0x222224,
@@ -134,6 +209,122 @@ const DARK: Palette = Palette {
     number: 0x8fd19e,
     comment: 0x77777e,
 };
+
+const MIDNIGHT: Colors = Colors {
+    base: 0x161b26,
+    title_bar: 0x1a2030,
+    sidebar: 0x141924,
+    surface: 0x0f131c,
+    surface_alt: 0x131824,
+    grid_header: 0x171d2a,
+    floating: 0x1d2433,
+    input: 0x0f131c,
+    border: 0x283041,
+    grid_line: 0x1c2331,
+    text: 0xdde3ee,
+    text_muted: 0x8f9bb0,
+    text_faint: 0x5b6679,
+    keyword: 0x82aaff,
+    string: 0xf78c6c,
+    number: 0xc3e88d,
+    comment: 0x6b7894,
+};
+
+const EMBER: Colors = Colors {
+    base: 0x231d1a,
+    title_bar: 0x29221e,
+    sidebar: 0x201a17,
+    surface: 0x1a1512,
+    surface_alt: 0x1f1916,
+    grid_header: 0x251e1b,
+    floating: 0x2c2420,
+    input: 0x1a1512,
+    border: 0x3a302a,
+    grid_line: 0x2a221e,
+    text: 0xeee2d8,
+    text_muted: 0xab9a8c,
+    text_faint: 0x6f625a,
+    keyword: 0xff9e64,
+    string: 0xe0b16f,
+    number: 0xa9d18e,
+    comment: 0x857467,
+};
+
+const FOREST: Colors = Colors {
+    base: 0x1a221e,
+    title_bar: 0x1e2722,
+    sidebar: 0x18201c,
+    surface: 0x131a16,
+    surface_alt: 0x17201b,
+    grid_header: 0x1c2520,
+    floating: 0x222c26,
+    input: 0x131a16,
+    border: 0x2c3831,
+    grid_line: 0x1f2924,
+    text: 0xdce8e0,
+    text_muted: 0x8fa598,
+    text_faint: 0x5c6e63,
+    keyword: 0x7fd1a7,
+    string: 0xe6b673,
+    number: 0x9ccfd8,
+    comment: 0x6b8074,
+};
+
+const PLUM: Colors = Colors {
+    base: 0x221c28,
+    title_bar: 0x28212f,
+    sidebar: 0x1f1925,
+    surface: 0x18131d,
+    surface_alt: 0x1d1722,
+    grid_header: 0x241d2a,
+    floating: 0x2b2332,
+    input: 0x18131d,
+    border: 0x3a3044,
+    grid_line: 0x281f2e,
+    text: 0xe9e1f0,
+    text_muted: 0xa596b3,
+    text_faint: 0x6c5f78,
+    keyword: 0xc99bff,
+    string: 0xff9ac1,
+    number: 0x9fe0c8,
+    comment: 0x7e6f8c,
+};
+
+const OBSIDIAN: Colors = Colors {
+    base: 0x0a0a0a,
+    title_bar: 0x0d0d0d,
+    sidebar: 0x080808,
+    surface: 0x000000,
+    surface_alt: 0x0b0b0b,
+    grid_header: 0x101010,
+    floating: 0x161616,
+    input: 0x050505,
+    border: 0x262626,
+    grid_line: 0x161616,
+    text: 0xe6e6e6,
+    text_muted: 0x9a9a9a,
+    text_faint: 0x5e5e5e,
+    keyword: 0x7aa7ff,
+    string: 0xf0907c,
+    number: 0x8fd19e,
+    comment: 0x6e6e6e,
+};
+
+/// The colors of a palette.
+pub(crate) const fn colors(palette: Palette) -> &'static Colors {
+    match palette {
+        Palette::Classic => &CLASSIC,
+        Palette::Paper => &PAPER,
+        Palette::Frost => &FROST,
+        Palette::Sage => &SAGE,
+        Palette::Graphite => &GRAPHITE,
+        Palette::Midnight => &MIDNIGHT,
+        Palette::Ember => &EMBER,
+        Palette::Forest => &FOREST,
+        Palette::Plum => &PLUM,
+        Palette::Obsidian => &OBSIDIAN,
+    }
+}
 
 fn hsla(color: u32) -> Hsla {
     rgb(color).into()
@@ -173,7 +364,11 @@ impl Theme {
                 ThemeMode::Dark => true,
             },
         };
-        let p = if dark { &DARK } else { &LIGHT };
+        let p = colors(if dark {
+            a.dark_palette
+        } else {
+            a.light_palette
+        });
         let scale = a.ui_scale;
         let s = |v: f32| px((v * scale).round());
         let accent = custom
@@ -181,7 +376,11 @@ impl Theme {
             .map_or_else(|| hsla(a.accent), |c| rgba(c).into());
         let accent_rgb = Rgba::from(accent);
         let luminance = 0.2126 * accent_rgb.r + 0.7152 * accent_rgb.g + 0.0722 * accent_rgb.b;
-        let surface = hsla(p.surface);
+        // The accent washes into the surfaces by the tint setting; the content surface
+        // takes less so text keeps its contrast.
+        let tint = a.accent_tint.clamp(0.0, 0.3);
+        let tinted = |c: u32| mix(hsla(c), accent, tint);
+        let surface = mix(hsla(p.surface), accent, tint * 0.4);
         // Border contrast scales how far separators sit from the surface they divide.
         let line = |c: u32| mix(surface, hsla(c), a.border_contrast);
         let overlay = |alpha: f32| {
@@ -205,16 +404,30 @@ impl Theme {
                 .filter(|f| !f.is_empty())
                 .map_or_else(|| default.into(), |f| f.to_owned().into())
         };
-        let mono_font = pick(&a.mono_font, "JetBrains Mono");
+        let mono_font = pick(&a.mono_font, DEFAULT_MONO_FONT);
+        let title_bar = match a.title_bar_style {
+            TitleBarStyle::Tinted => {
+                mix(tinted(p.title_bar), accent, if dark { 0.2 } else { 0.14 })
+            }
+            _ => tinted(p.title_bar),
+        };
+        let (text, mut text_muted, mut text_faint) =
+            (hsla(p.text), hsla(p.text_muted), hsla(p.text_faint));
+        if a.high_contrast {
+            text_faint = mix(text_faint, text_muted, 0.6);
+            text_muted = mix(text_muted, text, 0.45);
+        }
         let mut theme = Self {
-            base: hsla(p.base),
-            title_bar: hsla(p.title_bar),
-            sidebar: hsla(p.sidebar),
+            base: tinted(p.base),
+            title_bar,
+            sidebar: tinted(p.sidebar),
             surface,
-            surface_alt: a.zebra_color.map_or_else(|| hsla(p.surface_alt), hsla),
-            grid_header: hsla(p.grid_header),
-            floating: hsla(p.floating),
-            input: hsla(p.input),
+            surface_alt: a
+                .zebra_color
+                .map_or_else(|| mix(hsla(p.surface_alt), accent, tint * 0.6), hsla),
+            grid_header: tinted(p.grid_header),
+            floating: mix(hsla(p.floating), accent, tint * 0.5),
+            input: mix(hsla(p.input), accent, tint * 0.3),
             hover: overlay(if dark { 0.05 } else { 0.045 }),
             selected: with_alpha(accent, if dark { 0.30 } else { 0.16 }),
             selection: with_alpha(accent, if dark { 0.38 } else { 0.22 }),
@@ -222,9 +435,9 @@ impl Theme {
             border: line(p.border),
             border_strong: mix(surface, hsla(p.border), (a.border_contrast * 1.5).min(2.5)),
             grid_line: line(p.grid_line),
-            text: hsla(p.text),
-            text_muted: hsla(p.text_muted),
-            text_faint: hsla(p.text_faint),
+            text,
+            text_muted,
+            text_faint,
             accent,
             accent_hover: Hsla {
                 l: (accent.l - 0.06).max(0.0),
@@ -247,7 +460,7 @@ impl Theme {
             radius_small: px((a.corner_radius * 0.7)
                 .max(2.0)
                 .min(a.corner_radius.max(2.0))),
-            ui_font: pick(&a.ui_font, "Inter"),
+            ui_font: pick(&a.ui_font, DEFAULT_UI_FONT),
             editor_font: editor
                 .font
                 .as_deref()
@@ -276,6 +489,10 @@ impl Theme {
             },
             date_format: a.date_format,
             scale,
+            title_bar_line: (a.title_bar_style == TitleBarStyle::Line).then_some(accent),
+            tab_style: a.tab_style,
+            header_style: a.header_style,
+            motion: !a.reduced_motion,
         };
         if let Some(custom) = custom {
             theme.apply(custom);
@@ -330,6 +547,22 @@ impl Theme {
         if let Some(r) = custom.radius {
             self.radius = px(r);
             self.radius_small = px((r * 0.7).max(2.0).min(r.max(2.0)));
+        }
+    }
+
+    /// The weight of grid column headers.
+    pub fn header_weight(&self) -> gpui::FontWeight {
+        match self.header_style {
+            HeaderStyle::Regular => gpui::FontWeight::NORMAL,
+            HeaderStyle::Bold | HeaderStyle::Caps => gpui::FontWeight::SEMIBOLD,
+        }
+    }
+
+    /// A column header's text in the header style.
+    pub fn header_text(&self, name: &str) -> SharedString {
+        match self.header_style {
+            HeaderStyle::Caps => name.to_uppercase().into(),
+            _ => SharedString::from(name.to_owned()),
         }
     }
 
@@ -398,6 +631,50 @@ mod tests {
         assert_eq!(hex(t.surface), 0x102030);
         assert_eq!(hex(t.accent_text), 0x000000);
         assert_eq!(t.radius, px(2.0));
+    }
+
+    #[test]
+    fn mode_picks_the_chosen_palette() {
+        let a = Appearance {
+            theme: ThemeMode::Dark,
+            dark_palette: Palette::Obsidian,
+            ..Appearance::default()
+        };
+        let t = Theme::new(&a, &Editor::default(), false, None);
+        assert_eq!(hex(t.surface), 0x000000);
+        let a = Appearance {
+            theme: ThemeMode::Light,
+            light_palette: Palette::Paper,
+            ..Appearance::default()
+        };
+        let t = Theme::new(&a, &Editor::default(), true, None);
+        assert_eq!(hex(t.surface), PAPER.surface);
+    }
+
+    #[test]
+    fn every_palette_is_on_its_side() {
+        let lum = |c: u32| {
+            let c = Rgba::from(hsla(c));
+            0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b
+        };
+        for p in Palette::LIGHT.into_iter().chain(Palette::DARK) {
+            let c = colors(p);
+            assert_eq!(lum(c.surface) < 0.5, p.is_dark(), "{p:?}");
+            // Text stays readable on the surface.
+            assert!((lum(c.text) - lum(c.surface)).abs() > 0.6, "{p:?}");
+        }
+    }
+
+    #[test]
+    fn tint_moves_surfaces_toward_the_accent() {
+        let plain = Theme::new(&Appearance::default(), &Editor::default(), true, None);
+        let a = Appearance {
+            accent_tint: 0.2,
+            ..Appearance::default()
+        };
+        let tinted = Theme::new(&a, &Editor::default(), true, None);
+        assert_ne!(hex(plain.sidebar), hex(tinted.sidebar));
+        assert!(Rgba::from(tinted.sidebar).b > Rgba::from(plain.sidebar).b);
     }
 
     #[test]

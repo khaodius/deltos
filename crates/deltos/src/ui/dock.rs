@@ -10,8 +10,11 @@ use gpui::{
 
 use crate::theme::{Theme, theme};
 use crate::ui::icons::{Icon, icon};
+use crate::ui::motion;
 use crate::ui::workspace::{SplitResize, StackZone, TreeZones, Workspace};
 use crate::ui::{Tooltip, empty_state, icon_button};
+use deltos_settings::TabStyle;
+use gpui::AnimationExt as _;
 
 pub struct DockView {
     workspace: Entity<Workspace>,
@@ -209,6 +212,11 @@ impl DockView {
         let Some(active) = s.active_panel() else {
             return div().into_any_element();
         };
+        // A panel that just landed here settles with a squash and stretch.
+        let landing = ws
+            .landed
+            .filter(|(p, _)| t.motion && s.panels.contains(p))
+            .map(|(_, generation)| generation);
         let active_view = ws.view(active).cloned();
         let tool_header = s.panels.len() == 1 && active_view.as_ref().is_some_and(|v| v.is_tool());
         let sidebar_bg = active_view.as_ref().is_some_and(|v| v.is_sidebar());
@@ -262,7 +270,14 @@ impl DockView {
                     .flex_1()
                     .min_h_0()
                     .overflow_hidden()
-                    .children(active_view.map(|v| v.view()))
+                    .child(settle(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .children(active_view.map(|v| v.view())),
+                        landing.map(|g| ("land", g as usize)),
+                        t,
+                    ))
                     .child(
                         canvas(
                             move |b, _, _| {
@@ -347,11 +362,15 @@ impl DockView {
     ) -> AnyElement {
         let tree = self.tree;
         let active = s.active_panel();
+        let style = t.tab_style;
         let mut strip = div()
             .id(("strip", s.panels[0].0))
             .h(t.tab_height)
             .w_full()
             .flex()
+            .when(style == TabStyle::Pill, |el| {
+                el.items_center().px(px(3.)).gap(px(2.))
+            })
             .bg(t.base)
             .border_b_1()
             .border_color(t.border)
@@ -374,26 +393,42 @@ impl DockView {
                     .flex_none()
                     .min_w(t.s(96.))
                     .max_w(t.s(220.))
-                    .h_full()
                     .pl(px(10.))
                     .pr(px(4.))
                     .flex()
                     .items_center()
                     .gap(px(6.))
-                    .border_r_1()
-                    .border_color(t.border)
                     .text_size(t.ui_size)
+                    .map(|el| match style {
+                        TabStyle::Card => el.h_full().border_r_1().border_color(t.border),
+                        TabStyle::Underline => el.h_full(),
+                        TabStyle::Pill => el.h(t.tab_height - t.s(8.)).rounded(t.radius),
+                    })
                     .when(is_active, |el| {
-                        el.bg(t.surface).text_color(t.text).child(
-                            // The active tab joins the panel below it.
-                            div()
-                                .absolute()
-                                .left_0()
-                                .right_0()
-                                .bottom(px(-1.))
-                                .h(px(1.))
-                                .bg(t.surface),
-                        )
+                        let el = el.text_color(t.text);
+                        match style {
+                            TabStyle::Card => el.bg(t.surface).child(
+                                // The active tab joins the panel below it.
+                                div()
+                                    .absolute()
+                                    .left_0()
+                                    .right_0()
+                                    .bottom(px(-1.))
+                                    .h(px(1.))
+                                    .bg(t.surface),
+                            ),
+                            TabStyle::Underline => el.child(
+                                div()
+                                    .absolute()
+                                    .left(px(6.))
+                                    .right(px(6.))
+                                    .bottom(px(-1.))
+                                    .h(px(2.))
+                                    .rounded_t(px(2.))
+                                    .bg(t.accent),
+                            ),
+                            TabStyle::Pill => el.bg(t.selected),
+                        }
                     })
                     .when(!is_active, |el| {
                         el.text_color(t.text_muted)
@@ -497,7 +532,7 @@ impl DockView {
 }
 
 impl Render for DockView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx).clone();
         let ws_entity = self.workspace.clone();
         let ws = ws_entity.read(cx);
@@ -522,10 +557,29 @@ impl Render for DockView {
             .and_then(|d| d.hover.clone())
             .or_else(|| ws.redock.as_ref().map(|r| r.1.clone()))
             .filter(|h| h.tree == tree_id);
+        // The ghost stretches along the pointer's motion, eases back as the pointer
+        // slows, and leans toward a window edge it nears, as if pulled out of the window.
+        let viewport = window.viewport_size();
         let ghost = drag.as_ref().filter(|d| d.source == tree_id).map(|d| {
+            let since = d.moved_at.elapsed().as_secs_f32();
+            let fade = if t.motion { (-since / 0.09).exp() } else { 0.0 };
+            if t.motion && fade > 0.02 {
+                window.request_animation_frame();
+            }
+            let (mut sx, mut sy) = motion::stretch((d.velocity.0 * fade, d.velocity.1 * fade));
+            if t.motion {
+                let reach = 90.0;
+                let near = |d: f32| ((reach - d) / reach).clamp(0.0, 1.0) * 0.3;
+                let (x, y) = (f32::from(d.cursor.x), f32::from(d.cursor.y));
+                let (w, h) = (f32::from(viewport.width), f32::from(viewport.height));
+                sx += near(x).max(near(w - x));
+                sy += near(y).max(near(h - y));
+            }
             (
                 d.cursor,
+                (sx, sy),
                 ws.view(d.panel).map(|v| v.title(cx)).unwrap_or_default(),
+                ws.view(d.panel).map(|v| v.icon(cx)),
             )
         });
         let resizing = ws
@@ -574,22 +628,89 @@ impl Render for DockView {
                         el.bg(t.accent_soft).border_2().border_color(t.accent)
                     })
             }))
-            .children(ghost.map(|(at, title)| {
+            .children(ghost.map(|(at, (sx, sy), title, which)| {
+                let (w, h) = (180.0 * sx, 110.0 * sy);
+                let line = |width: f32, c: gpui::Hsla| {
+                    div().w(px(width * sx)).h(px(5.)).rounded(px(2.)).bg(c)
+                };
                 div()
                     .absolute()
-                    .left(at.x + px(12.))
-                    .top(at.y + px(10.))
-                    .px(px(10.))
-                    .py(px(4.))
-                    .rounded(t.radius_small)
-                    .bg(t.floating)
+                    .left(at.x - px(w * 0.5))
+                    .top(at.y - px(12.))
+                    .w(px(w))
+                    .h(px(h))
+                    .rounded(t.radius)
+                    .overflow_hidden()
+                    .bg(t.surface)
                     .border_1()
-                    .border_color(t.border_strong)
-                    .shadow_md()
-                    .text_size(t.small_size)
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(t.text)
-                    .child(title)
+                    .border_color(t.accent)
+                    .shadow_lg()
+                    .opacity(0.94)
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .h(px(24.))
+                            .px(px(8.))
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .bg(t.title_bar)
+                            .border_b_1()
+                            .border_color(t.border)
+                            .text_size(t.small_size)
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(t.text)
+                            .children(which.map(|i| icon(i).size(px(11.)).text_color(t.accent)))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .child(title),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .p(px(10.))
+                            .flex()
+                            .flex_col()
+                            .gap(px(7.))
+                            .child(line(120.0, t.text_faint))
+                            .child(line(90.0, t.grid_line))
+                            .child(line(130.0, t.grid_line))
+                            .child(line(70.0, t.grid_line)),
+                    )
             }))
     }
+}
+
+/// Plays the settle animation on `content` under the animation id `id`: it starts
+/// squashed, overshoots into a stretch and rings down to rest, with an accent outline
+/// that fades as it settles. `None` draws `content` as it is.
+pub fn settle(content: gpui::Div, id: Option<(&'static str, usize)>, t: &Theme) -> AnyElement {
+    let Some(id) = id else {
+        return content.into_any_element();
+    };
+    let (accent, radius) = (t.accent, t.radius);
+    content
+        .with_animation(
+            gpui::ElementId::NamedInteger(id.0.into(), id.1 as u64),
+            gpui::Animation::new(motion::SETTLE),
+            move |el, progress| {
+                let (x, y) = motion::insets(motion::squash(progress));
+                let fade = 1.0 - progress;
+                el.left(relative(x))
+                    .right(relative(x))
+                    .top(relative(y))
+                    .bottom(relative(y))
+                    .overflow_hidden()
+                    .rounded(radius * (fade * 2.0).min(1.0))
+                    .border_2()
+                    .border_color(accent.opacity(fade))
+            },
+        )
+        .into_any_element()
 }

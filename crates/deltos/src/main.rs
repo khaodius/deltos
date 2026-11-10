@@ -29,7 +29,13 @@ use crate::ui::workspace::Workspace;
 use crate::ui::{Tooltip, dot, icon_button};
 use crate::update::{UpdateModel, UpdateStatus};
 
-const FONTS: [&[u8]; 6] = [
+const FONTS: [&[u8]; 12] = [
+    include_bytes!("../../../assets/fonts/AdwaitaSans-Regular.ttf"),
+    include_bytes!("../../../assets/fonts/AdwaitaSans-Medium.ttf"),
+    include_bytes!("../../../assets/fonts/AdwaitaSans-SemiBold.ttf"),
+    include_bytes!("../../../assets/fonts/AdwaitaSans-Bold.ttf"),
+    include_bytes!("../../../assets/fonts/GoMono-Regular.ttf"),
+    include_bytes!("../../../assets/fonts/GoMono-Bold.ttf"),
     include_bytes!("../../../assets/fonts/Inter-Regular.ttf"),
     include_bytes!("../../../assets/fonts/Inter-Medium.ttf"),
     include_bytes!("../../../assets/fonts/Inter-SemiBold.ttf"),
@@ -399,6 +405,9 @@ impl Render for Root {
                 .bg(t.title_bar)
                 .border_b_1()
                 .border_color(t.border)
+                .when_some(t.title_bar_line, |el, line| {
+                    el.border_b_2().border_color(line)
+                })
                 .child(self.connections_menu(cx))
                 .child(
                     div()
@@ -412,7 +421,6 @@ impl Render for Root {
         div()
             .id("root")
             .key_context("Workspace")
-            .track_focus(&self.focus)
             .size_full()
             .flex()
             .flex_col()
@@ -474,7 +482,17 @@ impl Render for Root {
             }))
             .children(bar)
             .children(strip)
-            .child(div().flex_1().min_h_0().child(self.dock.clone()))
+            // Focus is tracked below the bar, not on the whole window: a focusable element
+            // under the title bar takes every press there, and on Windows a taken press
+            // never reaches the system, so the window could not be dragged.
+            .child(
+                div()
+                    .id("body")
+                    .track_focus(&self.focus)
+                    .flex_1()
+                    .min_h_0()
+                    .child(self.dock.clone()),
+            )
             .when(custom_bar, |el| {
                 el.child(ui::title_bar::resize_grips(window))
             })

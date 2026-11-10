@@ -1,72 +1,104 @@
-<p align="center">
-  <img src="assets/icons/png/deltos-256.png" alt="Deltos" width="96" height="96">
-</p>
+# Deltos
 
-<h1 align="center">Deltos</h1>
+A native database client for PostgreSQL, MySQL, MariaDB, SQLite and MongoDB, on Windows and Linux.
 
-<p align="center">
-  A fast, native database client for Windows and Linux, written in Rust with GPUI.
-</p>
+[![CI](https://github.com/khaodius/deltos/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/khaodius/deltos/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/khaodius/deltos?display_name=tag&sort=semver)](https://github.com/khaodius/deltos/releases/latest)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-<p align="center">
-  <a href="https://github.com/khaodius/deltos/actions/workflows/ci.yml"><img src="https://github.com/khaodius/deltos/actions/workflows/ci.yml/badge.svg?branch=main&event=push" alt="CI"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="License: Apache-2.0"></a>
-</p>
+![Deltos showing a 50 million row table, the object sidebar and the row inspector](docs/images/screenshot.png)
 
-## Features
+Deltos is written in Rust and drawn on the GPU with [GPUI](https://www.gpui.rs). It ships as
+one small binary, starts in well under a second, and keeps its memory flat however big the
+table you open. There is no browser engine inside it.
 
-- **Native and light**: one binary drawn on the GPU through Vulkan on Linux and DirectX on
-  Windows, with no browser engine. It starts in well under a second and idles at nothing.
-- **PostgreSQL, MySQL and MariaDB, SQLite and MongoDB** from one connection list. Every database
-  gets the same table view, the same editor and the same shortcuts; what differs is behind one
-  driver contract, and more drivers fit the same way.
-- **Tables of any size**: rows are fetched as you scroll and kept in a bounded cache, never the
-  whole table, so one with hundreds of millions of rows opens as fast and uses as little memory
-  as one with a hundred. Sorting and filtering happen in the database, where they belong.
-- **Panels you arrange**: connections, schema, tables, query and results are panels that snap
-  together. Drag one to a new place, resize it, or drop it outside the window to give it a
-  window of its own, and dock it back when you are done. The layout is remembered.
-- **Own title bar** on Windows and Linux: slim, with the window controls, for desktops that draw
-  none or when you prefer it.
-- **Appearance settings**: light and dark themes, accent color, interface and code fonts, zoom
-  and spacing. Every change applies immediately and is saved as plain TOML.
-- **Signed updates**: Deltos checks for a new release at start, downloads it in the background
-  and installs it when you ask or when you quit. An update is installed only when the release's
-  manifest carries a valid signature from the project's key and the download matches the hash in
-  it. The check can be turned off in Settings.
+[Download](https://github.com/khaodius/deltos/releases/latest) ·
+[Changelog](CHANGELOG.md) ·
+[Build from source](#build-from-source) ·
+[Themes](docs/THEMES.md)
+
+## Databases
+
+| Database           | Browse and filter | Edit rows | Query editor | Cancel a running query |
+| ------------------ | :---------------: | :-------: | :----------: | :--------------------: |
+| PostgreSQL         | yes               | yes       | SQL          | yes                    |
+| MySQL and MariaDB  | yes               | yes       | SQL          | yes                    |
+| SQLite             | yes               | yes       | SQL          | yes                    |
+| MongoDB            | yes               | yes       | Shell syntax | yes                    |
+
+Cassandra, Redis, ClickHouse and SQL Server are next. Every driver implements the same
+contract in [`deltos-data`](crates/deltos-data), so the table view, editor and shortcuts work
+the same everywhere.
+
+## Panels
+
+![Dragging a panel out of the main window and docking it back](docs/images/panels.gif)
+
+Every part of the window is a panel: connections, the object sidebar, tables, queries,
+results, the inspector, history and settings. Drag a tab to split a pane or join another
+stack. Pull it past the window's edge and it becomes a window of its own, which stays under
+the pointer until you let go. Hold that window over the main one and it docks again. The
+layout is saved and comes back on the next start.
+
+## Large tables
+
+Rows are fetched page by page as you scroll and kept in a cache with a fixed memory budget.
+A table with 300 million rows opens as fast as one with 300. Paging uses keyset seeks where
+the table has a key, so the end of a big table is as quick to reach as the start. Sorting and
+filtering run in the database. Query results larger than memory spill to a temporary file
+instead of filling RAM.
+
+## Connecting
+
+Paste a connection URL such as `mysql://user:pass@db.example.com:3306/shop` anywhere in the
+connection form and the fields fill themselves in. Deltos also offers a URL it finds on the
+clipboard. Passwords go to the system keychain, never to the settings file. When a test
+fails, the form says why it most likely failed: wrong credentials, a server that only
+listens on localhost, or a firewall.
+
+## Appearance
+
+Ten palettes, four light and six dark, chosen separately so following the system switches
+between your two. Any accent color, with an optional tint across the window. Title bar,
+tab and column header styles. Density, corner radius, separators and zoom. A live preview
+shows each change as you make it. The default fonts are Adwaita Sans and Go Mono, both
+bundled. You can also pick any font installed on your system, or load your own colors from
+a [theme file](docs/THEMES.md).
 
 ## Install
 
-Windows, in PowerShell:
+**Windows** (PowerShell):
 
 ```powershell
 irm https://raw.githubusercontent.com/khaodius/deltos/main/scripts/install.ps1 | iex
 ```
 
-Windows, in Command Prompt:
-
-```bat
-curl -fsSL https://raw.githubusercontent.com/khaodius/deltos/main/scripts/install.cmd -o install.cmd && install.cmd && del install.cmd
-```
-
-Linux:
+**Linux**:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/khaodius/deltos/main/scripts/install.sh | bash
 ```
 
-Each command downloads the latest release, checks it against the release's `SHA256SUMS.txt` and
-installs it:
+Both check the download against the release's `SHA256SUMS.txt`.
 
-- **Windows**: the setup program runs silently and installs Deltos for the current user in
-  `%LOCALAPPDATA%\Programs\Deltos`, with a Start menu shortcut and no admin prompt. A running
-  copy is closed first, and an installed one is upgraded with its settings kept.
-- **Linux**: the `.deb` through apt on Debian and Ubuntu, or the `.rpm` through dnf, zypper or
-  yum on Fedora, RHEL and openSUSE, both with sudo. Any other distribution gets the binary in
-  `~/.local/bin` with an applications menu entry, and `--user` picks that on any distribution,
-  for your user only and without root.
+- **Windows**: the script installs for your user, with no admin prompt.
+- **Linux**: the script uses apt or dnf where it can. Otherwise it puts the binary in
+  `~/.local/bin`.
 
-A version number installs that release instead:
+Deltos then updates itself. Each update is signed, and Deltos verifies the signature before
+installing it. You can turn automatic updates off in Settings.
+
+<details>
+<summary>Packages, older versions and verifying downloads</summary>
+
+Every [release](https://github.com/khaodius/deltos/releases/latest) has:
+
+| Platform | Files                                         |
+| -------- | --------------------------------------------- |
+| Windows  | `-setup.exe` installer, portable `.zip`       |
+| Linux    | `.deb`, `.rpm`, `.AppImage`, `.tar.gz`        |
+
+To install a specific version, pass it to the script:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/khaodius/deltos/main/scripts/install.sh | bash -s -- 0.1.0
@@ -76,106 +108,74 @@ curl -fsSL https://raw.githubusercontent.com/khaodius/deltos/main/scripts/instal
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/khaodius/deltos/main/scripts/install.ps1))) 0.1.0
 ```
 
+From Command Prompt on Windows:
+
 ```bat
-curl -fsSL https://raw.githubusercontent.com/khaodius/deltos/main/scripts/install.cmd -o install.cmd && install.cmd 0.1.0 && del install.cmd
+curl -fsSL https://raw.githubusercontent.com/khaodius/deltos/main/scripts/install.cmd -o install.cmd && install.cmd && del install.cmd
 ```
 
-The scripts are in [`scripts/`](scripts) to read before running. To remove Deltos, use Installed
-apps in Windows Settings, `sudo apt remove deltos` or `sudo dnf remove deltos`, or delete
-`~/.local/bin/deltos` and `~/.local/share/applications/deltos.desktop`.
-
-Or download a package from the [latest release](https://github.com/khaodius/deltos/releases/latest):
-
-| Platform | Packages                                               |
-| -------- | ------------------------------------------------------ |
-| Windows  | `-setup.exe` (recommended) or portable `.zip`          |
-| Linux    | `.deb`, `.rpm`, `.AppImage` or `.tar.gz`               |
-
-The AppImage is one file that runs anywhere: make it executable and start it. Deltos updates it
-in place.
-
-Changes are listed in the [changelog](CHANGELOG.md).
-
-### Verifying a download
-
-Every release includes `SHA256SUMS.txt`, a signed build provenance attestation for each file,
-and the signed update manifest `latest.json` with `latest.json.sig`.
+To verify a download:
 
 ```sh
-# Linux, in the download folder
-sha256sum --check --ignore-missing SHA256SUMS.txt
-
-# Windows (PowerShell), compare the output with SHA256SUMS.txt
-Get-FileHash <file> -Algorithm SHA256
-
-# Provenance, with the GitHub CLI
-gh attestation verify <file> --repo khaodius/deltos
+sha256sum --check --ignore-missing SHA256SUMS.txt     # Linux
+gh attestation verify <file> --repo khaodius/deltos  # build provenance
 ```
 
-The Windows builds are not code-signed yet, so SmartScreen may warn about an unknown publisher.
+The Windows builds are not code-signed yet, so SmartScreen may warn about an unknown
+publisher the first time.
 
-## Notes
+</details>
 
-- **Settings** are plain TOML in the Deltos configuration folder: `~/.config/deltos/` on Linux
-  and `%APPDATA%\khaodius\deltos\config\` on Windows.
-- **Graphics**: Linux needs a Vulkan driver (Mesa's is included with most distributions). Deltos
-  runs on Wayland and X11 and picks whichever the session uses.
-- **Logs** go to the terminal; `DELTOS_LOG=debug deltos` shows more. Passwords are never logged.
+## Keyboard
+
+| Action                      | Keys               |
+| --------------------------- | ------------------ |
+| Run the statement           | `Ctrl+Enter`       |
+| New query tab               | `Ctrl+T`           |
+| Close tab                   | `Ctrl+W`           |
+| Next / previous tab         | `Ctrl+Tab` / `Ctrl+Shift+Tab` |
+| Search tables and views     | `Ctrl+P`           |
+| Reload                      | `Ctrl+R`           |
+| Sidebar / inspector         | `Ctrl+B` / `Ctrl+I` |
+| Settings                    | `Ctrl+,`           |
+| Zoom in / out / reset       | `Ctrl+=` / `Ctrl+-` / `Ctrl+0` |
+| Reset the panel layout      | `Ctrl+Shift+0`     |
+
+Every binding can be changed in Settings → Keyboard.
 
 ## Build from source
 
-Requires [Rust](https://rustup.rs) 1.88+. On Linux, also the development packages for
-xkbcommon, Wayland, X11, fontconfig and Vulkan, plus Clang for the bindings some dependencies
-generate:
+You need [Rust](https://rustup.rs) 1.88 or newer.
+
+On Windows, you also need the Visual Studio Build Tools with the C++ workload, which brings
+the Windows SDK.
+
+On Linux, you also need the development packages for xkbcommon, Wayland, X11, fontconfig and
+Vulkan:
 
 ```sh
-# Debian, Ubuntu
 sudo apt install pkg-config libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev \
   libxcb1-dev libfontconfig-dev libfreetype-dev libvulkan-dev libgbm-dev libclang-dev
-# Fedora
-sudo dnf install pkg-config libxkbcommon-devel libxkbcommon-x11-devel wayland-devel \
-  libxcb-devel fontconfig-devel freetype-devel vulkan-loader-devel mesa-libgbm-devel clang-devel
 ```
+
+Then:
 
 ```sh
 git clone https://github.com/khaodius/deltos.git
 cd deltos
-cargo run                      # debug build
-cargo build --release          # optimized build in target/release
+cargo run --release
 ```
 
-## Development
+`DELTOS_DEMO=1 cargo run` opens a built-in demo database with a 50 million row table, so you
+can try Deltos without a server.
 
-CI runs these checks on Linux and Windows, plus the driver tests against live PostgreSQL,
-MySQL, MariaDB and MongoDB servers:
+## Contributing
 
-```sh
-cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-```
-
-The workspace is split so most of Deltos is tested without a window:
-
-| Crate                                         | Purpose                                                        |
-| --------------------------------------------- | -------------------------------------------------------------- |
-| [`deltos`](crates/deltos)                     | The application: windows, title bar, panels, settings screen   |
-| [`deltos-data`](crates/deltos-data)           | The driver contract: connections, schemas, rows and values     |
-| [`deltos-drivers`](crates/deltos-drivers)     | PostgreSQL, MySQL and MariaDB, SQLite and MongoDB behind it    |
-| [`deltos-grid`](crates/deltos-grid)           | The bounded row cache and spill store behind the table view    |
-| [`deltos-dock`](crates/deltos-dock)           | The panel layout: splits, tabs and floating windows            |
-| [`deltos-settings`](crates/deltos-settings)   | Settings, defaults and the TOML file                           |
-| [`deltos-updater`](crates/deltos-updater)     | Signed updates from GitHub releases, and the `deltos-sign` tool |
-
-`third_party/xattr` is xattr 0.2.3 with one constant changed so it builds against current libc on
-Linux; [its README](third_party/xattr/README.md) explains why.
-
-To release, set the new version in `[workspace.package]` of `Cargo.toml`, run `cargo check` to
-update `Cargo.lock`, add a section to [CHANGELOG.md](CHANGELOG.md) and merge to `main`. The
-release workflow builds, signs, tags and publishes it; [docs/RELEASING.md](docs/RELEASING.md)
-has the details and the signing key setup.
+Read [AGENTS.md](AGENTS.md) first. It covers the crate layout, the checks CI runs and how
+releases are made. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) explains how drivers, the row
+cache and the dock fit together.
 
 ## License
 
-[Apache License 2.0](LICENSE). The bundled Inter and JetBrains Mono fonts keep their own
-licenses, listed in [assets/fonts](assets/fonts/README.md).
+[Apache License 2.0](LICENSE). The bundled fonts keep their own licenses, listed in
+[assets/fonts](assets/fonts/README.md).

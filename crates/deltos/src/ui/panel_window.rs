@@ -106,6 +106,9 @@ impl Render for PanelWindow {
             .bg(t.title_bar)
             .border_b_1()
             .border_color(t.border)
+            .when_some(t.title_bar_line, |el, line| {
+                el.border_b_2().border_color(line)
+            })
             .child(
                 // The header moves the window, as it may have no system title bar. The
                 // press is recorded first so the move can be matched to the main window.
@@ -169,7 +172,19 @@ impl Render for PanelWindow {
             // behind it, as small panel windows often sit over the main one.
             .when(own_bar, |el| el.border_1().border_color(t.border_strong))
             .child(header)
-            .child(div().flex_1().min_h_0().child(self.dock.clone()))
+            .child(
+                // A torn-off panel lands in its new window with the same squash and
+                // stretch as one docking.
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .child(crate::ui::dock::settle(
+                        div().absolute().inset_0().child(self.dock.clone()),
+                        t.motion.then_some(("intro", 0)),
+                        &t,
+                    )),
+            )
             .when(own_bar, |el| el.child(title_bar::resize_grips(window)))
     }
 }
