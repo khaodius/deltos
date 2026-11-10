@@ -13,6 +13,11 @@ concurrency:
 permissions:
   contents: read
 
+# Actions minutes are limited on a private repository, and Windows minutes count double.
+# Pull requests therefore run the Linux checks and the driver tests only; pushes to main and
+# manual runs also check Windows, the minimum Rust version and the release builds, so main is
+# always verified on every platform before a release is cut from it.
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -23,9 +28,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        platform:
-          - { name: Linux, os: ubuntu-22.04 }
-          - { name: Windows, os: windows-latest }
+        platform: ${{ fromJSON(github.event_name == 'pull_request' && '[{"name":"Linux","os":"ubuntu-22.04"}]' || '[{"name":"Linux","os":"ubuntu-22.04"},{"name":"Windows","os":"windows-latest"}]') }}
     steps:
       - uses: actions/checkout@v5
 
@@ -55,6 +58,7 @@ jobs:
 
   msrv:
     name: Minimum Rust version
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v5
@@ -154,6 +158,7 @@ jobs:
   build:
     name: Build (${{ matrix.platform.name }})
     needs: check
+    if: github.event_name != 'pull_request'
     runs-on: ${{ matrix.platform.os }}
     strategy:
       fail-fast: false
