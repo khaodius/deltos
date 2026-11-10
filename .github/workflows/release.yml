@@ -34,7 +34,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
-      release: ${{ steps.version.outputs.release }}
+      release: ${{ steps.key.outputs.release }}
     steps:
       - uses: actions/checkout@v5
 
@@ -80,18 +80,31 @@ jobs:
 
       # A release without a signed manifest would be one no installed copy can update to, so
       # the key is checked before any package is built. docs/RELEASING.md explains the setup.
+      # Until signing is set up at all (no public key committed and no secret), pushes to main
+      # publish nothing and say why; once one half exists, a missing other half is an error.
       - name: Check the update signing key
-        if: steps.version.outputs.release == 'true'
+        id: key
         env:
+          RELEASE: ${{ steps.version.outputs.release }}
           HAS_SIGNING_KEY: ${{ secrets.DELTOS_UPDATE_KEY != '' }}
         run: |
+          has_public_key=true
           if [ ! -s packaging/update-key.pub ] || [ -z "$(tr -d '[:space:]' < packaging/update-key.pub)" ]; then
-            echo "::error::packaging/update-key.pub is empty; run deltos-sign keygen and commit the public key (see docs/RELEASING.md)"
-            exit 1
+            has_public_key=false
           fi
-          if [ "$HAS_SIGNING_KEY" != true ]; then
-            echo "::error::The DELTOS_UPDATE_KEY secret is not set (see docs/RELEASING.md)"
+          if [ "$RELEASE" != true ]; then
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          elif [ "$has_public_key" = false ] && [ "$HAS_SIGNING_KEY" != true ]; then
+            echo "::warning::Update signing is not set up yet, so nothing is published. Set the DELTOS_UPDATE_KEY secret and commit packaging/update-key.pub (see docs/RELEASING.md), then run this workflow again."
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          elif [ "$has_public_key" = false ]; then
+            echo "::error::The DELTOS_UPDATE_KEY secret is set but packaging/update-key.pub is empty; commit the public key (see docs/RELEASING.md)"
             exit 1
+          elif [ "$HAS_SIGNING_KEY" != true ]; then
+            echo "::error::packaging/update-key.pub is committed but the DELTOS_UPDATE_KEY secret is not set (see docs/RELEASING.md)"
+            exit 1
+          else
+            echo "release=true" >> "$GITHUB_OUTPUT"
           fi
 
   linux:
