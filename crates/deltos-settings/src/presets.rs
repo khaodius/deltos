@@ -19,6 +19,7 @@ pub enum PresetPanel {
     Objects,
     Inspector,
     History,
+    Tasks,
 }
 
 impl PresetPanel {
@@ -29,6 +30,7 @@ impl PresetPanel {
             PresetPanel::Objects => Some(PanelKind::Objects),
             PresetPanel::Inspector => Some(PanelKind::Inspector),
             PresetPanel::History => Some(PanelKind::History),
+            PresetPanel::Tasks => Some(PanelKind::Tasks),
         }
     }
 
@@ -37,6 +39,7 @@ impl PresetPanel {
             PanelKind::Objects => PresetPanel::Objects,
             PanelKind::Inspector => PresetPanel::Inspector,
             PanelKind::History => PresetPanel::History,
+            PanelKind::Tasks => PresetPanel::Tasks,
             _ => PresetPanel::Documents,
         }
     }

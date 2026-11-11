@@ -550,6 +550,7 @@ pub const KEYBIND_ACTIONS: &[(&str, &str, &str)] = &[
     ("discard-changes", "ctrl-shift-z", "Discard staged changes"),
     ("add-row", "ctrl-shift-n", "Add a row"),
     ("command-palette", "ctrl-k", "Command palette"),
+    ("toggle-tasks", "ctrl-shift-a", "Show or hide the tasks"),
     (
         "command-palette-alt",
         "ctrl-shift-p",

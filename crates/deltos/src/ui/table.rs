@@ -27,6 +27,7 @@ use gpui::{
 
 use crate::net::Net;
 use crate::state::{AppState, Inspected, RowSource, StateEvent};
+use crate::tasks::{self, CacheFollower, TaskOutcome};
 use crate::theme::{Theme, theme};
 use crate::ui::edit;
 use crate::ui::grid::{Batch, CellInput, GridEvent, GridView, MenuTarget, RowRef};
@@ -160,6 +161,8 @@ pub struct TablePanel {
     /// The status bar's import and export menu is open.
     transfer_menu: bool,
     structure: Option<Entity<StructureView>>,
+    /// Loads and counts, in the task list.
+    loading: CacheFollower,
     _subs: Vec<Subscription>,
 }
 
@@ -261,6 +264,7 @@ impl TablePanel {
             review_focus: cx.focus_handle(),
             transfer_menu: false,
             structure: None,
+            loading: CacheFollower::default(),
             _subs: subs,
         };
         let weak = cx.entity().downgrade();
@@ -302,7 +306,27 @@ impl TablePanel {
             self.attach(cx);
         } else if requested {
             self.requery(cx);
+        } else {
+            // A tab opened in the background loads once it is first shown.
+            self.follow_loading(cx);
         }
+    }
+
+    /// Lists the grid's loading (its pages and its count) as a task until it stops.
+    /// It has no Cancel: the drivers can only cancel everything a connection runs (on
+    /// MySQL, only the query tab's statement), so a Cancel here would stop an unrelated
+    /// query on the same connection, and on MySQL not even the load.
+    fn follow_loading(&mut self, cx: &mut Context<Self>) {
+        let Some(cache) = self.grid.read(cx).cache().cloned() else {
+            return;
+        };
+        let s = self.state.read(cx);
+        let Some(session) = s.session(&self.connection) else {
+            return;
+        };
+        let name = Some(SharedString::from(session.name.clone()));
+        let label = format!("Loading {}", self.object.name);
+        self.loading.follow(cache, label.into(), name, None, cx);
     }
 
     /// Starts loading once the connection is open.
@@ -343,6 +367,7 @@ impl TablePanel {
             g.set_cache(Some(cache), false, cx);
         });
         self.loader = Some(loader);
+        self.follow_loading(cx);
         // The structure loads alongside, for the structure view and the filter columns.
         let object = self.object.clone();
         let job = cx
@@ -381,7 +406,7 @@ impl TablePanel {
             return;
         };
         loader.set_query(self.query(cx));
-        self.pager.counting = None;
+        self.forget_count(cx);
         let columns = self.grid.read(cx).columns().clone();
         let sort: Vec<(usize, SortDirection)> = self
             .sort
@@ -412,6 +437,7 @@ impl TablePanel {
                 s.inspect(None, cx);
             }
         });
+        self.follow_loading(cx);
         cx.notify();
     }
 
@@ -574,6 +600,14 @@ impl TablePanel {
             .map(|s| s.conn.clone())
     }
 
+    /// The connection's name, for the task list.
+    fn connection_label(&self, cx: &App) -> Option<SharedString> {
+        self.state
+            .read(cx)
+            .session(&self.connection)
+            .map(|s| SharedString::from(s.name.clone()))
+    }
+
     /// Whether edits go to the database at once rather than being staged.
     fn immediate(&self, cx: &App) -> bool {
         self.state.read(cx).settings.data.commit_immediately
@@ -596,6 +630,8 @@ impl TablePanel {
             return;
         };
         let object = self.object.clone();
+        let label = format!("Saving changes to {}", object.name);
+        let task = tasks::start_task(label, self.connection_label(cx), None, cx);
         let job = cx.global::<Net>().run(async move {
             conn.apply_edits(&object, &edits)
                 .await
@@ -603,6 +639,19 @@ impl TablePanel {
         });
         cx.spawn(async move |this, cx| {
             let result = job.await.unwrap_or_else(|| Err("cancelled".into()));
+            if let Some(id) = task {
+                cx.update(|cx| {
+                    if let Ok(n) = &result {
+                        tasks::progress(id, *n, cx);
+                    }
+                    let outcome = match &result {
+                        Ok(_) => TaskOutcome::Done,
+                        Err(e) => TaskOutcome::Failed(e.clone()),
+                    };
+                    tasks::finish(id, outcome, cx);
+                })
+                .ok();
+            }
             this.update(cx, |this, cx| done(this, result, cx)).ok();
         })
         .detach();
@@ -1276,6 +1325,14 @@ impl TablePanel {
         self.notify_user("Committing…", false, cx);
         let object = self.object.clone();
         let total = edits.len();
+        // Listed without Cancel, like saving an edit: a commit stopped halfway would leave
+        // part of it saved on a database without transactions.
+        let task = tasks::start_task(
+            format!("Saving changes to {}", object.name),
+            self.connection_label(cx),
+            None,
+            cx,
+        );
         let all_at_once = conn.capabilities().transactions;
         let job = cx.global::<Net>().run(async move {
             if all_at_once {
@@ -1298,6 +1355,17 @@ impl TablePanel {
             let result = job
                 .await
                 .unwrap_or_else(|| Err((0, "the commit was cancelled".into())));
+            if let Some(task) = task {
+                cx.update(|cx| {
+                    let (saved, outcome) = match &result {
+                        Ok(n) => (*n, TaskOutcome::Done),
+                        Err((saved, e)) => (*saved, TaskOutcome::Failed(e.clone())),
+                    };
+                    tasks::progress(task, saved as u64, cx);
+                    tasks::finish(task, outcome, cx);
+                })
+                .ok();
+            }
             this.update(cx, |this, cx| {
                 this.committing = false;
                 let ok = result.is_ok();
@@ -2070,7 +2138,7 @@ impl TablePanel {
         // Reopened later in the session, the table comes back without them too.
         let view = self.saved_view(cx);
         memory::remember(cx, &self.connection, &self.object, view);
-        self.pager.counting = None;
+        self.forget_count(cx);
         self.loader = None;
         self.info = None;
         // The row in the inspector had the old columns.

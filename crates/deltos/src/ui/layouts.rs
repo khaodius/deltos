@@ -55,6 +55,7 @@ pub fn summary(preset: &LayoutPreset) -> String {
             PresetPanel::Objects => "objects",
             PresetPanel::Inspector => "inspector",
             PresetPanel::History => "history",
+            PresetPanel::Tasks => "tasks",
         };
         if !words.contains(&word) {
             words.push(word);

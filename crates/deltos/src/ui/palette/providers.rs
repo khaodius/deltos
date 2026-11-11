@@ -30,6 +30,8 @@ pub enum Kind {
     SavedQuery,
     /// A layout preset to apply.
     Layout,
+    /// Running work, to show or cancel.
+    Task,
 }
 
 impl Kind {
@@ -43,6 +45,7 @@ impl Kind {
             Kind::Setting => "Settings",
             Kind::SavedQuery => "Saved query",
             Kind::Layout => "Layout",
+            Kind::Task => "Task",
         }
     }
 }
@@ -61,7 +64,10 @@ impl Scope {
     pub fn admits(self, kind: Kind) -> bool {
         match self {
             Scope::All => true,
-            Scope::Commands => matches!(kind, Kind::Action | Kind::Setting | Kind::Layout),
+            Scope::Commands => matches!(
+                kind,
+                Kind::Action | Kind::Setting | Kind::Layout | Kind::Task
+            ),
             Scope::Objects => kind == Kind::Object,
             Scope::Connections => kind == Kind::Connection,
         }
@@ -175,6 +181,7 @@ pub const PROVIDERS: &[Provider] = &[
     objects,
     saved_queries,
     crate::ui::layouts::provider,
+    tasks,
     settings_pages,
 ];
 
@@ -249,6 +256,7 @@ const ACTIONS: &[(&str, ActionCtor)] = &[
     ("refresh", || Box::new(crate::Refresh)),
     ("toggle-sidebar", || Box::new(crate::ToggleSidebar)),
     ("toggle-inspector", || Box::new(crate::ToggleInspector)),
+    ("toggle-tasks", || Box::new(crate::ToggleTasks)),
     ("settings", || Box::new(crate::OpenSettings)),
     ("zoom-in", || Box::new(crate::ZoomIn)),
     ("zoom-out", || Box::new(crate::ZoomOut)),
@@ -518,6 +526,32 @@ fn settings_pages(s: &Sources, out: &mut Vec<PaletteItem>) {
             )
             .search("preferences"),
         );
+    }
+}
+
+/// Each running task, to cancel; the toggle for the panel comes with the actions.
+fn tasks(s: &Sources, out: &mut Vec<PaletteItem>) {
+    let Some(list) = crate::tasks::list(s.cx) else {
+        return;
+    };
+    let now = std::time::Instant::now();
+    for e in list.read(s.cx).registry.entries() {
+        if !e.can_cancel() || !e.is_visible(now) {
+            continue;
+        }
+        let id = e.id;
+        let mut item = PaletteItem::new(
+            format!("task:{id:?}"),
+            Kind::Task,
+            Icon::Stop,
+            format!("Cancel: {}", e.label),
+            move |_, cx| crate::tasks::cancel(id, cx),
+        )
+        .search("stop task running");
+        if let Some(c) = &e.connection {
+            item = item.detail(c.clone());
+        }
+        out.push(item);
     }
 }
 

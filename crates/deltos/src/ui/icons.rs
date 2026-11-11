@@ -12,6 +12,7 @@ use gpui::{
 pub enum Icon {
     /// The Deltos mark, for the title bar.
     Logo,
+    Activity,
     Check,
     ChevronDown,
     ChevronLeft,
@@ -60,8 +61,9 @@ pub enum Icon {
 }
 
 impl Icon {
-    pub const ALL: [Icon; 46] = [
+    pub const ALL: [Icon; 47] = [
         Self::Logo,
+        Self::Activity,
         Self::Check,
         Self::ChevronDown,
         Self::ChevronLeft,
@@ -112,6 +114,7 @@ impl Icon {
     pub const fn name(self) -> &'static str {
         match self {
             Self::Logo => "logo",
+            Self::Activity => "activity",
             Self::Check => "check",
             Self::ChevronDown => "chevron-down",
             Self::ChevronLeft => "chevron-left",
@@ -167,6 +170,7 @@ impl Icon {
     const fn document(self) -> &'static [u8] {
         match self {
             Self::Logo => include_bytes!("../../../../assets/icons/deltos-glyph.svg"),
+            Self::Activity => include_bytes!("../../../../assets/ui-icons/activity.svg"),
             Self::Check => include_bytes!("../../../../assets/ui-icons/check.svg"),
             Self::ChevronDown => include_bytes!("../../../../assets/ui-icons/chevron-down.svg"),
             Self::ChevronLeft => include_bytes!("../../../../assets/ui-icons/chevron-left.svg"),

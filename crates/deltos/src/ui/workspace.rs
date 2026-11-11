@@ -42,6 +42,7 @@ use crate::ui::query::QueryPanel;
 use crate::ui::settings::SettingsPanel;
 use crate::ui::sidebar::ObjectsPanel;
 use crate::ui::table::TablePanel;
+use crate::ui::tasks::TasksPanel;
 
 /// How far the pointer moves with the button down before a press becomes a drag.
 const DRAG_SLOP: f32 = 5.0;
@@ -63,6 +64,7 @@ pub enum PanelView {
     Table(Entity<TablePanel>),
     Query(Entity<QueryPanel>),
     Settings(Entity<SettingsPanel>),
+    Tasks(Entity<TasksPanel>),
 }
 
 impl PanelView {
@@ -76,6 +78,7 @@ impl PanelView {
             PanelView::Table(v) => AnyView::from(v.clone()).cached(full),
             PanelView::Query(v) => AnyView::from(v.clone()).cached(full),
             PanelView::Settings(v) => AnyView::from(v.clone()).cached(full),
+            PanelView::Tasks(v) => AnyView::from(v.clone()).cached(full),
         }
     }
 
@@ -88,6 +91,7 @@ impl PanelView {
             PanelView::Table(v) => v.read(cx).title(),
             PanelView::Query(v) => v.read(cx).title(),
             PanelView::Settings(_) => "Settings".into(),
+            PanelView::Tasks(_) => "Tasks".into(),
         }
     }
 
@@ -100,6 +104,7 @@ impl PanelView {
             PanelView::Table(v) => v.read(cx).icon(),
             PanelView::Query(_) => Icon::Code,
             PanelView::Settings(_) => Icon::Settings,
+            PanelView::Tasks(_) => Icon::Activity,
         }
     }
 
@@ -116,7 +121,10 @@ impl PanelView {
     pub fn is_tool(&self) -> bool {
         matches!(
             self,
-            PanelView::Objects(_) | PanelView::Inspector(_) | PanelView::History(_)
+            PanelView::Objects(_)
+                | PanelView::Inspector(_)
+                | PanelView::History(_)
+                | PanelView::Tasks(_)
         )
     }
 
@@ -295,6 +303,7 @@ impl Workspace {
                 PanelView::Query(cx.new(|cx| QueryPanel::new(state, id, connection, text, cx)))
             }
             PanelKind::Settings => PanelView::Settings(cx.new(|cx| SettingsPanel::new(state, cx))),
+            PanelKind::Tasks => PanelView::Tasks(cx.new(TasksPanel::new)),
         }
     }
 
@@ -355,7 +364,7 @@ impl Workspace {
         let target = match &kind {
             PanelKind::Objects => self.tool_target(Edge::Left),
             PanelKind::Inspector => self.tool_target(Edge::Right),
-            PanelKind::History => match self.document_anchor() {
+            PanelKind::History | PanelKind::Tasks => match self.document_anchor() {
                 Some(anchor) => DropTarget::Stack {
                     anchor,
                     zone: Zone::Edge(Edge::Bottom),

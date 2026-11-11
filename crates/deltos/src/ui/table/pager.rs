@@ -7,6 +7,8 @@
 //! for. The total is the database's estimate until it is known; on demand it is counted
 //! exactly in the background, and the count can be stopped.
 
+use std::rc::Rc;
+
 use deltos_grid::RowCount;
 use gpui::{
     AnyElement, App, AppContext, Context, Entity, Focusable, SharedString, Subscription, Task,
@@ -15,6 +17,7 @@ use gpui::{
 
 use super::TablePanel;
 use crate::net::Net;
+use crate::tasks::{self, CancelFn, TaskId, TaskOutcome};
 use crate::theme::Theme;
 use crate::ui::icons::Icon;
 use crate::ui::text_input::{InputEvent, TextInput};
@@ -81,7 +84,9 @@ pub struct Pager {
     pub row: Entity<TextInput>,
     /// An exact count running on request; dropping it stops waiting.
     pub counting: Option<Task<()>>,
-    _subs: [Subscription; 2],
+    /// The count's line in the task list.
+    count_task: Option<TaskId>,
+    _subs: [Subscription; 3],
 }
 
 impl Pager {
@@ -108,12 +113,19 @@ impl Pager {
                 InputEvent::Cancel => this.close_pager(cx),
                 InputEvent::Changed => {}
             }),
+            // A tab closed while it counts stops waiting for the count.
+            cx.on_release(|this, cx| {
+                if let Some(task) = this.pager.count_task.take() {
+                    tasks::finish(task, TaskOutcome::Cancelled, cx);
+                }
+            }),
         ];
         Self {
             open: false,
             page,
             row,
             counting: None,
+            count_task: None,
             _subs: subs,
         }
     }
@@ -177,10 +189,32 @@ impl TablePanel {
             return;
         };
         let job = cx.global::<Net>().run(loader.count_exact());
+        self.forget_count(cx);
+        let weak = cx.entity().downgrade();
+        let cancel: CancelFn = Rc::new(move |cx| {
+            weak.update(cx, |this, cx| this.stop_count(cx)).ok();
+        });
+        self.pager.count_task = tasks::start_task(
+            format!("Counting {}", self.object.name),
+            self.connection_label(cx),
+            Some(cancel),
+            cx,
+        );
         self.pager.counting = Some(cx.spawn(async move |this, cx| {
             let result = job.await;
             this.update(cx, |this, cx| {
                 this.pager.counting = None;
+                if let Some(task) = this.pager.count_task.take() {
+                    let outcome = match &result {
+                        Some(Ok(n)) => {
+                            tasks::progress(task, *n, cx);
+                            TaskOutcome::Done
+                        }
+                        Some(Err(deltos_data::Error::Cancelled)) | None => TaskOutcome::Cancelled,
+                        Some(Err(e)) => TaskOutcome::Failed(e.to_string()),
+                    };
+                    tasks::finish(task, outcome, cx);
+                }
                 match result {
                     Some(Ok(_)) | Some(Err(deltos_data::Error::Cancelled)) | None => {}
                     Some(Err(e)) => this.notify_user(format!("Could not count: {e}"), true, cx),
@@ -196,8 +230,16 @@ impl TablePanel {
         if let Some(loader) = &self.loader {
             loader.stop_counting();
         }
-        self.pager.counting = None;
+        self.forget_count(cx);
         cx.notify();
+    }
+
+    /// Stops waiting for an exact count, which the task list then shows as cancelled.
+    pub(super) fn forget_count(&mut self, cx: &mut Context<Self>) {
+        self.pager.counting = None;
+        if let Some(task) = self.pager.count_task.take() {
+            tasks::finish(task, TaskOutcome::Cancelled, cx);
+        }
     }
 
     /// The row range, the count button and the page control, for the status bar.
