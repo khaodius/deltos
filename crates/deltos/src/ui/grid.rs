@@ -22,14 +22,17 @@ use deltos_grid::{GridCache, Hooks, NotifyFn, RowCount, Status};
 use deltos_settings::DateFormat;
 use futures::StreamExt;
 use gpui::{
-    App, BorderStyle, Bounds, ClipboardItem, Context, ElementId, EventEmitter, FocusHandle,
+    App, BorderStyle, Bounds, ClipboardItem, Context, ElementId, Entity, EventEmitter, FocusHandle,
     Focusable, Hsla, IntoElement, KeyBinding, MouseButton, Pixels, Point, Render, SharedString,
-    Task, TextRun, Window, actions, canvas, div, fill, outline, point, prelude::*, px, size,
+    Subscription, Task, TextRun, Window, actions, canvas, div, fill, outline, point, prelude::*,
+    px, size,
 };
 
 use crate::net::Net;
 use crate::theme::{Theme, theme};
 use crate::ui::icons::{Icon, icon};
+use crate::ui::text_input::{InputEvent, TextInput};
+use crate::ui::{MenuItem, context_menu};
 
 actions!(
     grid,
@@ -51,6 +54,7 @@ actions!(
         CopyCells,
         CopyWithHeaders,
         SelectAllCells,
+        EditCell,
     ]
 );
 
@@ -74,6 +78,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-c", CopyCells, ctx),
         KeyBinding::new("ctrl-shift-c", CopyWithHeaders, ctx),
         KeyBinding::new("ctrl-a", SelectAllCells, ctx),
+        KeyBinding::new("enter", EditCell, ctx),
+        KeyBinding::new("f2", EditCell, ctx),
     ]);
 }
 
@@ -129,6 +135,38 @@ pub enum GridEvent {
     Sort(usize),
     /// The selection moved to this row.
     Selected(u64),
+    /// An edited cell was saved: Enter, or a click somewhere else.
+    Edit {
+        row: u64,
+        col: usize,
+        input: CellInput,
+    },
+}
+
+/// What the person entered in a cell, before it is read as the column's type.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CellInput {
+    Text(String),
+    Null,
+}
+
+/// What a right click landed on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuTarget {
+    Cell(u64, usize),
+    Header(usize),
+}
+
+/// Adds the owner's items to the grid's right-click menu, after the grid's own.
+pub type MenuProvider = Rc<dyn Fn(MenuTarget, &GridView, &App) -> Vec<MenuItem>>;
+
+/// A cell being edited in place.
+struct CellEditor {
+    row: u64,
+    col: usize,
+    input: Entity<TextInput>,
+    original: String,
+    _subs: Vec<Subscription>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -190,6 +228,12 @@ pub struct GridView {
     /// Shown in the body when there are no columns: a statement that changed rows, an
     /// error, or a hint.
     pub message: Option<SharedString>,
+    /// Whether cells can be edited in place, which the owner decides.
+    pub editable: bool,
+    editor: Option<CellEditor>,
+    /// An open right-click menu: where, and over what.
+    context: Option<(Point<Pixels>, MenuTarget)>,
+    menu_provider: Option<MenuProvider>,
     _pump: Option<Task<()>>,
 }
 
@@ -211,7 +255,132 @@ impl GridView {
             texts: HashMap::new(),
             drag: None,
             message: None,
+            editable: false,
+            editor: None,
+            context: None,
+            menu_provider: None,
             _pump: None,
+        }
+    }
+
+    pub fn set_menu_provider(&mut self, provider: MenuProvider) {
+        self.menu_provider = Some(provider);
+    }
+
+    /// The selection, cells as `(rows, columns)`.
+    pub fn selected_ranges(&self) -> Option<(Range<u64>, Range<usize>)> {
+        self.selection.map(|s| (s.rows(), s.cols()))
+    }
+
+    /// One loaded value.
+    pub fn value(&self, row: u64, col: usize) -> Option<Value> {
+        self.cache
+            .as_ref()?
+            .with_row(row, |r| r.get(col).cloned())
+            .flatten()
+    }
+
+    /// Shows a value the database accepted, without reloading.
+    pub fn set_value(&mut self, row: u64, col: usize, value: Value, cx: &mut Context<Self>) {
+        if let Some(cache) = &self.cache {
+            cache.set_cell(row, col, value);
+        }
+        self.texts.remove(&(row, col as u32));
+        cx.notify();
+    }
+
+    /// Opens the editor on `cell`, its text selected so typing replaces it.
+    pub fn begin_edit(&mut self, cell: (u64, usize), window: &mut Window, cx: &mut Context<Self>) {
+        if !self.editable || cell.1 >= self.columns.len() {
+            return;
+        }
+        let Some(value) = self.value(cell.0, cell.1) else {
+            return;
+        };
+        self.commit_edit(false, window, cx);
+        self.context = None;
+        let original = if value.is_null() {
+            String::new()
+        } else {
+            value.to_string()
+        };
+        let placeholder = if value.is_null() { "NULL" } else { "" };
+        let text = original.clone();
+        let input = cx.new(|cx| {
+            let mut input = TextInput::new(placeholder, cx);
+            input.set_text(text, cx);
+            input.select_everything(cx);
+            input
+        });
+        let focus = input.read(cx).focus_handle(cx);
+        let subs = vec![
+            cx.subscribe_in(&input, window, |this, _, e, window, cx| match e {
+                InputEvent::Submit => this.commit_edit(true, window, cx),
+                InputEvent::Cancel => this.cancel_edit(window, cx),
+                InputEvent::Changed => {}
+            }),
+            // Clicking anywhere else saves, as Enter does.
+            cx.on_blur(&focus, window, |this, window, cx| {
+                this.commit_edit(false, window, cx)
+            }),
+        ];
+        window.focus(&focus);
+        self.selection = Some(Selection {
+            anchor: cell,
+            head: cell,
+        });
+        self.editor = Some(CellEditor {
+            row: cell.0,
+            col: cell.1,
+            input,
+            original,
+            _subs: subs,
+        });
+        let t = theme(cx).clone();
+        self.reveal(&t);
+        cx.notify();
+    }
+
+    /// Closes the editor and reports the new text when it changed. `refocus` puts the
+    /// keyboard back on the grid, after Enter; a click elsewhere keeps its own focus.
+    fn commit_edit(&mut self, refocus: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(editor) = self.editor.take() else {
+            return;
+        };
+        let text = editor.input.read(cx).text().to_owned();
+        if text != editor.original {
+            cx.emit(GridEvent::Edit {
+                row: editor.row,
+                col: editor.col,
+                input: CellInput::Text(text),
+            });
+        }
+        if refocus {
+            window.focus(&self.focus);
+        }
+        cx.notify();
+    }
+
+    fn cancel_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.editor.take().is_some() {
+            window.focus(&self.focus);
+            cx.notify();
+        }
+    }
+
+    /// Sets the selected cells to NULL, one edit per cell.
+    pub fn set_null(&mut self, cx: &mut Context<Self>) {
+        let Some((rows, cols)) = self.selected_ranges() else {
+            return;
+        };
+        for row in rows.take(1000) {
+            for col in cols.clone() {
+                cx.emit(GridEvent::Edit {
+                    row,
+                    col,
+                    input: CellInput::Null,
+                });
+            }
         }
     }
 
@@ -461,6 +630,7 @@ impl GridView {
     }
 
     fn step(&mut self, dr: i64, dc: i64, extend: bool, cx: &mut Context<Self>) {
+        self.context = None;
         let total = self.total_rows();
         if total == 0 || self.columns.is_empty() {
             return;
@@ -475,6 +645,30 @@ impl GridView {
 
     fn page(&self, cx: &App) -> i64 {
         self.visible_rows(theme(cx)).saturating_sub(1).max(1) as i64
+    }
+
+    /// The selected cells in one of the copy formats.
+    fn copy_as(&mut self, format: CopyFormat, cx: &mut Context<Self>) {
+        let (Some(s), Some(cache)) = (self.selection, self.cache.clone()) else {
+            return;
+        };
+        let rows = s.rows();
+        let rows = rows.start..rows.end.min(rows.start + COPY_LIMIT);
+        let cols: Vec<usize> = s.cols().filter(|c| *c < self.columns.len()).collect();
+        let names: Vec<&str> = cols
+            .iter()
+            .map(|c| self.columns[*c].name.as_str())
+            .collect();
+        let mut values: Vec<Vec<Value>> = Vec::new();
+        cache.with_rows(rows, |_, row| {
+            values.push(
+                cols.iter()
+                    .map(|c| row.and_then(|r| r.get(*c)).cloned().unwrap_or(Value::Null))
+                    .collect(),
+            );
+        });
+        let out = format_rows(format, &names, &values);
+        cx.write_to_clipboard(ClipboardItem::new_string(out));
     }
 
     /// The selected cells as tab-separated text, rows on lines.
@@ -630,6 +824,149 @@ impl GridView {
         .size_0()
     }
 
+    /// The grid's own right-click items, then the owner's.
+    fn menu_items(&self, target: MenuTarget, cx: &mut Context<Self>) -> Vec<MenuItem> {
+        let weak = cx.entity().downgrade();
+        let act = |f: fn(&mut GridView, &mut Window, &mut Context<GridView>)| {
+            let w = weak.clone();
+            move |window: &mut Window, cx: &mut App| {
+                w.update(cx, |g, cx| f(g, window, cx)).ok();
+            }
+        };
+        let mut items = Vec::new();
+        match target {
+            MenuTarget::Cell(_, col) => {
+                let column = self.columns.get(col);
+                let nullable = column.is_some_and(|c| c.nullable != Some(false));
+                let several = self
+                    .selection
+                    .is_some_and(|s| s.rows().end - s.rows().start > 1 || s.cols().len() > 1);
+                if self.editable {
+                    items.push(
+                        MenuItem::new(
+                            "Edit cell",
+                            act(|g, window, cx| {
+                                if let Some(s) = g.selection {
+                                    g.begin_edit(s.head, window, cx)
+                                }
+                            }),
+                        )
+                        .detail("Enter")
+                        .enabled(!several),
+                    );
+                    items.push(
+                        MenuItem::new(
+                            if several {
+                                "Set cells to NULL"
+                            } else {
+                                "Set to NULL"
+                            },
+                            act(|g, _, cx| g.set_null(cx)),
+                        )
+                        .enabled(nullable),
+                    );
+                    items.push(MenuItem::separator());
+                }
+                items.push(
+                    MenuItem::new("Copy", act(|g, _, cx| g.copy(false, cx))).detail("Ctrl+C"),
+                );
+                items.push(
+                    MenuItem::new("Copy with headers", act(|g, _, cx| g.copy(true, cx)))
+                        .detail("Ctrl+Shift+C"),
+                );
+                items.push(MenuItem::new(
+                    "Copy as CSV",
+                    act(|g, _, cx| g.copy_as(CopyFormat::Csv, cx)),
+                ));
+                items.push(MenuItem::new(
+                    "Copy as JSON",
+                    act(|g, _, cx| g.copy_as(CopyFormat::Json, cx)),
+                ));
+                items.push(MenuItem::new(
+                    "Copy as Markdown",
+                    act(|g, _, cx| g.copy_as(CopyFormat::Markdown, cx)),
+                ));
+                items.push(MenuItem::separator());
+                items.push(
+                    MenuItem::new("Select all", act(|g, _, cx| g.select_all(cx))).detail("Ctrl+A"),
+                );
+            }
+            MenuTarget::Header(col) => {
+                if let Some(c) = self.columns.get(col) {
+                    let name = c.name.clone();
+                    items.push(MenuItem::new("Copy column name", move |_, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(name.clone()))
+                    }));
+                }
+                let w = weak.clone();
+                items.push(MenuItem::new("Select column", move |_, cx| {
+                    w.update(cx, |g, cx| g.select_column(col, cx)).ok();
+                }));
+                let w = weak.clone();
+                items.push(MenuItem::new("Fit column to its contents", move |_, cx| {
+                    w.update(cx, |g, cx| g.fit_column(col, cx)).ok();
+                }));
+                items.push(MenuItem::new(
+                    "Fit every column",
+                    act(|g, _, cx| {
+                        g.fitted = false;
+                        cx.notify();
+                    }),
+                ));
+            }
+        }
+        if let Some(provider) = self.menu_provider.clone() {
+            let extra = provider(target, self, cx);
+            if !extra.is_empty() {
+                items.push(MenuItem::separator());
+                items.extend(extra);
+            }
+        }
+        items
+    }
+
+    fn select_column(&mut self, col: usize, cx: &mut Context<Self>) {
+        let total = self.total_rows();
+        if total > 0 {
+            self.selection = Some(Selection {
+                anchor: (0, col),
+                head: (total - 1, col),
+            });
+            cx.notify();
+        }
+    }
+
+    fn select_all(&mut self, cx: &mut Context<Self>) {
+        let total = self.total_rows();
+        if total > 0 && !self.columns.is_empty() {
+            self.selection = Some(Selection {
+                anchor: (0, 0),
+                head: (total - 1, self.columns.len() - 1),
+            });
+            cx.notify();
+        }
+    }
+
+    /// Fits one column to the widest of the values on screen.
+    fn fit_column(&mut self, col: usize, cx: &mut Context<Self>) {
+        let (Some(cache), Some(column)) = (self.cache.clone(), self.columns.get(col)) else {
+            return;
+        };
+        let t = theme(cx).clone();
+        let char_w = f32::from(t.mono_size) * 0.62 / t.scale;
+        let first = self.top.floor() as u64;
+        let mut widest = column.name.chars().count();
+        cache.with_rows(first..first + self.visible_rows(&t), |_, row| {
+            if let Some(v) = row.and_then(|r| r.get(col)) {
+                widest = widest.max(v.preview(120).chars().count());
+            }
+        });
+        if let Some(w) = self.widths.get_mut(col) {
+            *w = (widest as f32 * char_w + 30.0).clamp(MIN_COLUMN, 900.0);
+        }
+        cx.notify();
+    }
+
     fn header(
         &self,
         visible: &[(usize, f32, f32)],
@@ -673,6 +1010,14 @@ impl GridView {
                     .cursor_pointer()
                     .hover(|s| s.bg(t.hover))
                     .on_click(cx.listener(move |_, _, _, cx| cx.emit(GridEvent::Sort(c))))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, e: &gpui::MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            this.context = Some((e.position, MenuTarget::Header(c)));
+                            cx.notify();
+                        }),
+                    )
                     .when(column.primary_key.is_some(), |el| {
                         el.child(icon(Icon::Key).size(px(11.)).text_color(t.warning))
                     })
@@ -721,6 +1066,95 @@ impl GridView {
             );
         }
         row
+    }
+}
+
+/// The ways the right-click menu copies cells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CopyFormat {
+    Csv,
+    Json,
+    Markdown,
+}
+
+/// Rows of values as text in `format`, `names` naming the columns.
+pub fn format_rows(format: CopyFormat, names: &[&str], rows: &[Vec<Value>]) -> String {
+    match format {
+        CopyFormat::Csv => {
+            let field = |s: &str| {
+                if s.contains([',', '"', '\n', '\r']) {
+                    format!("\"{}\"", s.replace('"', "\"\""))
+                } else {
+                    s.to_owned()
+                }
+            };
+            let mut out = names.iter().map(|n| field(n)).collect::<Vec<_>>().join(",");
+            for row in rows {
+                out.push('\n');
+                let cells: Vec<String> = row
+                    .iter()
+                    .map(|v| {
+                        if v.is_null() {
+                            String::new()
+                        } else {
+                            field(&v.to_string())
+                        }
+                    })
+                    .collect();
+                out.push_str(&cells.join(","));
+            }
+            out
+        }
+        CopyFormat::Json => {
+            let list: Vec<serde_json::Value> = rows
+                .iter()
+                .map(|row| {
+                    let mut object = serde_json::Map::new();
+                    for (name, v) in names.iter().zip(row) {
+                        object.insert((*name).to_owned(), json_value(v));
+                    }
+                    serde_json::Value::Object(object)
+                })
+                .collect();
+            let value = if list.len() == 1 {
+                list.into_iter().next().unwrap_or_default()
+            } else {
+                serde_json::Value::Array(list)
+            };
+            serde_json::to_string_pretty(&value).unwrap_or_default()
+        }
+        CopyFormat::Markdown => {
+            let cell = |s: &str| s.replace('|', "\\|").replace(['\n', '\r'], " ");
+            let mut out = format!(
+                "| {} |\n|{}|",
+                names
+                    .iter()
+                    .map(|n| cell(n))
+                    .collect::<Vec<_>>()
+                    .join(" | "),
+                names.iter().map(|_| " --- ").collect::<Vec<_>>().join("|")
+            );
+            for row in rows {
+                let cells: Vec<String> = row.iter().map(|v| cell(&v.to_string())).collect();
+                out.push_str(&format!("\n| {} |", cells.join(" | ")));
+            }
+            out
+        }
+    }
+}
+
+fn json_value(v: &Value) -> serde_json::Value {
+    match v {
+        Value::Null => serde_json::Value::Null,
+        Value::Bool(b) => serde_json::Value::Bool(*b),
+        Value::Int(i) => serde_json::Value::from(*i),
+        Value::Float(f) => serde_json::Number::from_f64(*f).map_or_else(
+            || serde_json::Value::String(f.to_string()),
+            serde_json::Value::Number,
+        ),
+        Value::Json(s) => serde_json::from_str(s).unwrap_or_else(|_| s.to_string().into()),
+        Value::Text(s) => serde_json::Value::String(s.to_string()),
+        Value::Bytes(_) => serde_json::Value::String(v.to_string()),
     }
 }
 
@@ -846,7 +1280,7 @@ impl Render for GridView {
             move |bounds, _, window, cx| {
                 let t = paint_t;
                 let origin = bounds.origin;
-                let font = gpui::font(t.mono_font.clone());
+                let font = gpui::font(t.grid_font.clone());
                 let font_size = t.mono_size;
                 let line_height = px(rh);
                 window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
@@ -1103,6 +1537,52 @@ impl Render for GridView {
             _ => None,
         };
         let _ = window;
+        let editor = self.editor.as_ref().map(|ed| {
+            let y = ((ed.row as f64 - self.top) * rh as f64) as f32;
+            let x: f32 = (0..ed.col).map(|c| self.width(c, &t)).sum::<f32>() - self.scroll_x;
+            let w = self.width(ed.col, &t).max(120.0);
+            div()
+                .id("cell-editor")
+                .occlude()
+                .absolute()
+                .left(px(x))
+                .top(px(y - 2.0))
+                .w(px(w))
+                .h(px(rh + 4.0))
+                .px(px(7.))
+                .flex()
+                .items_center()
+                .bg(t.input)
+                .border_2()
+                .border_color(t.accent)
+                .rounded(t.radius_small)
+                .shadow_md()
+                .font_family(t.grid_font.clone())
+                .text_size(t.mono_size)
+                .text_color(t.text)
+                .on_mouse_down(MouseButton::Left, |_, window, cx| {
+                    window.prevent_default();
+                    cx.stop_propagation()
+                })
+                .child(ed.input.clone())
+        });
+        let menu = self.context.map(|(position, target)| {
+            let items = self.menu_items(target, cx);
+            let weak = cx.entity().downgrade();
+            context_menu(
+                "grid-menu",
+                items,
+                position,
+                move |_, cx| {
+                    weak.update(cx, |g, cx| {
+                        g.context = None;
+                        cx.notify();
+                    })
+                    .ok();
+                },
+                &t,
+            )
+        });
         div()
             .id("grid")
             .key_context("Grid")
@@ -1135,14 +1615,10 @@ impl Render for GridView {
             .on_action(cx.listener(|this, _: &RowEnd, _, cx| this.step(0, 1 << 20, false, cx)))
             .on_action(cx.listener(|this, _: &CopyCells, _, cx| this.copy(false, cx)))
             .on_action(cx.listener(|this, _: &CopyWithHeaders, _, cx| this.copy(true, cx)))
-            .on_action(cx.listener(|this, _: &SelectAllCells, _, cx| {
-                let total = this.total_rows();
-                if total > 0 && !this.columns.is_empty() {
-                    this.selection = Some(Selection {
-                        anchor: (0, 0),
-                        head: (total - 1, this.columns.len() - 1),
-                    });
-                    cx.notify();
+            .on_action(cx.listener(|this, _: &SelectAllCells, _, cx| this.select_all(cx)))
+            .on_action(cx.listener(|this, _: &EditCell, window, cx| {
+                if let Some(s) = this.selection {
+                    this.begin_edit(s.head, window, cx);
                 }
             }))
             .child(self.header(&visible, &t, cx))
@@ -1161,17 +1637,50 @@ impl Render for GridView {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, e: &gpui::MouseDownEvent, window, cx| {
-                            window.focus(&this.focus);
+                            this.context = None;
                             let t = theme(cx).clone();
-                            if let Some(cell) = this.cell_at(e.position, &t) {
-                                this.drag = Some(PointerDrag::Select);
-                                this.select(cell, e.modifiers.shift, cx);
+                            let Some(cell) = this.cell_at(e.position, &t) else {
+                                window.focus(&this.focus);
+                                return;
+                            };
+                            if e.click_count >= 2 && this.editable && !e.modifiers.shift {
+                                this.drag = None;
+                                this.begin_edit(cell, window, cx);
+                                // Keeps the grid, which tracks focus, from taking the
+                                // keyboard back from the editor on this same press.
+                                window.prevent_default();
+                                return;
                             }
+                            // A press elsewhere saves an open edit first, through its blur.
+                            window.focus(&this.focus);
+                            this.drag = Some(PointerDrag::Select);
+                            this.select(cell, e.modifiers.shift, cx);
+                        }),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(|this, e: &gpui::MouseDownEvent, window, cx| {
+                            let t = theme(cx).clone();
+                            let Some(cell) = this.cell_at(e.position, &t) else {
+                                return;
+                            };
+                            window.focus(&this.focus);
+                            // A right click inside the selection keeps it, so a menu can act
+                            // on many cells; outside it selects the cell under the pointer.
+                            let inside = this.selection.is_some_and(|s| {
+                                s.rows().contains(&cell.0) && s.cols().contains(&cell.1)
+                            });
+                            if !inside {
+                                this.select(cell, false, cx);
+                            }
+                            this.context = Some((e.position, MenuTarget::Cell(cell.0, cell.1)));
+                            cx.notify();
                         }),
                     )
                     .child(body)
                     .children(vbar)
                     .children(hbar)
+                    .children(editor)
                     .children(overlay.map(|m| {
                         div()
                             .absolute()
@@ -1201,6 +1710,7 @@ impl Render for GridView {
                     })),
             )
             .child(self.pointer_watch(cx))
+            .children(menu)
     }
 }
 

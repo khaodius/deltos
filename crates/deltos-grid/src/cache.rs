@@ -313,6 +313,36 @@ impl GridCache {
         }
     }
 
+    /// Replaces one stored value, after an edit the database accepted, so the grid shows
+    /// it without reloading. Returns false when the row is not loaded.
+    pub fn set_cell(&self, index: u64, column: usize, value: Value) -> bool {
+        {
+            let mut guard = self.shared.inner.lock();
+            let inner = &mut *guard;
+            let page_rows = u64::from(inner.config.page_rows);
+            let width = inner.columns.len();
+            let Some(page) = inner.pages.get_mut(&(index / page_rows)) else {
+                return false;
+            };
+            let Some(row) = page.rows.get_mut((index % page_rows) as usize) else {
+                return false;
+            };
+            let before = row_bytes(row);
+            if row.len() != width {
+                *row = widen(mem::take(row), width);
+            }
+            let Some(slot) = row.get_mut(column) else {
+                return false;
+            };
+            *slot = value;
+            let delta = row_bytes(row) as isize - before as isize;
+            page.bytes = page.bytes.saturating_add_signed(delta);
+            inner.bytes = inner.bytes.saturating_add_signed(delta);
+        }
+        (self.shared.hooks.notify)();
+        true
+    }
+
     pub fn is_loaded(&self, index: u64) -> bool {
         let inner = self.shared.inner.lock();
         let page_rows = u64::from(inner.config.page_rows);
@@ -701,6 +731,31 @@ mod tests {
         assert!(cache.with_row(0, |_| ()).is_none());
         assert!(cache.with_row(49_999_999, |_| ()).is_none());
         assert_eq!(cache.status(), Status::Idle);
+    }
+
+    #[test]
+    fn an_accepted_edit_shows_without_a_reload() {
+        let exec = TestExecutor::new();
+        let loader = Arc::new(FakeLoader::new(10_000));
+        let cache = GridCache::new(loader.clone(), config(64 << 20), exec.hooks());
+        cache.set_viewport(0..40);
+        exec.run();
+        let loads = cache.stats().loads;
+        let before = cache.memory_used();
+        assert!(cache.set_cell(7, 1, Value::text("a much longer value than before")));
+        assert_eq!(
+            cache.with_row(7, |row| row[1].clone()),
+            Some(Value::text("a much longer value than before"))
+        );
+        assert!(
+            cache.memory_used() > before,
+            "the budget counts the new text"
+        );
+        assert!(
+            !cache.set_cell(9_000, 1, Value::Null),
+            "row 9000 is not loaded"
+        );
+        assert_eq!(cache.stats().loads, loads);
     }
 
     #[test]

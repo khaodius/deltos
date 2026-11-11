@@ -4,6 +4,26 @@ Packages for every version are attached to its
 [release](https://github.com/khaodius/deltos/releases), with SHA-256 checksums and a signed
 update manifest.
 
+## 0.1.1 - 2026-11-11
+
+- **Edit cells in place.** Double-click a cell, or press Enter or F2, to edit it. Enter or a
+  click anywhere else saves; Escape cancels. What you type is checked against the column's
+  type first, the grid shows the new value at once, and it goes back if the database refuses
+  it, with the reason in the status bar.
+- **Right-click menus** on cells, column headers and the object list: set to NULL, copy as
+  CSV, JSON, Markdown or `INSERT` statements, copy a row's `WHERE` clause, show or hide rows
+  with the same value, sort, fit columns, duplicate rows, delete rows after a confirmation,
+  and open a table or a query on it from the sidebar.
+- **Grid font.** The grid has its own font setting, Malgun Gothic by default where it is
+  installed (Windows) and the interface font elsewhere. Every font menu shows each name in its
+  own font.
+- **Torn-off panels land under the pointer.** The new window is placed under the pointer
+  before it starts following it, on Windows and on X11, so it no longer trails off to one
+  side.
+- **Faster CI and releases.** Workflows reuse compiled dependencies and system packages
+  between runs, skip documentation-only changes, and run the database tests on pull requests
+  only when the data layer changed. Releases reuse the dependencies CI built on `main`.
+
 ## 0.1.0 - 2026-11-09
 
 - **First release.** Deltos is a native database client for Windows and Linux, written in Rust

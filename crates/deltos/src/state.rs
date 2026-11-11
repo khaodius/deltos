@@ -162,12 +162,9 @@ impl AppState {
             .as_ref()
             .and_then(|name| self.themes.iter().find(|(n, _)| n == name))
             .map(|(_, t)| t);
-        cx.set_global(Theme::new(
-            a,
-            &self.settings.editor,
-            system_is_dark(cx),
-            custom,
-        ));
+        let mut theme = Theme::new(a, &self.settings.editor, system_is_dark(cx), custom);
+        theme.settle_fonts(a.grid_font.is_some(), cx);
+        cx.set_global(theme);
     }
 
     pub fn rescan_themes(&mut self, cx: &mut Context<Self>) {

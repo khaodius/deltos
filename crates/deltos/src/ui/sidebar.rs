@@ -13,9 +13,10 @@ use gpui::{
 
 use crate::state::{AppState, StateEvent};
 use crate::theme::theme;
+use crate::ui::edit;
 use crate::ui::icons::{Icon, icon};
 use crate::ui::text_input::{InputEvent, TextInput};
-use crate::ui::{ButtonStyle, button, compact_count, empty_state};
+use crate::ui::{ButtonStyle, MenuItem, button, compact_count, context_menu, empty_state};
 
 #[derive(Clone)]
 enum Row {
@@ -37,6 +38,8 @@ pub struct ObjectsPanel {
     state: Entity<AppState>,
     search: Entity<TextInput>,
     selected: Option<ObjectRef>,
+    /// An open right-click menu: where, and over which row.
+    context: Option<(gpui::Point<gpui::Pixels>, Row)>,
     _subs: Vec<Subscription>,
 }
 
@@ -70,6 +73,7 @@ impl ObjectsPanel {
             state,
             search,
             selected: None,
+            context: None,
             _subs: subs,
         }
     }
@@ -91,6 +95,95 @@ impl ObjectsPanel {
             s.open(PanelKind::Table { connection, object }, pin, cx)
         });
         cx.notify();
+    }
+
+    /// The right-click items for a row of the list.
+    fn menu_items(&self, row: &Row, cx: &gpui::App) -> Vec<MenuItem> {
+        let Some(session) = self.state.read(cx).active_session() else {
+            return Vec::new();
+        };
+        let (sid, kind) = (session.id.clone(), session.kind);
+        let this = self.state.clone();
+        let copy = |text: String| {
+            move |_: &mut Window, cx: &mut gpui::App| {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()))
+            }
+        };
+        let mut items = Vec::new();
+        match row {
+            Row::Object { object, .. } => {
+                let open = |pin: bool| {
+                    let (state, object, sid) = (this.clone(), object.clone(), sid.clone());
+                    move |_: &mut Window, cx: &mut gpui::App| {
+                        if !object.kind.has_rows() {
+                            return;
+                        }
+                        let kind = PanelKind::Table {
+                            connection: sid.clone(),
+                            object: object.clone(),
+                        };
+                        state.update(cx, |s, cx| s.open(kind, pin, cx));
+                    }
+                };
+                let browsable = object.kind.has_rows();
+                items.push(MenuItem::new("Open", open(false)).enabled(browsable));
+                items.push(MenuItem::new("Open in a new tab", open(true)).enabled(browsable));
+                let qualified = if edit::speaks_sql(kind) {
+                    edit::table_name(kind, object)
+                } else {
+                    object.name.clone()
+                };
+                let select = if kind == deltos_data::DriverKind::Mongodb {
+                    format!(
+                        "db.getCollection({}).find({{}}).limit(100)",
+                        serde_json::Value::String(object.name.clone())
+                    )
+                } else {
+                    format!("SELECT * FROM {qualified} LIMIT 100;")
+                };
+                if browsable {
+                    let (state, sid, text) = (this.clone(), sid.clone(), select.clone());
+                    items.push(MenuItem::new("New query on this table", move |_, cx| {
+                        let kind = PanelKind::Query {
+                            connection: Some(sid.clone()),
+                            text: text.clone(),
+                        };
+                        state.update(cx, |s, cx| s.open(kind, true, cx));
+                    }));
+                }
+                items.push(MenuItem::separator());
+                items.push(MenuItem::new("Copy name", copy(object.name.clone())));
+                if qualified.contains('.') {
+                    items.push(MenuItem::new("Copy full name", copy(qualified)));
+                }
+                if browsable {
+                    items.push(MenuItem::new("Copy SELECT statement", copy(select)));
+                }
+                items.push(MenuItem::separator());
+                let (state, sid, path) = (this.clone(), sid.clone(), object.namespace.clone());
+                items.push(MenuItem::new("Reload the list", move |_, cx| {
+                    state.update(cx, |s, cx| s.load_objects(&sid, &path, cx))
+                }));
+            }
+            Row::Namespace { path, expanded, .. } => {
+                let (state, s1, p1) = (this.clone(), sid.clone(), path.clone());
+                items.push(MenuItem::new(
+                    if *expanded { "Collapse" } else { "Expand" },
+                    move |_, cx| state.update(cx, |s, cx| s.toggle_namespace(&s1, &p1, cx)),
+                ));
+                let (state, s2, p2) = (this.clone(), sid.clone(), path.clone());
+                items.push(MenuItem::new("Reload", move |_, cx| {
+                    state.update(cx, |s, cx| s.load_objects(&s2, &p2, cx))
+                }));
+                items.push(MenuItem::separator());
+                items.push(MenuItem::new(
+                    "Copy name",
+                    copy(path.last().cloned().unwrap_or_default()),
+                ));
+            }
+            Row::Note(_) => {}
+        }
+        items
     }
 
     fn rows(&self, cx: &gpui::App) -> Vec<Row> {
@@ -203,6 +296,23 @@ impl Render for ObjectsPanel {
                 )
                 .into_any_element();
         };
+        let menu = self.context.clone().map(|(position, row)| {
+            let items = self.menu_items(&row, cx);
+            let weak = cx.entity().downgrade();
+            context_menu(
+                "objects-menu",
+                items,
+                position,
+                move |_, cx| {
+                    weak.update(cx, |p, cx| {
+                        p.context = None;
+                        cx.notify();
+                    })
+                    .ok();
+                },
+                &t,
+            )
+        });
         let rows = Rc::new(self.rows(cx));
         let selected = self.selected.clone();
         let this = cx.entity().downgrade();
@@ -240,6 +350,16 @@ impl Render for ObjectsPanel {
                                 .hover(|s| s.bg(t.hover))
                                 .on_click(move |_, _, cx| {
                                     state.update(cx, |s, cx| s.toggle_namespace(&sid, &path, cx))
+                                })
+                                .on_mouse_down(MouseButton::Right, {
+                                    let (this, row) = (this.clone(), row.clone());
+                                    move |e, _, cx| {
+                                        this.update(cx, |p, cx| {
+                                            p.context = Some((e.position, row.clone()));
+                                            cx.notify();
+                                        })
+                                        .ok();
+                                    }
                                 })
                                 .child(
                                     icon(if *expanded {
@@ -282,6 +402,19 @@ impl Render for ObjectsPanel {
                                 .on_mouse_down(MouseButton::Left, move |e, _, cx| {
                                     let pin_it = e.click_count >= 2;
                                     open.update(cx, |p, cx| p.open(o1.clone(), pin_it, cx)).ok();
+                                })
+                                .on_mouse_down(MouseButton::Right, {
+                                    let (this, row) = (this.clone(), row.clone());
+                                    move |e, _, cx| {
+                                        this.update(cx, |p, cx| {
+                                            if let Row::Object { object, .. } = &row {
+                                                p.selected = Some(object.clone());
+                                            }
+                                            p.context = Some((e.position, row.clone()));
+                                            cx.notify();
+                                        })
+                                        .ok();
+                                    }
                                 })
                                 .child(
                                     icon(object_icon(object.kind)).size(px(13.)).text_color(
@@ -344,6 +477,7 @@ impl Render for ObjectsPanel {
                 )
             })
             .child(list)
+            .children(menu)
             .into_any_element()
     }
 }

@@ -146,6 +146,12 @@ impl TextInput {
         cx.notify();
     }
 
+    /// Selects everything, so typing replaces it.
+    pub fn select_everything(&mut self, cx: &mut Context<Self>) {
+        self.move_to(0, cx);
+        self.select_to(self.content.len(), cx)
+    }
+
     pub fn clear(&mut self, cx: &mut Context<Self>) {
         self.set_text("", cx);
     }

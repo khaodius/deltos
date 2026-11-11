@@ -11,7 +11,9 @@ use gpui::{
 };
 
 use crate::state::{AppState, StateEvent};
-use crate::theme::{BUNDLED_MONO_FONTS, BUNDLED_UI_FONTS, Theme, color, colors, theme};
+use crate::theme::{
+    BUNDLED_MONO_FONTS, BUNDLED_UI_FONTS, DEFAULT_GRID_FONT, Theme, color, colors, theme,
+};
 use crate::ui::icons::{Icon, icon};
 use crate::ui::text_input::{InputEvent, TextInput};
 use crate::ui::{ButtonStyle, MenuItem, button, field, menu, segmented, switch};
@@ -67,6 +69,15 @@ const ACCENTS: [u32; 12] = [
 ];
 
 /// Accent tint steps: off, subtle, medium, strong.
+/// The grid font menu's first entries: the default, then the fonts Deltos ships.
+const GRID_FONTS: [&str; 5] = [
+    DEFAULT_GRID_FONT,
+    "Adwaita Sans",
+    "Inter",
+    "Go Mono",
+    "JetBrains Mono",
+];
+
 const TINTS: [(&str, u32); 4] = [("Off", 0), ("Subtle", 5), ("Medium", 10), ("Strong", 18)];
 
 /// Which font a font menu sets.
@@ -74,6 +85,7 @@ const TINTS: [(&str, u32); 4] = [("Off", 0), ("Subtle", 5), ("Medium", 10), ("St
 enum FontTarget {
     Ui,
     Mono,
+    Grid,
     Editor,
 }
 
@@ -185,17 +197,20 @@ impl SettingsPanel {
         let (bundled, default): (&[&str], &str) = match target {
             FontTarget::Ui => (&BUNDLED_UI_FONTS, BUNDLED_UI_FONTS[0]),
             FontTarget::Mono => (&BUNDLED_MONO_FONTS, BUNDLED_MONO_FONTS[0]),
-            FontTarget::Editor => (&BUNDLED_MONO_FONTS, "Same as the grid"),
+            FontTarget::Grid => (&GRID_FONTS, GRID_FONTS[0]),
+            FontTarget::Editor => (&BUNDLED_MONO_FONTS, "Same as the code font"),
         };
         let shown: SharedString = current.clone().unwrap_or_else(|| default.into()).into();
         let id: &'static str = match target {
             FontTarget::Ui => "font-ui",
             FontTarget::Mono => "font-mono",
+            FontTarget::Grid => "font-grid",
             FontTarget::Editor => "font-editor",
         };
         let family = match target {
             FontTarget::Ui => t.ui_font.clone(),
             FontTarget::Mono => t.mono_font.clone(),
+            FontTarget::Grid => t.grid_font.clone(),
             FontTarget::Editor => t.editor_font.clone(),
         };
         let mut picker = div()
@@ -247,6 +262,7 @@ impl SettingsPanel {
                         this.set(cx, move |s| match target {
                             FontTarget::Ui => s.appearance.ui_font = value,
                             FontTarget::Mono => s.appearance.mono_font = value,
+                            FontTarget::Grid => s.appearance.grid_font = value,
                             FontTarget::Editor => s.editor.font = value,
                         })
                     })
@@ -256,7 +272,7 @@ impl SettingsPanel {
             let mut items = Vec::new();
             if target == FontTarget::Editor {
                 items.push(
-                    MenuItem::new("Same as the grid", choose(None)).checked(current.is_none()),
+                    MenuItem::new("Same as the code font", choose(None)).checked(current.is_none()),
                 );
             }
             for (i, name) in bundled.iter().enumerate() {
@@ -267,10 +283,16 @@ impl SettingsPanel {
                     (Some(c), _) => c == name,
                     _ => false,
                 };
+                let detail = if target == FontTarget::Grid && i == 0 {
+                    "default"
+                } else {
+                    "built in"
+                };
                 items.push(
                     MenuItem::new(*name, choose(value))
                         .checked(checked)
-                        .detail("built in"),
+                        .detail(detail)
+                        .font(*name),
                 );
             }
             for name in self.system_fonts.iter().flatten() {
@@ -279,7 +301,8 @@ impl SettingsPanel {
                 }
                 items.push(
                     MenuItem::new(name.clone(), choose(Some(name.clone())))
-                        .checked(current.as_deref() == Some(name.as_str())),
+                        .checked(current.as_deref() == Some(name.as_str()))
+                        .font(name.clone()),
                 );
             }
             let close = weak.clone();
@@ -762,6 +785,7 @@ impl SettingsPanel {
             .unwrap_or(0);
         let ui_picker = self.font_picker(FontTarget::Ui, a.ui_font.clone(), t, cx);
         let mono_picker = self.font_picker(FontTarget::Mono, a.mono_font.clone(), t, cx);
+        let grid_picker = self.font_picker(FontTarget::Grid, a.grid_font.clone(), t, cx);
         let light_tiles = self.palette_tiles(false, a.light_palette, t, cx);
         let dark_tiles = self.palette_tiles(true, a.dark_palette, t, cx);
         let preview = self.preview(&a, t);
@@ -916,7 +940,18 @@ impl SettingsPanel {
                 ),
                 t,
             ))
-            .child(row("Grid font", None, mono_picker, t))
+            .child(row(
+                "Grid font",
+                Some("Malgun Gothic by default, or the interface font where it is missing."),
+                grid_picker,
+                t,
+            ))
+            .child(row(
+                "Code font",
+                Some("The query editor, the inspector and other aligned text."),
+                mono_picker,
+                t,
+            ))
             .child(row(
                 "Grid size",
                 None,

@@ -3,7 +3,19 @@ name: CI
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "**.md"
+      - docs/**
+      - LICENSE
+      - .github/workflows/install-scripts.yml
+      - .github/workflows/release.yml
   pull_request:
+    paths-ignore:
+      - "**.md"
+      - docs/**
+      - LICENSE
+      - .github/workflows/install-scripts.yml
+      - .github/workflows/release.yml
   workflow_dispatch:
 
 concurrency:
@@ -13,10 +25,16 @@ concurrency:
 permissions:
   contents: read
 
-# Actions minutes are limited on a private repository, and Windows minutes count double.
-# Pull requests therefore run the Linux checks and the driver tests only; pushes to main and
-# manual runs also check Windows, the minimum Rust version and the release builds, so main is
-# always verified on every platform before a release is cut from it.
+# Every job keeps its work between runs, so a run only redoes what changed:
+# - Rust: Swatinem/rust-cache keeps the registry and the compiled dependencies, keyed on
+#   Cargo.lock. Crates are checked against Cargo.lock's checksums when they are downloaded, so
+#   a cache can only hold what the lock file names. Only main saves caches; pull requests
+#   restore main's and leave the cache budget alone.
+# - System libraries: cache-apt-pkgs keeps the .deb files instead of running apt each time.
+# - Changes to documentation alone run nothing.
+# Pull requests run the Linux checks, plus the driver tests when the data layer changed; pushes
+# to main and manual runs also check Windows, the minimum Rust version and the release builds,
+# whose cache the release workflow then reuses.
 
 env:
   CARGO_TERM_COLOR: always
@@ -34,17 +52,19 @@ jobs:
 
       - name: Install Linux system libraries
         if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y pkg-config libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
-            libx11-xcb-dev libxcb1-dev libfontconfig-dev libfreetype-dev libvulkan-dev libgbm-dev \
-            libclang-dev
+        uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          packages: pkg-config libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev libfontconfig-dev libfreetype-dev libvulkan-dev libgbm-dev libclang-dev
+          version: "1"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
 
       - name: Formatting
         if: runner.os == 'Linux'
@@ -64,11 +84,10 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Install Linux system libraries
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y pkg-config libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
-            libx11-xcb-dev libxcb1-dev libfontconfig-dev libfreetype-dev libvulkan-dev libgbm-dev \
-            libclang-dev
+        uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          packages: pkg-config libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev libfontconfig-dev libfreetype-dev libvulkan-dev libgbm-dev libclang-dev
+          version: "1"
 
       - name: Read rust-version from Cargo.toml
         id: msrv
@@ -81,11 +100,34 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: msrv
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - run: cargo check --workspace --locked
 
+  changes:
+    name: What changed
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      data: ${{ steps.filter.outputs.data }}
+    steps:
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            data:
+              - crates/deltos-data/**
+              - crates/deltos-drivers/**
+              - Cargo.lock
+              - .github/workflows/ci.yml
+
   drivers:
     name: Drivers against live databases
+    needs: changes
+    # On pull requests only when the data layer changed; always on main.
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.data == 'true') }}
     runs-on: ubuntu-22.04
     services:
       postgres:
@@ -151,6 +193,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: drivers
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
 
       - name: Test the drivers
         run: cargo test -p deltos-drivers --locked
@@ -171,17 +215,19 @@ jobs:
 
       - name: Install Linux system libraries
         if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y pkg-config libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
-            libx11-xcb-dev libxcb1-dev libfontconfig-dev libfreetype-dev libvulkan-dev libgbm-dev \
-            libclang-dev
+        uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          packages: pkg-config libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev libfontconfig-dev libfreetype-dev libvulkan-dev libgbm-dev libclang-dev
+          version: "1"
 
       - uses: dtolnay/rust-toolchain@stable
 
+      # The release workflow restores this same cache, so a release rebuilds only Deltos'
+      # own crates.
       - uses: Swatinem/rust-cache@v2
         with:
-          key: release
+          shared-key: release
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - run: cargo build --release --locked -p deltos
 

@@ -323,8 +323,12 @@ pub struct Appearance {
     pub ui_font: Option<String>,
     /// Interface font size in pixels, 11 to 16.
     pub ui_font_size: f32,
-    /// Grid and code font family. `None` is Go Mono, which ships with the app.
+    /// Code font family, for the query editor, the inspector and values that line up.
+    /// `None` is Go Mono, which ships with the app.
     pub mono_font: Option<String>,
+    /// Grid font family. `None` is Malgun Gothic where it is installed, as it is on
+    /// Windows, and the interface font elsewhere.
+    pub grid_font: Option<String>,
     /// Grid font size in pixels, 10 to 18.
     pub mono_font_size: f32,
     pub density: Density,
@@ -368,6 +372,7 @@ impl Default for Appearance {
             ui_font: None,
             ui_font_size: 13.0,
             mono_font: None,
+            grid_font: None,
             mono_font_size: 12.0,
             density: Density::Regular,
             corner_radius: 5.0,
@@ -653,7 +658,12 @@ impl Settings {
         a.border_contrast = finite_or(a.border_contrast, 1.0).clamp(0.5, 2.0);
         a.ui_scale = finite_or(a.ui_scale, 1.0).clamp(0.75, 1.5);
         a.window_opacity = finite_or(a.window_opacity, 1.0).clamp(0.5, 1.0);
-        for font in [&mut a.ui_font, &mut a.mono_font, &mut self.editor.font] {
+        for font in [
+            &mut a.ui_font,
+            &mut a.mono_font,
+            &mut a.grid_font,
+            &mut self.editor.font,
+        ] {
             if font.as_ref().is_some_and(|f| f.trim().is_empty()) {
                 *font = None;
             }

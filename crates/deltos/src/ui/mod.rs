@@ -2,6 +2,7 @@
 
 pub mod connections;
 pub mod dock;
+pub mod edit;
 pub mod editor;
 pub mod grid;
 pub mod history;
@@ -184,6 +185,12 @@ pub struct MenuItem {
     pub detail: Option<SharedString>,
     pub enabled: bool,
     pub checked: bool,
+    /// Drawn in the danger color, for an item that removes something.
+    pub danger: bool,
+    /// A line between groups instead of an item.
+    pub separator: bool,
+    /// Draws the label in this font family, so a font menu previews each font.
+    pub font: Option<SharedString>,
     pub on_click: Box<dyn Fn(&mut Window, &mut App) + 'static>,
 }
 
@@ -197,8 +204,29 @@ impl MenuItem {
             detail: None,
             enabled: true,
             checked: false,
+            danger: false,
+            separator: false,
+            font: None,
             on_click: Box::new(f),
         }
+    }
+
+    /// A line between groups of items.
+    pub fn separator() -> Self {
+        Self {
+            separator: true,
+            ..Self::new("", |_, _| {})
+        }
+    }
+
+    pub fn font(mut self, family: impl Into<SharedString>) -> Self {
+        self.font = Some(family.into());
+        self
+    }
+
+    pub fn danger(mut self) -> Self {
+        self.danger = true;
+        self
     }
 
     pub fn detail(mut self, detail: impl Into<SharedString>) -> Self {
@@ -226,13 +254,65 @@ pub fn menu(
     on_dismiss: impl Fn(&mut Window, &mut App) + 'static,
     t: &Theme,
 ) -> AnyElement {
+    let list = menu_list(id, items, min_width, on_dismiss, t);
+    gpui::deferred(
+        gpui::anchored()
+            .snap_to_window()
+            .child(div().mt(px(2.)).child(list)),
+    )
+    .with_priority(1)
+    .into_any_element()
+}
+
+/// A popup menu at `position` in the window, as a right click opens. It can go anywhere
+/// in the owner's tree, and it closes as [`menu`] does.
+pub fn context_menu(
+    id: impl Into<ElementId>,
+    items: Vec<MenuItem>,
+    position: gpui::Point<gpui::Pixels>,
+    on_dismiss: impl Fn(&mut Window, &mut App) + 'static,
+    t: &Theme,
+) -> AnyElement {
+    let list = menu_list(id, items, 220., on_dismiss, t).max_h(px(680.));
+    gpui::deferred(
+        gpui::anchored()
+            .position(position)
+            .snap_to_window_with_margin(px(4.))
+            .child(list),
+    )
+    .with_priority(2)
+    .into_any_element()
+}
+
+/// Separators that would open or close a menu, or sit next to each other, are dropped.
+fn tidy(items: Vec<MenuItem>) -> Vec<MenuItem> {
+    let mut out: Vec<MenuItem> = Vec::with_capacity(items.len());
+    for item in items {
+        if item.separator && out.last().is_none_or(|l| l.separator) {
+            continue;
+        }
+        out.push(item);
+    }
+    while out.last().is_some_and(|l| l.separator) {
+        out.pop();
+    }
+    out
+}
+
+fn menu_list(
+    id: impl Into<ElementId>,
+    items: Vec<MenuItem>,
+    min_width: f32,
+    on_dismiss: impl Fn(&mut Window, &mut App) + 'static,
+    t: &Theme,
+) -> gpui::Stateful<Div> {
     let dismiss = std::rc::Rc::new(on_dismiss);
     let outside = dismiss.clone();
     let mut list = div()
         .id(id.into())
         .occlude()
         .min_w(px(min_width))
-        .max_h(px(360.))
+        .max_h(px(480.))
         .overflow_y_scroll()
         .py(px(4.))
         .rounded(t.radius)
@@ -243,15 +323,28 @@ pub fn menu(
         .font_family(t.ui_font.clone())
         .text_size(t.ui_size)
         .on_mouse_down_out(move |_, window, cx| outside(window, cx));
-    for (ix, item) in items.into_iter().enumerate() {
+    for (ix, item) in tidy(items).into_iter().enumerate() {
         let dismiss = dismiss.clone();
         let MenuItem {
             label,
             detail,
             enabled,
             checked,
+            danger,
+            separator,
+            font,
             on_click,
         } = item;
+        if separator {
+            list = list.child(div().mx(px(8.)).my(px(4.)).h(px(1.)).bg(t.border));
+            continue;
+        }
+        let color = match (enabled, danger) {
+            (false, _) => t.text_faint,
+            (true, true) => t.danger,
+            (true, false) => t.text,
+        };
+        let hover_bg = if danger { t.danger } else { t.accent };
         list = list.child(
             div()
                 .id(ix)
@@ -262,10 +355,10 @@ pub fn menu(
                 .items_center()
                 .gap(px(8.))
                 .rounded(t.radius_small)
-                .text_color(if enabled { t.text } else { t.text_faint })
+                .text_color(color)
                 .when(enabled, |el| {
                     el.cursor_pointer()
-                        .hover(|s| s.bg(t.accent).text_color(t.accent_text))
+                        .hover(|s| s.bg(hover_bg).text_color(t.accent_text))
                         .on_click(move |_, window, cx| {
                             on_click(window, cx);
                             dismiss(window, cx);
@@ -277,17 +370,20 @@ pub fn menu(
                         .flex_none()
                         .when(checked, |el| el.child(icon(Icon::Check).size(px(12.)))),
                 )
-                .child(div().flex_1().child(label))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .when_some(font, |el, f| el.font_family(f))
+                        .child(label),
+                )
                 .children(detail.map(|d| div().text_size(t.small_size).opacity(0.7).child(d))),
         );
     }
-    gpui::deferred(
-        gpui::anchored()
-            .snap_to_window()
-            .child(div().mt(px(2.)).child(list)),
-    )
-    .with_priority(1)
-    .into_any_element()
+    list
 }
 
 /// A segmented control: one button per option, the current one raised.

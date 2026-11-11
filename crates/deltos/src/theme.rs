@@ -15,6 +15,9 @@ use gpui::{App, Global, Hsla, Pixels, Rgba, SharedString, px, rgb, rgba};
 pub const DEFAULT_UI_FONT: &str = "Adwaita Sans";
 /// The grid and code font when the setting is empty. Ships with the app.
 pub const DEFAULT_MONO_FONT: &str = "Go Mono";
+/// The grid's font when none is set. It ships with Windows; where it is missing the grid
+/// uses the interface font, see [`Theme::settle_fonts`].
+pub const DEFAULT_GRID_FONT: &str = "Malgun Gothic";
 /// Every font that ships with the app, offered first in the font pickers.
 pub const BUNDLED_UI_FONTS: [&str; 2] = ["Adwaita Sans", "Inter"];
 pub const BUNDLED_MONO_FONTS: [&str; 2] = ["Go Mono", "JetBrains Mono"];
@@ -62,6 +65,7 @@ pub struct Theme {
     pub radius_small: Pixels,
     pub ui_font: SharedString,
     pub mono_font: SharedString,
+    pub grid_font: SharedString,
     pub editor_font: SharedString,
     /// Interface text size.
     pub ui_size: Pixels,
@@ -461,6 +465,7 @@ impl Theme {
                 .max(2.0)
                 .min(a.corner_radius.max(2.0))),
             ui_font: pick(&a.ui_font, DEFAULT_UI_FONT),
+            grid_font: pick(&a.grid_font, DEFAULT_GRID_FONT),
             editor_font: editor
                 .font
                 .as_deref()
@@ -558,6 +563,14 @@ impl Theme {
         }
     }
 
+    /// Swaps the default grid font for the interface font where it is not installed, so a
+    /// machine without Malgun Gothic does not fall back to whatever the system picks.
+    pub fn settle_fonts(&mut self, grid_font_set: bool, cx: &App) {
+        if !grid_font_set && !font_installed(DEFAULT_GRID_FONT, cx) {
+            self.grid_font = self.ui_font.clone();
+        }
+    }
+
     /// A column header's text in the header style.
     pub fn header_text(&self, name: &str) -> SharedString {
         match self.header_style {
@@ -570,6 +583,18 @@ impl Theme {
     pub fn s(&self, v: f32) -> Pixels {
         px((v * self.scale).round())
     }
+}
+
+/// Whether a font family is installed or bundled. The system's list is read once.
+pub fn font_installed(family: &str, cx: &App) -> bool {
+    thread_local! {
+        static FAMILIES: std::cell::OnceCell<std::collections::HashSet<String>> =
+            const { std::cell::OnceCell::new() };
+    }
+    FAMILIES.with(|f| {
+        f.get_or_init(|| cx.text_system().all_font_names().into_iter().collect())
+            .contains(family)
+    })
 }
 
 pub fn theme(cx: &App) -> &Theme {

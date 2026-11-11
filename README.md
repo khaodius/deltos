@@ -61,8 +61,9 @@ listens on localhost, or a firewall.
 Ten palettes, four light and six dark, chosen separately so following the system switches
 between your two. Any accent color, with an optional tint across the window. Title bar,
 tab and column header styles. Density, corner radius, separators and zoom. A live preview
-shows each change as you make it. The default fonts are Adwaita Sans and Go Mono, both
-bundled. You can also pick any font installed on your system, or load your own colors from
+shows each change as you make it. The interface uses Adwaita Sans and code uses Go Mono, both
+bundled; the grid uses Malgun Gothic where it is installed. You can also pick any font
+installed on your system, each previewed in its own face, or load your own colors from
 a [theme file](docs/THEMES.md).
 
 ## Install
@@ -140,6 +141,8 @@ publisher the first time.
 | Settings                    | `Ctrl+,`           |
 | Zoom in / out / reset       | `Ctrl+=` / `Ctrl+-` / `Ctrl+0` |
 | Reset the panel layout      | `Ctrl+Shift+0`     |
+| Edit the selected cell      | `Enter` or `F2`, or double-click |
+| Save / cancel an edit       | `Enter` or click elsewhere / `Esc` |
 
 Every binding can be changed in Settings → Keyboard.
 
