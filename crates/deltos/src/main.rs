@@ -25,6 +25,8 @@ use crate::state::{AppState, StateEvent};
 use crate::theme::theme;
 use crate::ui::dock::DockView;
 use crate::ui::icons::{Assets, Icon, icon};
+use crate::ui::palette::PaletteLayer;
+use crate::ui::palette::providers::Scope;
 use crate::ui::workspace::Workspace;
 use crate::ui::{Tooltip, dot, icon_button};
 use crate::update::{UpdateModel, UpdateStatus};
@@ -60,6 +62,7 @@ actions!(
         ZoomOut,
         ZoomReset,
         ResetLayout,
+        CommandPalette,
     ]
 );
 
@@ -70,6 +73,7 @@ pub fn rebind_keys(settings: &Settings, cx: &mut App) {
     ui::text_input::bind_keys(cx);
     ui::editor::bind_keys(cx);
     ui::grid::bind_keys(cx);
+    ui::palette::bind_keys(cx);
     let ctx = Some("Workspace");
     let mut bindings = Vec::new();
     for (action, keys) in &settings.keybinds.0 {
@@ -91,6 +95,7 @@ pub fn rebind_keys(settings: &Settings, cx: &mut App) {
             "zoom-out" => KeyBinding::new(keys, ZoomOut, ctx),
             "zoom-reset" => KeyBinding::new(keys, ZoomReset, ctx),
             "reset-layout" => KeyBinding::new(keys, ResetLayout, ctx),
+            "command-palette" | "command-palette-alt" => KeyBinding::new(keys, CommandPalette, ctx),
             "run-query" => KeyBinding::new(keys, ui::query::RunQuery, Some("QueryPanel")),
             // The inspector passes these on to the table its row came from.
             "commit-changes" => {
@@ -140,6 +145,7 @@ pub struct Root {
     workspace: Entity<Workspace>,
     dock: Entity<DockView>,
     updates: Entity<UpdateModel>,
+    palette: Entity<PaletteLayer>,
     /// Whether the window was opened without the system title bar. Windows cannot drop or
     /// restore it on an open window, so the setting applies there from the next start.
     own_bar: bool,
@@ -227,6 +233,9 @@ impl Root {
         ];
         let bounds = window.bounds();
         workspace.update(cx, |w, _| w.main_bounds = Some(bounds));
+        let focus = cx.focus_handle();
+        let palette =
+            cx.new(|_| PaletteLayer::new(state.clone(), workspace.clone(), focus.clone()));
         let s = &state.read(cx).settings;
         Self {
             own_bar: s.appearance.custom_title_bar,
@@ -235,7 +244,8 @@ impl Root {
             workspace,
             dock,
             updates,
-            focus: cx.focus_handle(),
+            palette,
+            focus,
             _subs: subs,
         }
     }
@@ -503,8 +513,12 @@ impl Render for Root {
                 this.workspace.update(cx, |w, cx| w.refresh_active(cx))
             }))
             .on_action(cx.listener(|this, _: &SearchObjects, window, cx| {
-                this.workspace
-                    .update(cx, |w, cx| w.focus_object_search(window, cx))
+                this.palette
+                    .update(cx, |p, cx| p.toggle(Scope::Objects, window, cx))
+            }))
+            .on_action(cx.listener(|this, _: &CommandPalette, window, cx| {
+                this.palette
+                    .update(cx, |p, cx| p.toggle(Scope::All, window, cx))
             }))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
                 this.workspace
@@ -540,6 +554,7 @@ impl Render for Root {
             .when(custom_bar, |el| {
                 el.child(ui::title_bar::resize_grips(window))
             })
+            .child(self.palette.clone())
     }
 }
 
@@ -731,6 +746,11 @@ fn main() {
                 tracing::warn!("could not load the bundled fonts: {e}");
             }
             rebind_keys(&settings, cx);
+            let recent = paths
+                .as_ref()
+                .filter(|_| demo.is_none())
+                .map(|p| p.config_dir.join("palette-recent.txt"));
+            ui::palette::recent::init(recent, cx);
             let state = state::init(settings, paths, demo.is_some(), cx);
             let updates = UpdateModel::init(state.clone(), cx);
             let workspace = cx.new(|cx| Workspace::new(state.clone(), cx));

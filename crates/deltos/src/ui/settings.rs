@@ -21,7 +21,7 @@ use crate::ui::{ButtonStyle, MenuItem, button, field, menu, segmented, switch};
 use crate::update::{CURRENT, UpdateStatus, Updates};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Section {
+pub enum Section {
     Appearance,
     Data,
     Editor,
@@ -31,7 +31,7 @@ enum Section {
 }
 
 impl Section {
-    const ALL: [Self; 6] = [
+    pub const ALL: [Self; 6] = [
         Self::Appearance,
         Self::Data,
         Self::Editor,
@@ -40,7 +40,7 @@ impl Section {
         Self::About,
     ];
 
-    fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             Self::Appearance => "Appearance",
             Self::Data => "Data",
@@ -51,7 +51,7 @@ impl Section {
         }
     }
 
-    fn icon(self) -> Icon {
+    pub fn icon(self) -> Icon {
         match self {
             Self::Appearance => Icon::Settings,
             Self::Data => Icon::Grid,
@@ -193,6 +193,12 @@ impl SettingsPanel {
             theme_menu: false,
             _subs: subs,
         }
+    }
+
+    /// Shows one section, as the command palette's settings pages ask.
+    pub fn show_section(&mut self, section: Section, cx: &mut Context<Self>) {
+        self.section = section;
+        cx.notify();
     }
 
     fn set(&self, cx: &mut App, f: impl FnOnce(&mut Settings)) {
