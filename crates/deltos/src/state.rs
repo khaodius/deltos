@@ -11,7 +11,7 @@ use deltos_data::{
     Column, Connection, ConnectionConfig, DriverKind, Namespace, ObjectEntry, Value,
 };
 use deltos_settings::{ConnectionTag, PanelKind, Paths, SavedConnection, Settings, ThemeFile};
-use gpui::{App, AppContext, Context, Entity, EventEmitter, Task};
+use gpui::{App, AppContext, Context, Entity, EntityId, EventEmitter, SharedString, Task};
 
 use crate::net::Net;
 use crate::theme::{Theme, system_is_dark};
@@ -28,6 +28,12 @@ pub enum StateEvent {
     ActiveSession,
     /// The inspected row changed.
     Inspect,
+    /// The inspector asks the table panel `owner` for something: to stage a field of the
+    /// inspected row, or to commit.
+    TableRequest {
+        owner: EntityId,
+        request: crate::ui::table::Request,
+    },
     History,
     /// The updater has something new to show.
     Update,
@@ -73,7 +79,24 @@ pub struct Inspected {
     pub title: String,
     pub row: u64,
     pub columns: Arc<[Column]>,
+    /// The values as the grid shows them, staged changes included.
     pub values: Vec<Value>,
+    pub source: RowSource,
+}
+
+/// Where an inspected row came from, and whether its fields can be changed there.
+#[derive(Debug, Clone, Default)]
+pub struct RowSource {
+    /// The table panel that stages changes to the row. `None` for query results.
+    pub owner: Option<EntityId>,
+    /// Why the fields can't be changed, when the row has an owner that can't change it.
+    pub read_only: Option<SharedString>,
+    /// Per field, the value before its staged change; empty when nothing is staged.
+    pub original: Vec<Option<Value>>,
+    pub mark: crate::ui::pending::RowMark,
+    /// The row as its owner stages changes to it, so a field edit reaches this row even
+    /// when the owner's rows moved since.
+    pub target: Option<crate::ui::grid::RowRef>,
 }
 
 #[derive(Debug, Clone)]
@@ -631,6 +654,16 @@ impl AppState {
     pub fn inspect(&mut self, inspected: Option<Inspected>, cx: &mut Context<Self>) {
         self.inspected = inspected;
         cx.emit(StateEvent::Inspect);
+    }
+
+    /// Passes a request from the inspector to the table panel `owner`.
+    pub fn table_request(
+        &mut self,
+        owner: EntityId,
+        request: crate::ui::table::Request,
+        cx: &mut Context<Self>,
+    ) {
+        cx.emit(StateEvent::TableRequest { owner, request });
     }
 
     pub fn record(&mut self, entry: HistoryEntry, cx: &mut Context<Self>) {

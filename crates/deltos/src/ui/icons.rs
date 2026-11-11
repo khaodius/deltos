@@ -55,11 +55,12 @@ pub enum Icon {
     Table,
     Terminal,
     Trash,
+    Undo,
     View,
 }
 
 impl Icon {
-    pub const ALL: [Icon; 45] = [
+    pub const ALL: [Icon; 46] = [
         Self::Logo,
         Self::Check,
         Self::ChevronDown,
@@ -104,6 +105,7 @@ impl Icon {
         Self::Table,
         Self::Terminal,
         Self::Trash,
+        Self::Undo,
         Self::View,
     ];
 
@@ -153,6 +155,7 @@ impl Icon {
             Self::Table => "table",
             Self::Terminal => "terminal",
             Self::Trash => "trash",
+            Self::Undo => "undo",
             Self::View => "view",
         }
     }
@@ -207,6 +210,7 @@ impl Icon {
             Self::Table => include_bytes!("../../../../assets/ui-icons/table.svg"),
             Self::Terminal => include_bytes!("../../../../assets/ui-icons/terminal.svg"),
             Self::Trash => include_bytes!("../../../../assets/ui-icons/trash.svg"),
+            Self::Undo => include_bytes!("../../../../assets/ui-icons/undo.svg"),
             Self::View => include_bytes!("../../../../assets/ui-icons/view.svg"),
         }
     }

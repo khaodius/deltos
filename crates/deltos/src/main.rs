@@ -92,6 +92,32 @@ pub fn rebind_keys(settings: &Settings, cx: &mut App) {
             "zoom-reset" => KeyBinding::new(keys, ZoomReset, ctx),
             "reset-layout" => KeyBinding::new(keys, ResetLayout, ctx),
             "run-query" => KeyBinding::new(keys, ui::query::RunQuery, Some("QueryPanel")),
+            // The inspector passes these on to the table its row came from.
+            "commit-changes" => {
+                bindings.push(KeyBinding::new(
+                    keys,
+                    ui::table::CommitChanges,
+                    Some("Inspector"),
+                ));
+                KeyBinding::new(keys, ui::table::CommitChanges, Some("TablePanel"))
+            }
+            "review-changes" => {
+                bindings.push(KeyBinding::new(
+                    keys,
+                    ui::table::ReviewChanges,
+                    Some("Inspector"),
+                ));
+                KeyBinding::new(keys, ui::table::ReviewChanges, Some("TablePanel"))
+            }
+            "discard-changes" => {
+                bindings.push(KeyBinding::new(
+                    keys,
+                    ui::table::DiscardChanges,
+                    Some("Inspector"),
+                ));
+                KeyBinding::new(keys, ui::table::DiscardChanges, Some("TablePanel"))
+            }
+            "add-row" => KeyBinding::new(keys, ui::table::AddRow, Some("TablePanel")),
             _ => continue,
         };
         bindings.push(binding);
@@ -407,7 +433,9 @@ impl Render for Root {
                 right,
                 window,
                 &t,
-                Rc::new(move |window: &mut Window, cx: &mut App| quit(&ws, window, cx)),
+                Rc::new(move |window: &mut Window, cx: &mut App| {
+                    quit_or_ask(&ws, window, cx);
+                }),
             )
         });
         // Without our own bar the toolbar still needs a home: a slim strip at the top.
@@ -515,6 +543,37 @@ impl Render for Root {
     }
 }
 
+/// Quits, or first asks when tables hold staged changes that quitting would lose. `true`
+/// when it quit.
+fn quit_or_ask(workspace: &Entity<Workspace>, window: &mut Window, cx: &mut App) -> bool {
+    let n = workspace.read(cx).pending_changes(cx);
+    if n == 0 {
+        quit(workspace, window, cx);
+        return true;
+    }
+    let answer = window.prompt(
+        gpui::PromptLevel::Warning,
+        &format!(
+            "Quit and discard {} staged {}?",
+            ui::thousands(n as u64),
+            if n == 1 { "change" } else { "changes" }
+        ),
+        Some("They have not been committed to the database. Commit them in their tables to keep them."),
+        &["Discard and quit", "Cancel"],
+        cx,
+    );
+    let (workspace, handle) = (workspace.clone(), window.window_handle());
+    cx.spawn(async move |cx| {
+        if answer.await.ok() == Some(0) {
+            handle
+                .update(cx, |_, window, cx| quit(&workspace, window, cx))
+                .ok();
+        }
+    })
+    .detach();
+    false
+}
+
 /// Saves everything, installs a waiting update if the setting says so, and quits. The
 /// panel windows close without docking so they open again next time.
 fn quit(workspace: &Entity<Workspace>, _window: &mut Window, cx: &mut App) {
@@ -589,10 +648,7 @@ fn open_main_window(
     };
     let handle = cx.open_window(options, move |window, cx| {
         let quitting = workspace.clone();
-        window.on_window_should_close(cx, move |window, cx| {
-            quit(&quitting, window, cx);
-            true
-        });
+        window.on_window_should_close(cx, move |window, cx| quit_or_ask(&quitting, window, cx));
         let root = cx.new(|cx| Root::new(state, workspace, updates, window, cx));
         window.focus(&root.read(cx).focus.clone());
         root

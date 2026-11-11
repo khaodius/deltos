@@ -1,7 +1,8 @@
 //! Turning what the person types into a cell into a value of the column's type, finding a
-//! row's key, and writing rows out as SQL, for editing and copying in the table view.
+//! row's key, and writing rows out as SQL, for editing and copying in the table view. The
+//! review of staged changes shows the statements a commit runs from here too.
 
-use deltos_data::{Column, DriverKind, ObjectRef, Value, ValueKind};
+use deltos_data::{Column, DriverKind, ObjectRef, RowEdit, Value, ValueKind};
 
 use crate::ui::grid::CellInput;
 
@@ -168,6 +169,136 @@ pub fn where_clause(kind: DriverKind, key: &[(String, Value)]) -> String {
     format!("WHERE {}", parts.join(" AND "))
 }
 
+/// One statement per edit, as a commit runs it, for the person to read before it does.
+/// Drivers send values as parameters; here they are written as literals of the dialect.
+/// MongoDB edits are shown as the shell calls that do the same.
+pub fn preview_statements(
+    kind: DriverKind,
+    object: &ObjectRef,
+    columns: &[Column],
+    edits: &[RowEdit],
+) -> Vec<String> {
+    if kind == DriverKind::Mongodb {
+        return edits
+            .iter()
+            .map(|e| mongo_statement(object, columns, e))
+            .collect();
+    }
+    let table = table_name(kind, object);
+    edits
+        .iter()
+        .map(|edit| match edit {
+            RowEdit::Update { key, changes } => {
+                let set = changes
+                    .iter()
+                    .map(|(n, v)| format!("{} = {}", quote_ident(kind, n), literal(kind, v)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("UPDATE {table} SET {set} {};", where_clause(kind, key))
+            }
+            RowEdit::Delete { key } => {
+                format!("DELETE FROM {table} {};", where_clause(kind, key))
+            }
+            RowEdit::Insert { values } if values.is_empty() => match kind {
+                DriverKind::Mysql => format!("INSERT INTO {table} () VALUES ();"),
+                _ => format!("INSERT INTO {table} DEFAULT VALUES;"),
+            },
+            RowEdit::Insert { values } => {
+                let names: Vec<&str> = values.iter().map(|(n, _)| n.as_str()).collect();
+                let row: Vec<Value> = values.iter().map(|(_, v)| v.clone()).collect();
+                insert_statements(kind, object, &names, &[row])
+            }
+        })
+        .collect()
+}
+
+/// A JSON string literal, for the shell.
+fn json_string(s: &str) -> String {
+    serde_json::to_string(s).unwrap_or_else(|_| format!("\"{}\"", s.replace('"', "\\\"")))
+}
+
+/// A value in MongoDB shell syntax, by the kind of its column.
+fn mongo_literal(v: &Value, kind: ValueKind) -> String {
+    match v {
+        Value::Null => "null".into(),
+        Value::Bool(b) => b.to_string(),
+        Value::Int(i) => i.to_string(),
+        Value::Float(f) if f.is_finite() => f.to_string(),
+        Value::Float(f) => format!("Number({})", json_string(&f.to_string())),
+        Value::Json(s) => s.to_string(),
+        Value::Bytes(b) => {
+            let hex: String = b.iter().map(|x| format!("{x:02x}")).collect();
+            format!("Binary.createFromHexString({})", json_string(&hex))
+        }
+        Value::Text(s) => {
+            let text = s.trim();
+            match kind {
+                ValueKind::ObjectId
+                    if text.len() == 24 && text.bytes().all(|b| b.is_ascii_hexdigit()) =>
+                {
+                    format!("ObjectId({})", json_string(text))
+                }
+                ValueKind::DateTime | ValueKind::Date => format!("ISODate({})", json_string(text)),
+                ValueKind::Uuid => format!("UUID({})", json_string(text)),
+                ValueKind::Decimal => format!("NumberDecimal({})", json_string(text)),
+                ValueKind::Json | ValueKind::Array => s.to_string(),
+                _ => json_string(s),
+            }
+        }
+    }
+}
+
+fn mongo_document(pairs: &[(String, Value)], columns: &[Column]) -> String {
+    if pairs.is_empty() {
+        return "{}".into();
+    }
+    let kind = |name: &str| {
+        columns
+            .iter()
+            .find(|c| c.name == name)
+            .map_or(ValueKind::Other, |c| c.kind)
+    };
+    let fields = pairs
+        .iter()
+        .map(|(n, v)| format!("{}: {}", json_string(n), mongo_literal(v, kind(n))))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{{ {fields} }}")
+}
+
+fn mongo_statement(object: &ObjectRef, columns: &[Column], edit: &RowEdit) -> String {
+    let collection = match object.namespace.first() {
+        Some(db) => format!(
+            "db.getSiblingDB({}).getCollection({})",
+            json_string(db),
+            json_string(&object.name)
+        ),
+        None => format!("db.getCollection({})", json_string(&object.name)),
+    };
+    match edit {
+        RowEdit::Update { key, changes } => format!(
+            "{collection}.updateOne({}, {{ \"$set\": {} }})",
+            mongo_document(key, columns),
+            mongo_document(changes, columns)
+        ),
+        RowEdit::Delete { key } => {
+            format!("{collection}.deleteOne({})", mongo_document(key, columns))
+        }
+        RowEdit::Insert { values } => {
+            // The driver leaves out empty fields rather than storing nulls.
+            let values: Vec<(String, Value)> = values
+                .iter()
+                .filter(|(_, v)| !v.is_null())
+                .cloned()
+                .collect();
+            format!(
+                "{collection}.insertOne({})",
+                mongo_document(&values, columns)
+            )
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -252,6 +383,140 @@ mod tests {
         assert_eq!(
             where_clause(DriverKind::Mysql, &[("id".into(), Value::Int(7))]),
             "WHERE `id` = 7"
+        );
+    }
+
+    fn edits() -> Vec<RowEdit> {
+        vec![
+            RowEdit::Delete {
+                key: vec![("id".into(), Value::Int(2))],
+            },
+            RowEdit::Update {
+                key: vec![("id".into(), Value::Int(1))],
+                changes: vec![
+                    ("name".into(), Value::text("O'Brien")),
+                    ("ok".into(), Value::Bool(true)),
+                ],
+            },
+            RowEdit::Insert {
+                values: vec![
+                    ("name".into(), Value::text("new")),
+                    ("note".into(), Value::Null),
+                ],
+            },
+            RowEdit::Insert { values: vec![] },
+        ]
+    }
+
+    fn object(namespace: &[&str]) -> ObjectRef {
+        ObjectRef {
+            namespace: namespace.iter().map(|s| (*s).to_owned()).collect(),
+            name: "orders".into(),
+            kind: deltos_data::ObjectKind::Table,
+        }
+    }
+
+    #[test]
+    fn previews_postgres() {
+        let out = preview_statements(
+            DriverKind::Postgres,
+            &object(&["shop", "public"]),
+            &[],
+            &edits(),
+        );
+        assert_eq!(
+            out,
+            vec![
+                r#"DELETE FROM "public"."orders" WHERE "id" = 2;"#,
+                r#"UPDATE "public"."orders" SET "name" = 'O''Brien', "ok" = TRUE WHERE "id" = 1;"#,
+                r#"INSERT INTO "public"."orders" ("name", "note") VALUES ('new', NULL);"#,
+                r#"INSERT INTO "public"."orders" DEFAULT VALUES;"#,
+            ]
+        );
+    }
+
+    #[test]
+    fn previews_mysql() {
+        let mut e = edits();
+        e.push(RowEdit::Update {
+            key: vec![("id".into(), Value::Int(3))],
+            changes: vec![("path".into(), Value::text(r"C:\temp"))],
+        });
+        let out = preview_statements(DriverKind::Mysql, &object(&["shop"]), &[], &e);
+        assert_eq!(out[0], "DELETE FROM `shop`.`orders` WHERE `id` = 2;");
+        assert_eq!(
+            out[1],
+            "UPDATE `shop`.`orders` SET `name` = 'O''Brien', `ok` = 1 WHERE `id` = 1;"
+        );
+        assert_eq!(out[3], "INSERT INTO `shop`.`orders` () VALUES ();");
+        assert_eq!(
+            out[4],
+            r"UPDATE `shop`.`orders` SET `path` = 'C:\\temp' WHERE `id` = 3;"
+        );
+    }
+
+    #[test]
+    fn previews_sqlite() {
+        let out = preview_statements(DriverKind::Sqlite, &object(&["main"]), &[], &edits());
+        assert_eq!(out[0], r#"DELETE FROM "orders" WHERE "id" = 2;"#);
+        assert_eq!(
+            out[1],
+            r#"UPDATE "orders" SET "name" = 'O''Brien', "ok" = 1 WHERE "id" = 1;"#
+        );
+        assert_eq!(out[3], r#"INSERT INTO "orders" DEFAULT VALUES;"#);
+        // A NULL key is matched with IS NULL, as the driver does.
+        let null_key = [RowEdit::Delete {
+            key: vec![("id".into(), Value::Null)],
+        }];
+        assert_eq!(
+            preview_statements(DriverKind::Sqlite, &object(&["main"]), &[], &null_key)[0],
+            r#"DELETE FROM "orders" WHERE "id" IS NULL;"#
+        );
+    }
+
+    #[test]
+    fn previews_mongo_shell_calls() {
+        let mut id = col("_id", ValueKind::ObjectId);
+        id.primary_key = Some(0);
+        let columns = [
+            id,
+            col("tags", ValueKind::Array),
+            col("at", ValueKind::DateTime),
+        ];
+        let oid = Value::text("65a1b2c3d4e5f60718293a4b");
+        let e = [
+            RowEdit::Update {
+                key: vec![("_id".into(), oid.clone())],
+                changes: vec![
+                    ("tags".into(), Value::Json(r#"["a","b"]"#.into())),
+                    ("name".into(), Value::text("say \"hi\"")),
+                ],
+            },
+            RowEdit::Delete {
+                key: vec![("_id".into(), oid)],
+            },
+            RowEdit::Insert {
+                values: vec![
+                    ("at".into(), Value::text("2024-03-09T14:05:00Z")),
+                    ("note".into(), Value::Null),
+                ],
+            },
+        ];
+        let out = preview_statements(DriverKind::Mongodb, &object(&["shop"]), &columns, &e);
+        let c = r#"db.getSiblingDB("shop").getCollection("orders")"#;
+        assert_eq!(
+            out[0],
+            format!(
+                r#"{c}.updateOne({{ "_id": ObjectId("65a1b2c3d4e5f60718293a4b") }}, {{ "$set": {{ "tags": ["a","b"], "name": "say \"hi\"" }} }})"#
+            )
+        );
+        assert_eq!(
+            out[1],
+            format!(r#"{c}.deleteOne({{ "_id": ObjectId("65a1b2c3d4e5f60718293a4b") }})"#)
+        );
+        assert_eq!(
+            out[2],
+            format!(r#"{c}.insertOne({{ "at": ISODate("2024-03-09T14:05:00Z") }})"#)
         );
     }
 }

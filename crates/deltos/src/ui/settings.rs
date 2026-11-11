@@ -1217,6 +1217,15 @@ impl SettingsPanel {
                 t,
             ))
             .child(gap())
+            .child(heading("Editing", t))
+            .child(toggle_row(
+                "Commit edits immediately",
+                Some("Write each cell edit, deletion and duplicate to the database at once, instead of staging changes until you commit them."),
+                ("commit-now", d.commit_immediately),
+                pick(|s| s.data.commit_immediately = !s.data.commit_immediately),
+                t,
+            ))
+            .child(gap())
             .child(heading("Safety", t))
             .child(toggle_row(
                 "Confirm destructive statements",

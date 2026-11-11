@@ -4,6 +4,26 @@ Packages for every version are attached to its
 [release](https://github.com/khaodius/deltos/releases), with SHA-256 checksums and a signed
 update manifest.
 
+## 0.1.3 - 2026-11-11
+
+- **Edits wait for Commit.** Changed cells, deleted rows and new rows are staged and drawn in
+  the grid until you commit them: amber for a changed cell, red and struck through for a
+  deleted row, green at the top for a new one. The status bar counts them, with Review,
+  Discard and Commit. Ctrl+S commits, Ctrl+Shift+S reviews and Ctrl+Shift+Z discards. Review
+  shows the exact SQL that will run, or the mongosh calls for MongoDB.
+- **One transaction per commit.** A commit runs in one transaction where the database has
+  them. If it fails, nothing is lost: the changes stay staged and the error shows. Refreshing,
+  sorting or filtering keeps them, and closing a table or quitting with staged changes asks
+  first.
+- **New rows.** Ctrl+Shift+N, or the + button in the status bar, adds a row. Duplicate stages
+  copies of the selected rows.
+- **Edit in the inspector.** Every field of the selected row can be edited in the inspector,
+  with multi-line fields for long text and JSON. Changes are staged with the grid's, tinted,
+  with the old value and a revert button. Key columns warn before you change them. Rows from
+  query results stay read-only.
+- **Write at once if you prefer.** Settings → Data → Commit edits immediately brings back
+  saving each edit as soon as you make it.
+
 ## 0.1.2 - 2026-11-11
 
 - **SSH tunnels built in.** Turn on SSH tunnel in a MySQL, MariaDB, PostgreSQL or MongoDB

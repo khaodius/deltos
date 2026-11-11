@@ -475,6 +475,9 @@ pub struct Data {
     pub exact_counts: bool,
     /// Seconds before a statement is cancelled, 0 for never.
     pub query_timeout_secs: u32,
+    /// Writes each cell edit, deletion and duplicate to the database at once, instead of
+    /// staging changes in the table until they are committed.
+    pub commit_immediately: bool,
 }
 
 impl Default for Data {
@@ -486,6 +489,7 @@ impl Default for Data {
             confirm_destructive: true,
             exact_counts: false,
             query_timeout_secs: 0,
+            commit_immediately: false,
         }
     }
 }
@@ -512,6 +516,10 @@ pub const KEYBIND_ACTIONS: &[(&str, &str, &str)] = &[
     ("zoom-out", "ctrl--", "Zoom out"),
     ("zoom-reset", "ctrl-0", "Actual size"),
     ("reset-layout", "ctrl-shift-0", "Reset panel layout"),
+    ("commit-changes", "ctrl-s", "Commit staged changes"),
+    ("review-changes", "ctrl-shift-s", "Review staged changes"),
+    ("discard-changes", "ctrl-shift-z", "Discard staged changes"),
+    ("add-row", "ctrl-shift-n", "Add a row"),
 ];
 
 impl Default for Keybinds {
@@ -941,6 +949,9 @@ mod tests {
         assert!(s.updates.auto_check && s.updates.auto_download);
         assert_eq!(s.data.cache_memory_mb, 256);
         assert_eq!(s.keybinds.get("run-query"), Some("ctrl-enter"));
+        // Files from before staged edits keep them staged.
+        assert!(!s.data.commit_immediately);
+        assert_eq!(s.keybinds.get("commit-changes"), Some("ctrl-s"));
     }
 
     #[test]
