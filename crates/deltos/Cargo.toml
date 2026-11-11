@@ -15,11 +15,13 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+async-channel.workspace = true
 deltos-data.workspace = true
 deltos-dock.workspace = true
 deltos-drivers.workspace = true
 deltos-grid.workspace = true
 deltos-settings.workspace = true
+deltos-ssh.workspace = true
 deltos-updater.workspace = true
 futures.workspace = true
 gpui.workspace = true

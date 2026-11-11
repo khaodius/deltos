@@ -7,7 +7,7 @@ use std::time::Duration;
 use gpui::{Pixels, Point, Window};
 
 /// How long a panel takes to settle after it lands in a window.
-pub const SETTLE: Duration = Duration::from_millis(460);
+pub const SETTLE: Duration = Duration::from_millis(240);
 
 /// The squash of a landing panel at `t` (0 to 1) of [`SETTLE`]: positive is squashed
 /// (wider than tall), negative is stretched, and it rings down to rest at 0.
@@ -58,6 +58,66 @@ pub fn follow_pointer(window: &Window, grab: Point<Pixels>, last: bool) -> bool 
         window.start_window_move();
         true
     }
+}
+
+/// Whether the left mouse button is down anywhere on the screen, also while the system
+/// moves a window and the app sees no mouse events. `None` where that cannot be asked,
+/// as on Wayland.
+pub fn left_button_down() -> Option<bool> {
+    #[cfg(windows)]
+    {
+        #[allow(unsafe_code)]
+        // SAFETY: reads the global key state; no pointers are involved.
+        let state = unsafe {
+            windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(i32::from(
+                windows::Win32::UI::Input::KeyboardAndMouse::VK_LBUTTON.0,
+            ))
+        };
+        Some(state < 0)
+    }
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    {
+        x11_left_button_down()
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "freebsd")))]
+    {
+        None
+    }
+}
+
+/// Asks the X server for the pointer's button state, on one connection kept for the
+/// thread, since this is asked every few milliseconds while a window is held.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+fn x11_left_button_down() -> Option<bool> {
+    use std::cell::RefCell;
+
+    use x11rb::connection::Connection;
+    use x11rb::protocol::xproto::{ConnectionExt as _, KeyButMask};
+    use x11rb::rust_connection::RustConnection;
+
+    thread_local! {
+        static CONN: RefCell<Option<(RustConnection, u32)>> = const { RefCell::new(None) };
+    }
+    if std::env::var_os("WAYLAND_DISPLAY").is_some_and(|d| !d.is_empty()) {
+        return None;
+    }
+    CONN.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.is_none() {
+            let (conn, screen) = x11rb::connect(None).ok()?;
+            let root = conn.setup().roots.get(screen)?.root;
+            *slot = Some((conn, root));
+        }
+        let (conn, root) = slot.as_ref()?;
+        match conn.query_pointer(*root).ok().and_then(|c| c.reply().ok()) {
+            Some(reply) => Some(reply.mask.contains(KeyButMask::BUTTON1)),
+            None => {
+                // The connection broke; make a new one next time.
+                *slot = None;
+                None
+            }
+        }
+    })
 }
 
 /// On X11, asks the window manager to put the newest of this process's windows so `grab`

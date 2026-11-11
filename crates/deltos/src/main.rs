@@ -138,6 +138,22 @@ impl Root {
                 |this, state, event, window, cx| match event {
                     StateEvent::Settings => {
                         let s = &state.read(cx).settings;
+                        let own_bar = s.appearance.custom_title_bar;
+                        // Windows cannot add or drop the system title bar on an open
+                        // window, so the windows are opened again in the same place.
+                        if cfg!(windows) && this.own_bar != own_bar {
+                            this.own_bar = own_bar;
+                            let old = window.window_handle();
+                            let (state, workspace, updates) = (
+                                this.state.clone(),
+                                this.workspace.clone(),
+                                this.updates.clone(),
+                            );
+                            cx.defer(move |cx| {
+                                reopen_main_window(old, state, workspace, updates, cx)
+                            });
+                            return;
+                        }
                         let wanted = decorations(s);
                         // Asking again makes some compositors redecorate the window, so only
                         // ask when the setting changed.
@@ -507,11 +523,34 @@ fn quit(workspace: &Entity<Workspace>, _window: &mut Window, cx: &mut App) {
         w.close_windows_for_quit(cx);
     });
     let state = workspace.read(cx).state.clone();
-    state.update(cx, |s, _| s.save_now());
+    state.update(cx, |s, cx| {
+        s.save_now();
+        // Ends each connection and its SSH tunnel.
+        s.close_all(cx);
+    });
     if let Some(u) = cx.try_global::<update::Updates>().map(|u| u.0.clone()) {
         u.update(cx, |u, cx| u.install_on_quit(cx));
     }
     cx.quit();
+}
+
+/// Opens the main window again over the old one, then closes the old one, so a change
+/// of title bar takes effect at once on Windows. Panel windows are opened again too.
+fn reopen_main_window(
+    old: gpui::AnyWindowHandle,
+    state: Entity<AppState>,
+    workspace: Entity<Workspace>,
+    updates: Entity<UpdateModel>,
+    cx: &mut App,
+) {
+    workspace.update(cx, |w, cx| w.save_layout(cx));
+    match open_main_window(state, workspace.clone(), updates, cx) {
+        Ok(_) => {
+            old.update(cx, |_, window, _| window.remove_window()).ok();
+            workspace.update(cx, |w, cx| w.reopen_windows(cx));
+        }
+        Err(e) => tracing::error!("could not open the main window again: {e}"),
+    }
 }
 
 fn open_main_window(

@@ -868,7 +868,25 @@ fn my_error(e: mysql_async::Error) -> Error {
 fn connect_error(e: mysql_async::Error) -> Error {
     match e {
         mysql_async::Error::Server(server) => Error::Connect(server.message),
+        mysql_async::Error::Driver(mysql_async::DriverError::UnknownAuthPlugin { name }) => {
+            Error::Connect(auth_plugin_message(&name))
+        }
         other => Error::Connect(other.to_string()),
+    }
+}
+
+/// What to say when the server wants a sign-in method the driver does not have. Windows
+/// installs of MariaDB often default to GSSAPI, and a local one on 3306 is the usual
+/// reason to meet it by mistake.
+fn auth_plugin_message(plugin: &str) -> String {
+    if plugin.contains("gssapi") {
+        format!(
+            "This server wants Windows/GSSAPI login ({plugin}), which isn't supported. Wrong server or port? Check that you're not hitting a local MariaDB on 3306."
+        )
+    } else {
+        format!(
+            "This server wants the {plugin} login method, which isn't supported. Wrong server or port? Check that you're not hitting a local MariaDB or MySQL on 3306."
+        )
     }
 }
 

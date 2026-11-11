@@ -10,6 +10,18 @@ use futures::StreamExt;
 use super::*;
 
 #[test]
+fn explains_unsupported_auth_plugins() {
+    let e = connect_error(mysql_async::Error::Driver(
+        mysql_async::DriverError::UnknownAuthPlugin {
+            name: "auth_gssapi_client".into(),
+        },
+    ));
+    let text = e.to_string();
+    assert!(text.contains("Windows/GSSAPI login"), "{text}");
+    assert!(text.contains("local MariaDB on 3306"), "{text}");
+}
+
+#[test]
 fn cleans_urls() {
     let (url, mode) = clean_url("mariadb://u:p@h/db?ssl-mode=REQUIRED&stmt_cache_size=8");
     assert_eq!(url, "mysql://u:p@h/db?stmt_cache_size=8");

@@ -20,7 +20,7 @@
 //!   their windows are, so there only the button and closing dock.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -47,8 +47,11 @@ use crate::ui::table::TablePanel;
 const DRAG_SLOP: f32 = 5.0;
 /// How far past the window's edge a dragged panel pops out.
 const POP_OUT_MARGIN: f32 = 10.0;
-/// How long a panel window must rest over the main window before it docks.
-const DOCK_DWELL: Duration = Duration::from_millis(450);
+/// How long a panel window must rest over the main window, with the button still down,
+/// before it docks. Letting go over the main window docks at once.
+const DOCK_DWELL: Duration = Duration::from_millis(220);
+/// How often the button is checked while a panel window is held over the main window.
+const RELEASE_POLL: Duration = Duration::from_millis(8);
 
 /// A panel entity, by what it is, so the dock can ask for its title and icon.
 #[derive(Clone)]
@@ -199,6 +202,10 @@ pub struct Workspace {
     window_move: Option<WindowMove>,
     /// A panel window held over the main window, and where it would dock.
     pub redock: Option<(WindowId, Hover)>,
+    /// Panel windows that may dock: those that have been outside the main window since
+    /// they opened. A window torn off over the main window would otherwise dock again
+    /// the moment it appears.
+    armed: HashSet<WindowId>,
     /// Where each popped-out panel came from, so docking puts it back there.
     homes: HashMap<PanelId, DropTarget>,
     /// The panel that last landed in a stack, and a count that changes with every
@@ -239,6 +246,7 @@ impl Workspace {
             main_bounds: None,
             window_move: None,
             redock: None,
+            armed: HashSet::new(),
             homes: HashMap::new(),
             landed: None,
             preview: None,
@@ -613,6 +621,7 @@ impl Workspace {
     pub fn reset_layout(&mut self, cx: &mut Context<Self>) {
         let ids: Vec<WindowId> = self.floating.keys().copied().collect();
         for w in ids {
+            self.armed.remove(&w);
             if let Some(h) = self.floating.remove(&w) {
                 h.update(cx, |_, window, _| window.remove_window()).ok();
             }
@@ -1152,6 +1161,18 @@ impl Workspace {
         });
     }
 
+    /// Closes and opens again every panel window, in place, for a title bar change that
+    /// an open window cannot take (Windows).
+    pub fn reopen_windows(&mut self, cx: &mut Context<Self>) {
+        let ids: Vec<WindowId> = self.floating.keys().copied().collect();
+        for id in ids {
+            if let Some(h) = self.floating.remove(&id) {
+                h.update(cx, |_, window, _| window.remove_window()).ok();
+            }
+            self.open_window(id, None, cx);
+        }
+    }
+
     /// Opens the panel windows saved from the last run.
     pub fn restore_windows(&mut self, cx: &mut Context<Self>) {
         let ids: Vec<WindowId> = self.layout.dock.floating.iter().map(|f| f.id).collect();
@@ -1171,6 +1192,7 @@ impl Workspace {
             .filter(|w| self.layout.dock.window(*w).is_none())
             .collect();
         for w in gone {
+            self.armed.remove(&w);
             if let Some(h) = self.floating.remove(&w) {
                 h.update(cx, |_, window, _| window.remove_window()).ok();
             }
@@ -1220,6 +1242,7 @@ impl Workspace {
     /// Called as panel window `id` closes: its panels dock back.
     pub fn window_closing(&mut self, id: WindowId, cx: &mut Context<Self>) {
         self.floating.remove(&id);
+        self.armed.remove(&id);
         self.dock_window(id, cx);
     }
 
@@ -1264,14 +1287,24 @@ impl Workspace {
         // A move the app did not see begin (Windows hands header presses to the system):
         // the pointer's last position in the window is where it was grabbed.
         let fresh = self.window_move.as_ref().is_none_or(|m| m.window != id);
+        let grab = match &self.window_move {
+            Some(m) if !fresh => m.grab,
+            _ => pointer,
+        };
+        let screen = bounds.origin + grab;
+        if self.main_bounds.is_none_or(|main| !main.contains(&screen))
+            || opened.elapsed() > Duration::from_millis(700)
+        {
+            self.armed.insert(id);
+        }
+        if !self.armed.contains(&id) {
+            return;
+        }
         if fresh {
-            if opened.elapsed() < Duration::from_millis(700) {
-                return;
-            }
             self.generation += 1;
             self.window_move = Some(WindowMove {
                 window: id,
-                grab: pointer,
+                grab,
                 start: bounds.origin,
                 generation: self.generation,
             });
@@ -1283,7 +1316,6 @@ impl Workspace {
         if f32::from(moved.x).abs() + f32::from(moved.y).abs() < 16.0 {
             return;
         }
-        let screen = bounds.origin + m.grab;
         let hover = self
             .layout
             .dock
@@ -1301,22 +1333,37 @@ impl Workspace {
             m.generation = generation;
         }
         if self.redock.is_some() {
+            // Docks the moment the button comes up over the main window, or once the
+            // window has rested there for a moment with the button still down.
             cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(DOCK_DWELL).await;
-                this.update(cx, |this, cx| {
-                    let still = this
-                        .window_move
-                        .as_ref()
-                        .is_some_and(|m| m.generation == generation);
-                    if !still {
-                        return;
+                let started = Instant::now();
+                loop {
+                    cx.background_executor().timer(RELEASE_POLL).await;
+                    let released = crate::ui::motion::left_button_down() == Some(false);
+                    let rested = started.elapsed() >= DOCK_DWELL;
+                    let done = this
+                        .update(cx, |this, cx| {
+                            let still = this
+                                .window_move
+                                .as_ref()
+                                .is_some_and(|m| m.generation == generation);
+                            if !still {
+                                return true;
+                            }
+                            if !released && !rested {
+                                return false;
+                            }
+                            if let Some((w, hover)) = this.redock.take() {
+                                this.window_move = None;
+                                this.merge_window(w, hover.target, cx);
+                            }
+                            true
+                        })
+                        .unwrap_or(true);
+                    if done {
+                        break;
                     }
-                    if let Some((w, hover)) = this.redock.take() {
-                        this.window_move = None;
-                        this.merge_window(w, hover.target, cx);
-                    }
-                })
-                .ok();
+                }
             })
             .detach();
         }

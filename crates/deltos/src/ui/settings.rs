@@ -14,6 +14,7 @@ use crate::state::{AppState, StateEvent};
 use crate::theme::{
     BUNDLED_MONO_FONTS, BUNDLED_UI_FONTS, DEFAULT_GRID_FONT, Theme, color, colors, theme,
 };
+use crate::ui::color_picker::{ColorEvent, ColorPicker};
 use crate::ui::icons::{Icon, icon};
 use crate::ui::text_input::{InputEvent, TextInput};
 use crate::ui::{ButtonStyle, MenuItem, button, field, menu, segmented, switch};
@@ -93,6 +94,7 @@ pub struct SettingsPanel {
     state: Entity<AppState>,
     section: Section,
     accent_hex: Entity<TextInput>,
+    accent_picker: Entity<ColorPicker>,
     font_menu: Option<FontTarget>,
     /// The system's font families, read when a font menu first opens.
     system_fonts: Option<Vec<String>>,
@@ -124,11 +126,21 @@ impl SettingsPanel {
                 )
             })
             .collect();
-        let mut subs = vec![cx.subscribe(&state, |_, _, e, cx| {
+        let accent_picker = cx.new(|cx| ColorPicker::new(s.appearance.accent, cx));
+        let mut subs = vec![cx.subscribe(&state, |this, state, e, cx| {
             if matches!(e, StateEvent::Settings | StateEvent::Update) {
+                // A swatch, the hex field or a reset moved the accent: the picker follows.
+                let accent = state.read(cx).settings.appearance.accent;
+                this.accent_picker.update(cx, |p, cx| p.set_rgb(accent, cx));
                 cx.notify();
             }
         })];
+        subs.push(cx.subscribe(&accent_picker, |this, _, e, cx| {
+            let ColorEvent::Changed(c) = *e;
+            this.accent_hex
+                .update(cx, |i, cx| i.set_text(format!("#{c:06X}"), cx));
+            this.set(cx, move |s| s.appearance.accent = c);
+        }));
         // A typed accent applies on Enter; anything that is not a color puts the current
         // one back.
         subs.push(cx.subscribe(&accent_hex, |this, input, e, cx| {
@@ -174,6 +186,7 @@ impl SettingsPanel {
             state,
             section: Section::Appearance,
             accent_hex,
+            accent_picker,
             font_menu: None,
             system_fonts: None,
             keys,
@@ -769,14 +782,21 @@ impl SettingsPanel {
         }
         let accent_control = div()
             .flex()
-            .items_center()
+            .flex_col()
             .gap(px(10.))
-            .child(swatches)
             .child(
                 div()
-                    .w(px(84.))
-                    .child(field(&self.accent_hex, t, window, cx)),
-            );
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .child(swatches)
+                    .child(
+                        div()
+                            .w(px(84.))
+                            .child(field(&self.accent_hex, t, window, cx)),
+                    ),
+            )
+            .child(self.accent_picker.clone());
         let tint_now = (a.accent_tint * 100.0).round() as u32;
         let tint_current = TINTS
             .iter()
@@ -831,9 +851,9 @@ impl SettingsPanel {
                 dark_tiles,
                 t,
             ))
-            .child(row(
+            .child(stacked_row(
                 "Accent",
-                Some("Pick one, or type a hex color and press Enter."),
+                Some("Pick one, drag in the square and the hue bar, take one from the screen with the eyedropper, or type a hex color and press Enter."),
                 accent_control.into_any_element(),
                 t,
             ))

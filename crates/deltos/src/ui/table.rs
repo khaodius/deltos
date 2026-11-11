@@ -107,10 +107,19 @@ impl TablePanel {
                 }
             }),
             cx.subscribe(&state, |this, _, event, cx| {
-                if let StateEvent::Sessions = event
-                    && this.loader.is_none()
-                {
-                    this.attach(cx);
+                if let StateEvent::Sessions = event {
+                    // A connection opened again (after an SSH tunnel came back, or a
+                    // reconnect) has a new handle; load from that one.
+                    let reopened = this.loader.as_ref().is_some_and(|l| {
+                        this.state
+                            .read(cx)
+                            .session(&this.connection)
+                            .is_some_and(|s| !Arc::ptr_eq(&s.conn, l.connection()))
+                    });
+                    if this.loader.is_none() || reopened {
+                        this.loader = None;
+                        this.attach(cx);
+                    }
                 }
             }),
             cx.observe(&grid, |_, _, cx| cx.notify()),

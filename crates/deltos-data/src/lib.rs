@@ -144,6 +144,42 @@ pub struct ConnectionConfig {
     pub url: Option<String>,
     /// Driver specific options, passed through as given.
     pub options: Vec<(String, String)>,
+    /// An SSH tunnel to reach the server through. When it is on, `host` and `port` are the
+    /// address as seen from the SSH server.
+    pub ssh: SshTunnel,
+}
+
+/// How to sign in to an SSH server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SshAuth {
+    /// A private key file, or the `IdentityFile` entries of `~/.ssh/config` and the usual
+    /// key files when no file is given.
+    #[default]
+    Key,
+    /// The keys of a running ssh-agent (or Pageant on Windows).
+    Agent,
+    Password,
+}
+
+/// An SSH tunnel in front of a database connection. The password or key passphrase is not
+/// kept here when saved; it goes to the keychain like the database password.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SshTunnel {
+    pub enabled: bool,
+    /// A host name, an address, or a `Host` alias from `~/.ssh/config`.
+    pub host: String,
+    /// `None` is the alias's `Port`, or 22.
+    pub port: Option<u16>,
+    /// Empty is the alias's `User`, or the name signed in to this computer.
+    pub user: String,
+    pub auth: SshAuth,
+    /// The private key file for [`SshAuth::Key`]. Empty uses the alias's `IdentityFile`.
+    pub key_path: String,
+    /// The SSH password, or the key's passphrase.
+    #[serde(skip)]
+    pub secret: Option<String>,
 }
 
 /// What a connection can do, so the UI offers only what works.

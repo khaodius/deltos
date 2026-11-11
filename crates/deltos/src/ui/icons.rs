@@ -24,6 +24,7 @@ pub enum Icon {
     Database,
     Dock,
     Export,
+    Eyedropper,
     Filter,
     Function,
     Grid,
@@ -58,7 +59,7 @@ pub enum Icon {
 }
 
 impl Icon {
-    pub const ALL: [Icon; 44] = [
+    pub const ALL: [Icon; 45] = [
         Self::Logo,
         Self::Check,
         Self::ChevronDown,
@@ -72,6 +73,7 @@ impl Icon {
         Self::Database,
         Self::Dock,
         Self::Export,
+        Self::Eyedropper,
         Self::Filter,
         Self::Function,
         Self::Grid,
@@ -120,6 +122,7 @@ impl Icon {
             Self::Database => "database",
             Self::Dock => "dock",
             Self::Export => "export",
+            Self::Eyedropper => "eyedropper",
             Self::Filter => "filter",
             Self::Function => "function",
             Self::Grid => "grid",
@@ -173,6 +176,7 @@ impl Icon {
             Self::Database => include_bytes!("../../../../assets/ui-icons/database.svg"),
             Self::Dock => include_bytes!("../../../../assets/ui-icons/dock.svg"),
             Self::Export => include_bytes!("../../../../assets/ui-icons/export.svg"),
+            Self::Eyedropper => include_bytes!("../../../../assets/ui-icons/eyedropper.svg"),
             Self::Filter => include_bytes!("../../../../assets/ui-icons/filter.svg"),
             Self::Function => include_bytes!("../../../../assets/ui-icons/function.svg"),
             Self::Grid => include_bytes!("../../../../assets/ui-icons/grid.svg"),

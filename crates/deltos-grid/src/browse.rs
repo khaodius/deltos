@@ -128,6 +128,11 @@ impl BrowseLoader {
         &self.inner.object
     }
 
+    /// The connection rows are read from.
+    pub fn connection(&self) -> &Arc<dyn Connection> {
+        &self.inner.connection
+    }
+
     pub fn query(&self) -> BrowseQuery {
         self.inner.state.lock().query.clone()
     }
