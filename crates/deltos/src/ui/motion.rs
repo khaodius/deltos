@@ -50,6 +50,7 @@ pub fn follow_pointer(window: &Window) -> bool {
 /// Windows has no call to start a move from code, so the window asks for the same move
 /// a press on its caption starts, while the button is still down.
 #[cfg(windows)]
+#[allow(unsafe_code)]
 fn windows_follow(window: &Window) -> bool {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
@@ -59,7 +60,8 @@ fn windows_follow(window: &Window) -> bool {
     use windows::Win32::UI::WindowsAndMessaging::{
         HTCAPTION, PostMessageW, SC_MOVE, WM_SYSCOMMAND,
     };
-    let Ok(handle) = window.window_handle() else {
+    // `Window` has its own `window_handle`, so the trait's is named in full.
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
         return false;
     };
     let RawWindowHandle::Win32(h) = handle.as_raw() else {
