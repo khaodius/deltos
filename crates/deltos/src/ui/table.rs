@@ -38,8 +38,11 @@ use crate::ui::{
 };
 
 mod filters;
+mod links;
 mod memory;
 mod pager;
+
+pub use links::open_filtered;
 
 actions!(
     table,
@@ -51,6 +54,8 @@ actions!(
         DuplicateRows,
         /// Shows the filter bar and puts the cursor in it.
         FocusFilter,
+        /// Opens the row the selected cell's foreign key refers to.
+        FollowReference,
     ]
 );
 
@@ -132,6 +137,7 @@ pub struct TablePanel {
     sort: Vec<Sort>,
     filters: filters::Filters,
     pager: pager::Pager,
+    links: links::Resolved,
     /// The database behind the table, once connected.
     driver: Option<DriverKind>,
     /// The last edit's outcome, shown in the status bar: the text and whether it failed.
@@ -182,6 +188,7 @@ impl TablePanel {
                     outside,
                     limited,
                 } => this.save_cells(cells, *batch, *outside, *limited, cx),
+                GridEvent::FollowLink { row, col } => this.follow_link(*row, *col, cx),
             }),
             cx.subscribe(&state, |this, _, event, cx| {
                 if let StateEvent::TableRequest { owner, request } = event {
@@ -209,6 +216,7 @@ impl TablePanel {
                 if this.reinspect {
                     this.refresh_inspector(cx);
                 }
+                this.sync_links(cx);
                 cx.notify()
             }),
             // A closed table's row leaves the inspector with it.
@@ -239,6 +247,7 @@ impl TablePanel {
             sort: Vec::new(),
             filters,
             pager,
+            links: links::Resolved::default(),
             driver: None,
             notice: None,
             notice_generation: 0,
@@ -266,6 +275,7 @@ impl TablePanel {
         if let Some(view) = memory::recall(cx, &this.connection, &this.object) {
             this.apply_view(view, cx);
         }
+        this.take_requested(cx);
         this.attach(cx);
         this
     }
@@ -287,8 +297,11 @@ impl TablePanel {
     }
 
     pub fn on_shown(&mut self, cx: &mut Context<Self>) {
+        let requested = self.take_requested(cx);
         if self.loader.is_none() {
             self.attach(cx);
+        } else if requested {
+            self.requery(cx);
         }
     }
 
@@ -340,6 +353,7 @@ impl TablePanel {
             this.update(cx, |this, cx| {
                 this.info = Some(info);
                 this.sync_structure(cx);
+                this.sync_links(cx);
                 cx.notify();
             })
             .ok();
@@ -1544,6 +1558,7 @@ impl TablePanel {
                         run(Box::new(|t, cx| t.clear_filters(cx))),
                     ));
                 }
+                items.extend(self.link_items(row, col, grid, this, cx));
                 items.push(MenuItem::separator());
                 items.push(MenuItem::new(
                     format!("Sort by {name}, ascending"),
@@ -2417,6 +2432,7 @@ impl Render for TablePanel {
             .on_action(
                 cx.listener(|this, _: &FocusFilter, window, cx| this.focus_filter(window, cx)),
             )
+            .on_action(cx.listener(|this, _: &FollowReference, _, cx| this.follow_selected(cx)))
             .on_action(cx.listener(|this, _: &CommitChanges, window, cx| {
                 this.flush_edit(window, cx);
                 this.commit(None, cx);

@@ -4,6 +4,16 @@ Packages for every version are attached to its
 [release](https://github.com/khaodius/deltos/releases), with SHA-256 checksums and a signed
 update manifest.
 
+## 0.1.13 - 2026-11-11
+
+- **Follow foreign keys.** Foreign key cells show a small arrow that opens the referenced row
+  in the inspector, also with Ctrl+Enter. A trail with Back records the path, and the keys of
+  that row lead further. Composite keys work.
+- **Related rows.** The cell menu opens the referenced table filtered to the row, and lists
+  the rows of other tables that refer to it.
+- **Rows reached by a key are read-only.** A row opened from a key is shown as it is in the
+  database; open its table to change it.
+
 ## 0.1.12 - 2026-11-11
 
 - **Pick up where you left off.** Deltos reopens your tabs, query text, panel windows and the

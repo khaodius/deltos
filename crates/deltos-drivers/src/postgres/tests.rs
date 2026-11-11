@@ -414,6 +414,11 @@ async fn describes_and_edits() {
     assert_eq!(info.columns[1].default.as_deref(), Some("'x'::text"));
     assert_eq!(info.columns[2].kind, ValueKind::Text);
     assert_eq!(info.columns[3].kind, ValueKind::Array);
+    assert_eq!(info.referenced_by.len(), 1);
+    assert_eq!(info.referenced_by[0].target.name, "child");
+    assert_eq!(info.referenced_by[0].target.namespace.last(), Some(&schema));
+    assert_eq!(info.referenced_by[0].columns, ["id"]);
+    assert_eq!(info.referenced_by[0].target_columns, ["parent_id"]);
     let view = ObjectRef {
         name: "v".into(),
         kind: ObjectKind::View,

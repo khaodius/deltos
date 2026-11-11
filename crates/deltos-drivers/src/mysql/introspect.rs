@@ -364,6 +364,47 @@ pub(super) async fn describe(conn: &mut Conn, object: &ObjectRef) -> Result<Obje
         }
     }
 
+    // The keys of other tables that point here, with this table's columns first.
+    let incoming_rows = rows(
+        conn,
+        "SELECT CONSTRAINT_NAME, REFERENCED_COLUMN_NAME, TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME \
+         FROM information_schema.KEY_COLUMN_USAGE \
+         WHERE REFERENCED_TABLE_SCHEMA = ? AND REFERENCED_TABLE_NAME = ? \
+         ORDER BY TABLE_SCHEMA, TABLE_NAME, CONSTRAINT_NAME, ORDINAL_POSITION",
+        &[Value::text(db), Value::text(object.name.as_str())],
+    )
+    .await?;
+    let mut referenced_by: Vec<ForeignKey> = Vec::new();
+    for row in incoming_rows {
+        let name = text(row.as_ref(0)).unwrap_or_default();
+        let column = text(row.as_ref(1)).unwrap_or_default();
+        let schema = text(row.as_ref(2)).unwrap_or_else(|| db.to_string());
+        let table = text(row.as_ref(3)).unwrap_or_default();
+        let source_column = text(row.as_ref(4)).unwrap_or_default();
+        match referenced_by.iter_mut().find(|fk| {
+            fk.name == name
+                && fk.target.name == table
+                && fk.target.namespace.first() == Some(&schema)
+        }) {
+            Some(fk) => {
+                fk.columns.push(column);
+                fk.target_columns.push(source_column);
+            }
+            None => referenced_by.push(ForeignKey {
+                name,
+                columns: vec![column],
+                target: ObjectRef {
+                    namespace: vec![schema],
+                    name: table,
+                    kind: ObjectKind::Table,
+                },
+                target_columns: vec![source_column],
+                on_delete: ForeignKeyAction::default(),
+                on_update: ForeignKeyAction::default(),
+            }),
+        }
+    }
+
     let statement = format!(
         "SHOW CREATE {} {}",
         if info.is_view { "VIEW" } else { "TABLE" },
@@ -380,6 +421,7 @@ pub(super) async fn describe(conn: &mut Conn, object: &ObjectRef) -> Result<Obje
         columns: info.columns.iter().map(MyColumn::column).collect(),
         indexes: info.indexes.clone(),
         foreign_keys,
+        referenced_by,
         estimated_rows: info.estimated_rows,
         size_bytes: info.size_bytes,
         comment: info.comment.clone(),

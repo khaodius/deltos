@@ -69,6 +69,9 @@ runs in one transaction where the database has them. A failed commit keeps every
 staged. If you prefer each edit to be written at once, turn on Commit edits immediately in
 Settings.
 
+Foreign key cells carry an arrow that opens the row they point to in the inspector, and the
+trail leads further from there.
+
 ## Filtering
 
 Each table has a filter bar: pick a column, an operator and a value, add more conditions and
@@ -224,6 +227,7 @@ publisher the first time.
 | Format SQL                  | `Ctrl+Shift+F`     |
 | Filter rows                 | `Ctrl+F`           |
 | Save the query              | `Ctrl+Shift+S` in a query tab |
+| Open the referenced row     | `Ctrl+Enter` in a table |
 
 Every binding can be changed in Settings → Keyboard.
 

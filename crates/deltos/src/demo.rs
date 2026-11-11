@@ -531,6 +531,31 @@ impl Table {
     }
 }
 
+/// The demo's foreign keys: name, table, column, referenced table, referenced column.
+const FOREIGN_KEYS: [(&str, Table, &str, Table, &str); 3] = [
+    (
+        "orders_user_id_fkey",
+        Table::Orders,
+        "user_id",
+        Table::Users,
+        "id",
+    ),
+    (
+        "orders_2019_user_id_fkey",
+        Table::Orders2019,
+        "user_id",
+        Table::Users,
+        "id",
+    ),
+    (
+        "sessions_user_id_fkey",
+        Table::Sessions,
+        "user_id",
+        Table::Users,
+        "id",
+    ),
+];
+
 fn find(object: &ObjectRef) -> Option<Table> {
     TABLES.into_iter().find(|t| {
         t.name() == object.name
@@ -883,20 +908,43 @@ impl Connection for DemoConnection {
                     constraint: false,
                 });
             }
+            let reference = |t: Table| ObjectRef {
+                namespace: vec!["demo".into(), t.namespace().into()],
+                name: t.name().into(),
+                kind: t.kind(),
+            };
             let mut foreign_keys = Vec::new();
-            if matches!(table, Table::Orders) {
-                foreign_keys.push(deltos_data::ForeignKey {
-                    name: "orders_user_id_fkey".into(),
-                    columns: vec!["user_id".into()],
-                    target: ObjectRef {
-                        namespace: object.namespace.clone(),
-                        name: "users".into(),
-                        kind: ObjectKind::Table,
-                    },
-                    target_columns: vec!["id".into()],
-                    on_delete: deltos_data::ForeignKeyAction::Cascade,
-                    on_update: deltos_data::ForeignKeyAction::NoAction,
-                });
+            let mut referenced_by = Vec::new();
+            for (name, from, column, to, target) in FOREIGN_KEYS {
+                if from == table {
+                    foreign_keys.push(deltos_data::ForeignKey {
+                        name: name.into(),
+                        columns: vec![column.into()],
+                        target: reference(to),
+                        target_columns: vec![target.into()],
+                        // Orders go with their user; the rest keep the default.
+                        on_delete: if from == Table::Orders {
+                            deltos_data::ForeignKeyAction::Cascade
+                        } else {
+                            deltos_data::ForeignKeyAction::NoAction
+                        },
+                        on_update: deltos_data::ForeignKeyAction::NoAction,
+                    });
+                }
+                if to == table {
+                    referenced_by.push(deltos_data::ForeignKey {
+                        name: name.into(),
+                        columns: vec![target.into()],
+                        target: reference(from),
+                        target_columns: vec![column.into()],
+                        on_delete: if from == Table::Orders {
+                            deltos_data::ForeignKeyAction::Cascade
+                        } else {
+                            deltos_data::ForeignKeyAction::NoAction
+                        },
+                        on_update: deltos_data::ForeignKeyAction::NoAction,
+                    });
+                }
             }
             let definition = Some(format!(
                 "CREATE {} {}.{} (\n{}\n);",
@@ -929,6 +977,7 @@ impl Connection for DemoConnection {
                 columns,
                 indexes,
                 foreign_keys,
+                referenced_by,
                 definition,
             })
         })

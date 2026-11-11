@@ -18,6 +18,7 @@ use crate::ui::editor::Editor;
 use crate::ui::grid::{CellInput, RowRef};
 use crate::ui::icons::{Icon, icon};
 use crate::ui::pending::RowMark;
+use crate::ui::references;
 use crate::ui::table::{CommitChanges, DiscardChanges, Request, ReviewChanges};
 use crate::ui::text_input::{InputEvent, TextInput};
 use crate::ui::{Tooltip, empty_state, icon_button, thousands};
@@ -108,6 +109,8 @@ impl InspectorPanel {
                 InputEvent::Cancel => input.update(cx, |i, cx| i.clear(cx)),
                 InputEvent::Submit => {}
             }),
+            // A foreign key followed from the row, or a step back.
+            cx.observe_global::<references::Trail>(|_, cx| cx.notify()),
         ];
         Self {
             state,
@@ -512,6 +515,9 @@ impl Render for InspectorPanel {
                 ))
                 .into_any_element();
         };
+        if let Some(trail) = references::view(&self.state, &row, &self.filter, window, cx) {
+            return trail;
+        }
         self.sync_fields(&row, window, cx);
         let editable = !self.fields.is_empty();
         let note: Option<SharedString> = match (&row.source.owner, &row.source.read_only) {

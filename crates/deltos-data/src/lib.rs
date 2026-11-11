@@ -371,6 +371,11 @@ pub struct ObjectInfo {
     pub columns: Vec<Column>,
     pub indexes: Vec<Index>,
     pub foreign_keys: Vec<ForeignKey>,
+    /// Other tables' foreign keys that point at this object, seen from this side: in each,
+    /// `columns` are this object's columns, `target` is the table that refers to it and
+    /// `target_columns` its columns, pair by pair. Empty where the database cannot say.
+    /// Their `on_delete` and `on_update` are not read and stay the default.
+    pub referenced_by: Vec<ForeignKey>,
     pub estimated_rows: Option<u64>,
     pub size_bytes: Option<u64>,
     pub comment: Option<String>,

@@ -18,6 +18,7 @@ pub mod panel_window;
 pub mod pending;
 pub mod plan_view;
 pub mod query;
+pub mod references;
 pub mod save_query;
 pub mod screen_color;
 pub mod settings;

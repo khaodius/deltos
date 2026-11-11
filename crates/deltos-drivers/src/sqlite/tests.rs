@@ -466,6 +466,10 @@ async fn counts_and_describes() {
     let parent = conn.describe(&table("parent")).await.expect("describe");
     assert_eq!(parent.columns[1].nullable, Some(false));
     assert_eq!(parent.columns[1].default.as_deref(), Some("'x'"));
+    assert_eq!(parent.referenced_by.len(), 1);
+    assert_eq!(parent.referenced_by[0].target.name, "child");
+    assert_eq!(parent.referenced_by[0].columns, ["id"]);
+    assert_eq!(parent.referenced_by[0].target_columns, ["parent_id"]);
 
     let view = ObjectRef {
         kind: ObjectKind::View,
@@ -583,6 +587,81 @@ async fn filter_operators_keep_the_right_rows() {
         ..Default::default()
     };
     assert_eq!(ids(any).await, [6]);
+}
+
+#[tokio::test]
+async fn knows_composite_keys_both_ways() {
+    let db = TempDb::new("keys");
+    {
+        let conn = rusqlite::Connection::open(&db.0).expect("open");
+        conn.execute_batch(
+            "CREATE TABLE region (country TEXT, code TEXT, name TEXT UNIQUE, PRIMARY KEY (country, code));
+             CREATE TABLE shop (id INTEGER PRIMARY KEY, country TEXT, code TEXT, region_name TEXT,
+                 FOREIGN KEY (country, code) REFERENCES region,
+                 FOREIGN KEY (region_name) REFERENCES region (name));
+             CREATE TABLE lone (x INTEGER);",
+        )
+        .expect("schema");
+    }
+    let conn = SqliteConnection::open(&db.config()).await.expect("open");
+    let pairs = |fks: &[ForeignKey]| {
+        let mut out: Vec<(String, Vec<String>, Vec<String>)> = fks
+            .iter()
+            .map(|fk| {
+                (
+                    fk.target.name.clone(),
+                    fk.columns.clone(),
+                    fk.target_columns.clone(),
+                )
+            })
+            .collect();
+        out.sort();
+        out
+    };
+    let strings = |s: &[&str]| s.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+
+    let shop = conn.describe(&table("shop")).await.expect("shop");
+    assert_eq!(
+        pairs(&shop.foreign_keys),
+        [
+            (
+                "region".to_string(),
+                strings(&["country", "code"]),
+                strings(&["country", "code"])
+            ),
+            (
+                "region".to_string(),
+                strings(&["region_name"]),
+                strings(&["name"])
+            ),
+        ]
+    );
+    assert!(shop.referenced_by.is_empty());
+
+    let region = conn.describe(&table("region")).await.expect("region");
+    assert!(region.foreign_keys.is_empty());
+    assert_eq!(
+        pairs(&region.referenced_by),
+        [
+            (
+                "shop".to_string(),
+                strings(&["country", "code"]),
+                strings(&["country", "code"])
+            ),
+            (
+                "shop".to_string(),
+                strings(&["name"]),
+                strings(&["region_name"])
+            ),
+        ]
+    );
+    assert!(
+        conn.describe(&table("lone"))
+            .await
+            .expect("lone")
+            .referenced_by
+            .is_empty()
+    );
 }
 
 #[tokio::test]
