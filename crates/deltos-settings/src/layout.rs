@@ -34,6 +34,15 @@ pub enum PanelKind {
 }
 
 impl PanelKind {
+    /// Whether this panel is a document (it opens as a tab where tables open) rather than
+    /// a tool panel beside them.
+    pub fn is_document(&self) -> bool {
+        !matches!(
+            self,
+            PanelKind::Objects | PanelKind::Inspector | PanelKind::History
+        )
+    }
+
     /// Whether the app keeps at most one of this kind open.
     pub fn is_singleton(&self) -> bool {
         matches!(

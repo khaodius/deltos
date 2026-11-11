@@ -16,6 +16,7 @@ use crate::theme::{
 };
 use crate::ui::color_picker::{ColorEvent, ColorPicker};
 use crate::ui::icons::{Icon, icon};
+use crate::ui::layouts::LayoutsPage;
 use crate::ui::text_input::{InputEvent, TextInput};
 use crate::ui::{ButtonStyle, MenuItem, button, field, menu, segmented, switch};
 use crate::update::{CURRENT, UpdateStatus, Updates};
@@ -28,11 +29,13 @@ pub enum Section {
     Updates,
     Keybindings,
     About,
+    Workspace,
 }
 
 impl Section {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Appearance,
+        Self::Workspace,
         Self::Data,
         Self::Editor,
         Self::Updates,
@@ -48,6 +51,7 @@ impl Section {
             Self::Updates => "Updates",
             Self::Keybindings => "Keyboard",
             Self::About => "About",
+            Self::Workspace => "Workspace",
         }
     }
 
@@ -59,6 +63,7 @@ impl Section {
             Self::Updates => Icon::Refresh,
             Self::Keybindings => Icon::Terminal,
             Self::About => Icon::Logo,
+            Self::Workspace => Icon::Columns,
         }
     }
 }
@@ -100,6 +105,7 @@ pub struct SettingsPanel {
     system_fonts: Option<Vec<String>>,
     keys: Vec<(&'static str, Entity<TextInput>)>,
     theme_menu: bool,
+    layouts: Entity<LayoutsPage>,
     _subs: Vec<Subscription>,
 }
 
@@ -182,7 +188,9 @@ impl SettingsPanel {
             let u = u.clone();
             subs.push(cx.observe(&u, |_, _, cx| cx.notify()));
         }
+        let layouts = cx.new(|cx| LayoutsPage::new(state.clone(), cx));
         Self {
+            layouts,
             state,
             section: Section::Appearance,
             accent_hex,
@@ -199,6 +207,11 @@ impl SettingsPanel {
     pub fn show_section(&mut self, section: Section, cx: &mut Context<Self>) {
         self.section = section;
         cx.notify();
+    }
+
+    /// The Workspace page, which the layout menu focuses.
+    pub fn layouts_page(&self) -> Entity<LayoutsPage> {
+        self.layouts.clone()
     }
 
     fn set(&self, cx: &mut App, f: impl FnOnce(&mut Settings)) {
@@ -1612,7 +1625,7 @@ fn step_down(v: u32, steps: &[u32]) -> u32 {
     }
 }
 
-fn group(title: &'static str, t: &Theme) -> Div {
+pub(crate) fn group(title: &'static str, t: &Theme) -> Div {
     div().flex().flex_col().child(heading(title, t))
 }
 
@@ -1625,7 +1638,7 @@ fn heading(title: &'static str, t: &Theme) -> Div {
         .child(title)
 }
 
-fn gap() -> Div {
+pub(crate) fn gap() -> Div {
     div().h(px(22.))
 }
 
@@ -1699,7 +1712,7 @@ fn stacked_row(
         .child(control)
 }
 
-fn toggle_row(
+pub(crate) fn toggle_row(
     label: &'static str,
     detail: Option<&'static str>,
     (id, on): (&'static str, bool),
@@ -1815,6 +1828,7 @@ impl Render for SettingsPanel {
             Section::Updates => self.updates(&t, cx),
             Section::Keybindings => self.keybindings(&t, window, cx),
             Section::About => self.about(&t, cx),
+            Section::Workspace => div().child(self.layouts.clone()),
         };
         div().size_full().flex().bg(t.surface).child(nav).child(
             div()

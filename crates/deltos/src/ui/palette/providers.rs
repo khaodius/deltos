@@ -11,7 +11,7 @@ use gpui::{Action, App, Entity, SharedString, Window};
 
 use crate::state::AppState;
 use crate::ui::icons::Icon;
-use crate::ui::settings::Section;
+use crate::ui::settings::{Section, SettingsPanel};
 use crate::ui::workspace::{PanelView, Workspace};
 
 /// What an item is, for the prefix filters and the label beside it.
@@ -28,6 +28,8 @@ pub enum Kind {
     Setting,
     /// A query saved by name.
     SavedQuery,
+    /// A layout preset to apply.
+    Layout,
 }
 
 impl Kind {
@@ -40,6 +42,7 @@ impl Kind {
             Kind::Object => "Object",
             Kind::Setting => "Settings",
             Kind::SavedQuery => "Saved query",
+            Kind::Layout => "Layout",
         }
     }
 }
@@ -58,7 +61,7 @@ impl Scope {
     pub fn admits(self, kind: Kind) -> bool {
         match self {
             Scope::All => true,
-            Scope::Commands => matches!(kind, Kind::Action | Kind::Setting),
+            Scope::Commands => matches!(kind, Kind::Action | Kind::Setting | Kind::Layout),
             Scope::Objects => kind == Kind::Object,
             Scope::Connections => kind == Kind::Connection,
         }
@@ -171,6 +174,7 @@ pub const PROVIDERS: &[Provider] = &[
     connections,
     objects,
     saved_queries,
+    crate::ui::layouts::provider,
     settings_pages,
 ];
 
@@ -491,27 +495,34 @@ fn settings_pages(s: &Sources, out: &mut Vec<PaletteItem>) {
                 section.icon(),
                 format!("Settings: {}", section.label()),
                 move |_, cx| {
-                    ws.update(cx, |w, cx| {
-                        w.open(PanelKind::Settings, true, cx);
-                        let settings = w
-                            .layout
-                            .panels
-                            .iter()
-                            .find(|p| p.kind == PanelKind::Settings)
-                            .and_then(|p| w.view(p.id))
-                            .and_then(|v| match v {
-                                PanelView::Settings(e) => Some(e.clone()),
-                                _ => None,
-                            });
-                        if let Some(e) = settings {
-                            e.update(cx, |p, cx| p.show_section(section, cx));
-                        }
-                    })
+                    show_settings(&ws, section, cx);
                 },
             )
             .search("preferences"),
         );
     }
+}
+
+/// Opens Settings, or shows it, at `section`.
+pub fn show_settings(
+    workspace: &Entity<Workspace>,
+    section: Section,
+    cx: &mut App,
+) -> Option<Entity<SettingsPanel>> {
+    let settings = workspace.update(cx, |w, cx| {
+        w.open(PanelKind::Settings, true, cx);
+        w.layout
+            .panels
+            .iter()
+            .find(|p| p.kind == PanelKind::Settings)
+            .and_then(|p| w.view(p.id))
+            .and_then(|v| match v {
+                PanelView::Settings(e) => Some(e.clone()),
+                _ => None,
+            })
+    })?;
+    settings.update(cx, |p, cx| p.show_section(section, cx));
+    Some(settings)
 }
 
 #[cfg(test)]

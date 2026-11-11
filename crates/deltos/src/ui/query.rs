@@ -273,6 +273,11 @@ impl QueryPanel {
         self.editor.read(cx).text().to_owned()
     }
 
+    /// The editor's text, borrowed, to compare without copying it.
+    pub fn text_ref<'a>(&self, cx: &'a App) -> &'a str {
+        self.editor.read(cx).text()
+    }
+
     fn connection_name(&self, cx: &App) -> Option<String> {
         let id = self.connection.as_ref()?;
         let s = self.state.read(cx);

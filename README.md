@@ -40,6 +40,10 @@ stack. Pull it past the window's edge and it becomes a window of its own, which 
 the pointer until you let go. Drop that window on the main one, or hold it there, and it docks again. The
 layout is saved and comes back on the next start.
 
+Deltos reopens your last session on launch: tabs, query text, panel windows and the
+connections that need no password. Layout presets arrange the panels in one click: Default,
+Focus, Query, or any arrangement you save under a name.
+
 ## Command palette
 
 Ctrl+K opens the command palette: type a few letters of an action, a tab, a connection, a
