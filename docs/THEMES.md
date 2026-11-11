@@ -1,7 +1,8 @@
 # Themes
 
-Deltos ships a light and a dark theme. Settings > Appearance picks between them, or follows
-the system. A theme file changes the colors on top of either one.
+Deltos ships a light and a dark theme, and starts in dark with the Obsidian palette.
+Settings > Appearance picks between them, or follows the system. A theme file changes the
+colors on top of either one.
 
 ## Where theme files go
 

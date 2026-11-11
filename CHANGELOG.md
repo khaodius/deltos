@@ -4,6 +4,21 @@ Packages for every version are attached to its
 [release](https://github.com/khaodius/deltos/releases), with SHA-256 checksums and a signed
 update manifest.
 
+## 0.1.16 - 2026-11-11
+
+- **Dark mode with Obsidian by default.** Deltos now starts in dark mode with the Obsidian
+  palette. Settings that still followed the system, the old default, move to dark once;
+  pick System in Settings → Appearance to follow the OS again, and that choice stays.
+- **Try editing in the demo.** In the demo database, cells, the inspector, Add row, Duplicate
+  and Delete stage changes, and Review shows the SQL a commit would run. The demo keeps
+  nothing, so Commit says so and the changes stay staged. Its 50 million row table also
+  filters on `id` and `created_at`.
+- **Room for the pager.** While changes are staged, the table's status bar leaves out the
+  memory readout so the page controls fit in a narrow panel.
+- **New screenshot and tour.** The README shows the new dark look with staged edits, the
+  filter bar and the inspector, and a short tour of the command palette, cell and inspector
+  edits, the review sheet and a panel popped out into its own window.
+
 ## 0.1.15 - 2026-11-11
 
 - **Tasks panel.** Long statements, reading a whole result, table loads and counts, saving

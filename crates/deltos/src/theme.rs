@@ -643,13 +643,14 @@ mod tests {
 
     #[test]
     fn system_mode_follows_the_system() {
-        let a = Appearance::default();
-        assert!(is_dark(&Theme::new(&a, &Editor::default(), true, None)));
-        assert!(!is_dark(&Theme::new(&a, &Editor::default(), false, None)));
         let a = Appearance {
-            theme: ThemeMode::Dark,
+            theme: ThemeMode::System,
             ..Appearance::default()
         };
+        assert!(is_dark(&Theme::new(&a, &Editor::default(), true, None)));
+        assert!(!is_dark(&Theme::new(&a, &Editor::default(), false, None)));
+        // The default is dark whatever the system says.
+        let a = Appearance::default();
         assert!(is_dark(&Theme::new(&a, &Editor::default(), false, None)));
     }
 

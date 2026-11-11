@@ -265,7 +265,10 @@ impl StructureView {
             Some(_) => self.object.kind == ObjectKind::Table,
             None => false,
         };
-        ok && table && self.conn(cx).is_some_and(|c| c.capabilities().edit_rows)
+        ok && table
+            && self
+                .conn(cx)
+                .is_some_and(|c| c.capabilities().edit_rows && !crate::demo::is_demo(c.as_ref()))
     }
 
     fn edits_columns(&self) -> bool {
