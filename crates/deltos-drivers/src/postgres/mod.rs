@@ -1157,7 +1157,12 @@ fn pg_error(e: tokio_postgres::Error) -> Error {
 fn connect_error(e: tokio_postgres::Error) -> Error {
     match e.as_db_error() {
         Some(db) => Error::Connect(db.message().to_string()),
-        None => Error::Connect(e.to_string()),
+        // The client's message names only the kind of failure ("invalid configuration");
+        // what went wrong ("password missing") is in its source.
+        None => match std::error::Error::source(&e) {
+            Some(source) => Error::Connect(format!("{e}: {source}")),
+            None => Error::Connect(e.to_string()),
+        },
     }
 }
 

@@ -509,6 +509,28 @@ impl SavedLayout {
         base.dock.retain(|id| keep.contains(&id));
         preset.arrange(&base, None)
     }
+
+    /// This layout with tables only of the connections `saved` says are kept, as if the
+    /// others had been closed, and queries of any other connection left with their text
+    /// but no connection. A connection opened from a link is never saved and never opens
+    /// again by itself, so its tabs would come back attached to nothing.
+    pub fn keeping_connections(&self, saved: impl Fn(&str) -> bool) -> SavedLayout {
+        let mut out = self.clone();
+        for p in &mut out.panels {
+            if let PanelKind::Query { connection, .. } = &mut p.kind
+                && connection.as_deref().is_some_and(|c| !saved(c))
+            {
+                *connection = None;
+            }
+        }
+        out.panels.retain(|p| match &p.kind {
+            PanelKind::Table { connection, .. } => saved(connection),
+            _ => true,
+        });
+        let keep: Vec<PanelId> = out.panels.iter().map(|p| p.id).collect();
+        out.dock.retain(|id| keep.contains(&id));
+        out
+    }
 }
 
 #[cfg(test)]
@@ -676,6 +698,43 @@ mod tests {
         out.dock.validate().unwrap();
         assert_eq!(out.dock.main.panels().len(), l.dock.main.panels().len());
         assert!(kinds(&out).contains(&PanelKind::History));
+    }
+
+    #[test]
+    fn tabs_of_connections_not_kept_are_not_restored() {
+        let (mut l, a, b) = sample();
+        if let Some(p) = l.panels.iter_mut().find(|p| p.id == b) {
+            p.kind = PanelKind::Table {
+                connection: "link:1".into(),
+                object: ObjectRef {
+                    namespace: vec!["public".into()],
+                    name: "b".into(),
+                    kind: ObjectKind::Table,
+                },
+            };
+        }
+        let q = add(
+            &mut l,
+            30,
+            PanelKind::Query {
+                connection: Some("link:1".into()),
+                text: "select 1".into(),
+            },
+            beside(a, Zone::Center),
+        );
+        let out = l.keeping_connections(|id| id == "c");
+        assert!(out.dock.validate().is_ok());
+        assert!(out.kind(a).is_some() && out.dock.contains(a));
+        assert!(out.kind(b).is_none() && !out.dock.contains(b));
+        assert_eq!(
+            out.kind(q),
+            Some(&PanelKind::Query {
+                connection: None,
+                text: "select 1".into(),
+            })
+        );
+        // Nothing changes when every connection is kept.
+        assert_eq!(l.keeping_connections(|_| true), l);
     }
 
     #[test]

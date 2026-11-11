@@ -13,6 +13,7 @@ use crate::state::{AppState, ConnectState, DEMO_ID, StateEvent, fill_secrets, op
 use crate::theme::{Theme, color, theme};
 use crate::ui::environment;
 use crate::ui::icons::{Icon, icon};
+use crate::ui::import::{ImportEvent, ImportView};
 use crate::ui::text_input::{InputEvent, TextInput};
 use crate::ui::{
     ButtonStyle, MenuItem, Tooltip, button, caption, dot, empty_state, field, icon_button, menu,
@@ -28,6 +29,8 @@ enum Selected {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OpenMenu {
     Tag,
+    /// The list's menu: importing.
+    More,
 }
 
 /// The result of the last Test press.
@@ -82,6 +85,8 @@ pub struct ConnectionsPanel {
     /// The field lengths before the last change, to tell a paste from typing.
     url_len: usize,
     host_len: usize,
+    /// Connections from other tools, shown instead of the form while it is open.
+    import: Option<(Entity<ImportView>, Subscription)>,
     _subs: Vec<Subscription>,
 }
 
@@ -209,6 +214,7 @@ impl ConnectionsPanel {
             ignore_host: None,
             url_len: 0,
             host_len: 0,
+            import: None,
             _subs: subs,
         };
         if this.state.read(cx).settings.connections.is_empty() {
@@ -368,8 +374,9 @@ impl ConnectionsPanel {
 
     /// Fills the form from a saved connection, or empties it for a new one.
     fn select(&mut self, selected: Option<Selected>, cx: &mut Context<Self>) {
+        self.import = None;
         let saved = match &selected {
-            Some(Selected::Saved(id)) => self.state.read(cx).settings.connection(id).cloned(),
+            Some(Selected::Saved(id)) => self.state.read(cx).saved_or_unsaved(id).cloned(),
             _ => None,
         };
         let c = saved.unwrap_or_default();
@@ -384,7 +391,13 @@ impl ConnectionsPanel {
             cx,
         );
         self.set_field(Field::User, c.config.user.clone(), cx);
-        self.set_field(Field::Password, String::new(), cx);
+        // An unsaved connection's password is only in memory; the form shows it so that
+        // saving can keep it.
+        self.set_field(
+            Field::Password,
+            c.config.password.clone().unwrap_or_default(),
+            cx,
+        );
         self.form
             .password
             .update(cx, |i, cx| i.set_masked(true, cx));
@@ -556,6 +569,35 @@ impl ConnectionsPanel {
         cx.notify();
     }
 
+    /// Shows the import pane, looking in the usual places, or asking for a file.
+    fn open_import(&mut self, scan: bool, cx: &mut Context<Self>) {
+        let state = self.state.clone();
+        let view = cx.new(|cx| ImportView::new(state, scan, cx));
+        if !scan {
+            view.update(cx, |v, cx| v.choose_file(cx));
+        }
+        let sub = cx.subscribe(&view, |this, _, e: &ImportEvent, cx| match e {
+            ImportEvent::Close { added } => {
+                let added = *added;
+                this.select(None, cx);
+                if added > 0 {
+                    this.notice = Some(
+                        match added {
+                            1 => "Added 1 connection.".to_owned(),
+                            n => format!("Added {n} connections."),
+                        }
+                        .into(),
+                    );
+                }
+                cx.notify();
+            }
+        });
+        self.menu = None;
+        self.selected = None;
+        self.import = Some((view, sub));
+        cx.notify();
+    }
+
     fn test(&mut self, cx: &mut Context<Self>) {
         let saved = match self.build(cx) {
             Ok(s) => s,
@@ -652,6 +694,24 @@ impl ConnectionsPanel {
                 )
             })
             .collect();
+        // Connections opened from a link, until they are saved.
+        entries.extend(s.unsaved.iter().map(|u| {
+            let target = match u.kind {
+                DriverKind::Sqlite => u.config.database.clone(),
+                _ => format!(
+                    "{}{}",
+                    u.config.host,
+                    u.config.port.map(|p| format!(":{p}")).unwrap_or_default()
+                ),
+            };
+            (
+                u.id.clone(),
+                u.name.clone().into(),
+                format!("Not saved · {} · {target}", u.kind.label()).into(),
+                u.tag,
+                u.read_only,
+            )
+        }));
         entries.insert(
             0,
             (
@@ -1025,10 +1085,15 @@ impl ConnectionsPanel {
     }
 
     fn form(&mut self, t: &Theme, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        if let Some((view, _)) = &self.import {
+            return view.clone().into_any_element();
+        }
         let Some(selected) = self.selected.clone() else {
             return empty_state(
                 "Select a connection",
-                Some("Or create one with the + button. Double-click to connect.".into()),
+                Some(self.notice.clone().unwrap_or_else(|| {
+                    "Or create one with the + button. Double-click to connect.".into()
+                })),
                 t,
             )
             .into_any_element();
@@ -1176,7 +1241,12 @@ impl ConnectionsPanel {
         let connected = saved_id
             .as_ref()
             .is_some_and(|id| self.state.read(cx).session(id).is_some());
-        let title: SharedString = if saved_id.is_some() {
+        let unsaved = saved_id
+            .as_ref()
+            .is_some_and(|id| self.state.read(cx).settings.connection(id).is_none());
+        let title: SharedString = if unsaved {
+            "Save connection".into()
+        } else if saved_id.is_some() {
             "Edit connection".into()
         } else {
             "New connection".into()
@@ -1355,11 +1425,20 @@ impl ConnectionsPanel {
                         el.child(row("TLS", div().flex().child(tls).into_any_element()))
                     })
                     .when(!sqlite, |el| el.child(ssh_section))
-                    .when(saved_id.is_some(), |el| {
+                    .when(saved_id.is_some() && !unsaved, |el| {
                         el.child(row(
                             "",
                             note(
                                 "Leave the password empty to keep the saved one.".into(),
+                                t.text_faint,
+                            ),
+                        ))
+                    })
+                    .when(unsaved, |el| {
+                        el.child(row(
+                            "",
+                            note(
+                                "Opened from a link and not saved yet: it goes when Deltos quits. Save keeps it, and the password too when Keychain is on.".into(),
                                 t.text_faint,
                             ),
                         ))
@@ -1550,6 +1629,42 @@ impl Render for ConnectionsPanel {
         let t = theme(cx).clone();
         let list = self.list(&t, cx);
         let form = self.form(&t, window, cx);
+        let mut more = div().relative().child(
+            icon_button("conn-more", Icon::More, &t)
+                .tooltip(|_, cx| Tooltip::view("Import connections", cx))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.menu = Some(OpenMenu::More);
+                    cx.notify();
+                })),
+        );
+        if self.menu == Some(OpenMenu::More) {
+            let weak = cx.entity().downgrade();
+            let (w1, w2, close) = (weak.clone(), weak.clone(), weak);
+            more = more.child(menu(
+                "conn-more-menu",
+                vec![
+                    MenuItem::new(
+                        "Import from DBeaver, DataGrip, TablePlus…",
+                        move |_, cx| {
+                            w1.update(cx, |this, cx| this.open_import(true, cx)).ok();
+                        },
+                    ),
+                    MenuItem::new("Import a file…", move |_, cx| {
+                        w2.update(cx, |this, cx| this.open_import(false, cx)).ok();
+                    }),
+                ],
+                240.,
+                move |_, cx| {
+                    close
+                        .update(cx, |this, cx| {
+                            this.menu = None;
+                            cx.notify();
+                        })
+                        .ok();
+                },
+                &t,
+            ));
+        }
         let state = self.state.clone();
         div()
             .size_full()
@@ -1574,6 +1689,7 @@ impl Render for ConnectionsPanel {
                             .items_center()
                             .child(caption("Connections", &t))
                             .child(div().flex_1())
+                            .child(more)
                             .child(
                                 icon_button("conn-new", Icon::Plus, &t)
                                     .tooltip(|_, cx| Tooltip::view("New connection", cx))

@@ -74,15 +74,25 @@ pub fn open_ids<'a>(
 }
 
 /// Opens the last session's connections when the settings say so, then follows which
-/// are open from here on. Does nothing in the demo.
-pub fn init(state: &Entity<AppState>, workspace: &Entity<Workspace>, cx: &mut App) {
+/// are open from here on. Does nothing in the demo. `linked` is a connection Deltos was
+/// started with a link to, already opening: it stays the active one.
+pub fn init(
+    state: &Entity<AppState>,
+    workspace: &Entity<Workspace>,
+    linked: Option<String>,
+    cx: &mut App,
+) {
     if state.read(cx).demo {
         return;
     }
     let settings = &state.read(cx).settings;
     if settings.session.restore {
-        let ids = reconnectable(settings);
-        let active = settings.session.active.clone().filter(|a| ids.contains(a));
+        let mut ids = reconnectable(settings);
+        let last = settings.session.active.clone().filter(|a| ids.contains(a));
+        if let Some(l) = &linked {
+            ids.retain(|id| id != l);
+        }
+        let active = linked.or(last);
         for id in &ids {
             state.update(cx, |s, cx| s.connect(id, cx));
         }

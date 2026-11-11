@@ -1,0 +1,103 @@
+{
+	"folders": {
+		"Production": {},
+		"Production/EU": {
+			"parent": "Production",
+			"description": "Frankfurt"
+		}
+	},
+	"connections": {
+		"postgres-jdbc-18c2a4b6e1f-6a1b2c3d4e5f6a7b": {
+			"provider": "postgresql",
+			"driver": "postgres-jdbc",
+			"name": "Shop (prod)",
+			"save-password": true,
+			"show-system-objects": false,
+			"read-only": true,
+			"folder": "Production/EU",
+			"configuration": {
+				"host": "db.shop.example.com",
+				"port": "5432",
+				"database": "shop",
+				"url": "jdbc:postgresql://db.shop.example.com:5432/shop",
+				"configurationType": "MANUAL",
+				"home": "postgresql-x64-16",
+				"type": "prod",
+				"auth-model": "native",
+				"handlers": {
+					"ssh_tunnel": {
+						"type": "TUNNEL",
+						"enabled": true,
+						"save-password": false,
+						"properties": {
+							"host": "bastion.example.com",
+							"port": 2222,
+							"authType": "PUBLIC_KEY",
+							"keyPath": "/home/me/.ssh/id_ed25519",
+							"implementation": "sshj"
+						}
+					}
+				},
+				"provider-properties": {
+					"@dbeaver-show-non-default-db@": "false"
+				}
+			}
+		},
+		"mysql8-18c2a4b6e20-11223344aabbccdd": {
+			"provider": "mysql",
+			"driver": "mysql8",
+			"name": "Local MySQL",
+			"save-password": false,
+			"configuration": {
+				"host": "localhost",
+				"port": "3306",
+				"database": "app",
+				"url": "jdbc:mysql://localhost:3306/app",
+				"configurationType": "MANUAL",
+				"type": "dev",
+				"user": "root",
+				"auth-model": "native"
+			}
+		},
+		"mariaDB-18c2a4b6e21-99887766": {
+			"provider": "mysql",
+			"driver": "mariaDB",
+			"name": "Staging Maria",
+			"configuration": {
+				"url": "jdbc:mariadb://maria.stage.internal:3307/orders",
+				"configurationType": "URL",
+				"type": "stage-env"
+			}
+		},
+		"sqlite_jdbc-18c2a4b6e22-5566": {
+			"provider": "generic",
+			"driver": "sqlite_jdbc",
+			"name": "Notes",
+			"configuration": {
+				"database": "/home/me/notes.db",
+				"url": "jdbc:sqlite:/home/me/notes.db",
+				"configurationType": "MANUAL",
+				"type": "dev"
+			}
+		},
+		"oracle_thin-18c2a4b6e23-1": {
+			"provider": "oracle",
+			"driver": "oracle_thin",
+			"name": "Billing",
+			"configuration": {
+				"host": "ora.example.com",
+				"port": "1521",
+				"type": "prod"
+			}
+		}
+	},
+	"connection-types": {
+		"stage-env": {
+			"name": "Staging",
+			"color": "255,128,0",
+			"description": "Staging servers",
+			"auto-commit": true,
+			"confirm-execute": true
+		}
+	}
+}

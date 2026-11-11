@@ -1,0 +1,48 @@
+[
+  {
+    "ID": "9F1C2E7A-5B3D-4C8E-A1F2-0D9E8C7B6A51",
+    "ConnectionName": "Shop production",
+    "Driver": "PostgreSQL",
+    "Enviroment": "production",
+    "DatabaseHost": "db.shop.example.com",
+    "DatabasePort": "5432",
+    "DatabaseName": "shop",
+    "DatabaseUser": "shop_admin",
+    "DatabasePassword": "",
+    "isOverSSH": true,
+    "ServerAddress": "bastion.example.com",
+    "ServerPort": "22",
+    "ServerUser": "me",
+    "isUsePrivateKey": true,
+    "ServerPrivateKeyName": "id_ed25519",
+    "tLSMode": 0,
+    "GroupID": "",
+    "statusColor": "#FF453A"
+  },
+  {
+    "ID": "1A2B3C4D-0000-1111-2222-333344445555",
+    "ConnectionName": "Cache",
+    "Driver": "Redis",
+    "Enviroment": "development",
+    "DatabaseHost": "127.0.0.1",
+    "DatabasePort": "6379"
+  },
+  {
+    "ID": "6E5D4C3B-AAAA-BBBB-CCCC-DDDDEEEEFFFF",
+    "ConnectionName": "Local Maria",
+    "Driver": "MariaDB",
+    "Enviroment": "local",
+    "DatabaseHost": "localhost",
+    "DatabasePort": 3307,
+    "DatabaseName": "app",
+    "DatabaseUser": "root",
+    "isOverSSH": false
+  },
+  {
+    "ID": "77777777-6666-5555-4444-333322221111",
+    "ConnectionName": "Notes",
+    "Driver": "SQLite",
+    "Enviroment": "testing",
+    "DatabasePath": "/home/me/notes.sqlite"
+  }
+]

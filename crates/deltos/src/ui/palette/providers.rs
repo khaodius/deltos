@@ -317,7 +317,7 @@ fn connection_name(state: &AppState, id: &str) -> String {
     state
         .session(id)
         .map(|s| s.name.clone())
-        .or_else(|| state.settings.connection(id).map(|c| c.name.clone()))
+        .or_else(|| state.saved_or_unsaved(id).map(|c| c.name.clone()))
         .unwrap_or_else(|| id.to_owned())
 }
 
@@ -367,17 +367,23 @@ fn connections(s: &Sources, out: &mut Vec<PaletteItem>) {
         .iter()
         .map(|c| (c.id.clone(), c.name.clone(), c.kind.label()))
         .collect();
+    // Connections opened from a link last until Deltos quits; they are listed as not
+    // saved, so nobody takes one for a connection that will be there next time.
+    entries.extend(
+        state
+            .unsaved
+            .iter()
+            .filter(|u| state.settings.connection(&u.id).is_none())
+            .map(|u| (u.id.clone(), u.name.clone(), u.kind.label())),
+    );
     if state.demo || state.session(crate::state::DEMO_ID).is_some() {
         entries.push((crate::state::DEMO_ID.into(), "Demo".into(), "Built-in"));
     }
     for (id, name, kind) in entries {
         let open = state.session(&id).is_some();
+        let unsaved = state.settings.connection(&id).is_none() && id != crate::state::DEMO_ID;
         let (app, ws, conn) = (s.state.clone(), s.workspace.clone(), id.clone());
-        let detail = if open {
-            format!("{kind} · connected")
-        } else {
-            kind.to_owned()
-        };
+        let detail = connection_detail(kind, open, unsaved);
         out.push(
             PaletteItem::new(
                 format!("conn:{id}"),
@@ -408,6 +414,18 @@ fn connections(s: &Sources, out: &mut Vec<PaletteItem>) {
             );
         }
     }
+}
+
+/// What a connection's palette entry says under its name.
+fn connection_detail(kind: &str, open: bool, unsaved: bool) -> String {
+    let mut out = kind.to_owned();
+    if unsaved {
+        out.push_str(" · not saved");
+    }
+    if open {
+        out.push_str(" · connected");
+    }
+    out
 }
 
 fn object_icon(kind: ObjectKind) -> Icon {
@@ -567,6 +585,19 @@ mod tests {
         assert_eq!(first_line("   \n"), None);
         let long = "x".repeat(80);
         assert_eq!(first_line(&long).map(|l| l.chars().count()), Some(61));
+    }
+
+    #[test]
+    fn connection_entries_say_when_not_saved() {
+        assert_eq!(connection_detail("PostgreSQL", false, false), "PostgreSQL");
+        assert_eq!(
+            connection_detail("PostgreSQL", true, false),
+            "PostgreSQL · connected"
+        );
+        assert_eq!(
+            connection_detail("SQLite", true, true),
+            "SQLite · not saved · connected"
+        );
     }
 
     #[test]

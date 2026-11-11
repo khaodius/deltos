@@ -113,6 +113,17 @@ pub struct HistoryEntry {
 
 const HISTORY_LIMIT: usize = crate::history_file::LIMIT;
 
+/// A connection that could not sign in without a password, waiting for one.
+#[derive(Debug, Clone)]
+pub struct PasswordRequest {
+    /// Counts requests, so the prompt knows a new one from the one it shows.
+    pub serial: u64,
+    pub saved: SavedConnection,
+    /// The config the attempt used, to try again with the password.
+    pub config: ConnectionConfig,
+    pub error: String,
+}
+
 /// Where a connection attempt stands, for the connection list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConnectState {
@@ -133,6 +144,15 @@ pub struct AppState {
     /// Theme files in the themes folder, by file stem.
     pub themes: Vec<(String, ThemeFile)>,
     pub demo: bool,
+    /// Connections opened from a link and not saved: they last until Deltos quits, and
+    /// their passwords are only in memory.
+    pub unsaved: Vec<SavedConnection>,
+    /// A connection waiting for its password, shown as a prompt in the main window.
+    pub password_request: Option<PasswordRequest>,
+    password_serial: u64,
+    /// Connections being tried with a password typed into the prompt, and whether to
+    /// keep it in the keychain once it works.
+    password_answers: HashMap<String, bool>,
     save_task: Option<Task<()>>,
 }
 
@@ -261,6 +281,8 @@ impl AppState {
             open.name = conn.name.clone();
             open.tag = conn.tag;
         }
+        // An unsaved connection that is saved is an ordinary one from now on.
+        self.unsaved.retain(|u| u.id != id);
         self.update_settings(cx, |s| {
             match s.connections.iter_mut().find(|c| c.id == conn.id) {
                 Some(c) => *c = conn,
@@ -291,6 +313,7 @@ impl AppState {
 
     pub fn delete_connection(&mut self, id: &str, cx: &mut Context<Self>) {
         let id = id.to_owned();
+        self.unsaved.retain(|u| u.id != id);
         self.update_settings(cx, |s| s.connections.retain(|c| c.id != id));
         let job = cx.global::<Net>().run_blocking(move || {
             deltos_settings::secrets::delete_password(&id)
@@ -314,7 +337,7 @@ impl AppState {
             self.open_demo(cx);
             return;
         }
-        let Some(saved) = self.settings.connection(id).cloned() else {
+        let Some(saved) = self.saved_or_unsaved(id).cloned() else {
             return;
         };
         self.connecting
@@ -342,12 +365,18 @@ impl AppState {
         let id = saved.id.clone();
         self.connecting.insert(id.clone(), ConnectState::Connecting);
         cx.emit(StateEvent::Sessions);
+        let tried = config.clone();
         let attempt = open_connection(saved.kind, config, cx);
         cx.spawn(async move |this, cx| {
             let result = attempt.await;
             this.update(cx, |this, cx| match result {
                 Ok(opened) => {
                     this.connecting.remove(&id);
+                    if let Some(remember) = this.password_answers.remove(&id)
+                        && let Some(password) = tried.password.clone()
+                    {
+                        this.keep_password(&id, password, remember, cx);
+                    }
                     if let Some(tunnel) = &opened.tunnel {
                         this.watch_tunnel(&id, tunnel.clone(), cx);
                     }
@@ -370,6 +399,20 @@ impl AppState {
                     );
                 }
                 Err(e) => {
+                    // A password typed into the prompt that the server turns away is
+                    // asked for again; one that came with the connection is not.
+                    let typed = this.password_answers.remove(&id).is_some();
+                    let had_password =
+                        !typed && tried.password.as_deref().is_some_and(|p| !p.is_empty());
+                    if crate::ui::password::needs_password(saved.kind, &e, had_password) {
+                        this.password_serial += 1;
+                        this.password_request = Some(PasswordRequest {
+                            serial: this.password_serial,
+                            saved,
+                            config: tried,
+                            error: e.clone(),
+                        });
+                    }
                     this.connecting.insert(id.clone(), ConnectState::Failed(e));
                     cx.emit(StateEvent::Sessions);
                     cx.notify();
@@ -378,6 +421,125 @@ impl AppState {
             .ok();
         })
         .detach();
+    }
+
+    /// A saved connection, or an unsaved one opened from a link.
+    pub fn saved_or_unsaved(&self, id: &str) -> Option<&SavedConnection> {
+        self.settings
+            .connection(id)
+            .or_else(|| self.unsaved.iter().find(|u| u.id == id))
+    }
+
+    /// Opens a connection link from the command line: the saved connection it reaches,
+    /// or a new unsaved one. See [`crate::link`]. Returns the id of the connection.
+    pub fn open_link(&mut self, link: crate::link::Link, cx: &mut Context<Self>) -> String {
+        if let Some(saved) = crate::link::find_saved(&link, &self.settings.connections).cloned() {
+            let id = saved.id.clone();
+            if self.session(&saved.id).is_some() || link.config.password.is_none() {
+                self.connect(&saved.id, cx);
+                return id;
+            }
+            // The link's password, the keychain's SSH secret.
+            let mut with_password = saved.clone();
+            with_password.config.password = link.config.password;
+            let filled = fill_secrets(with_password, cx);
+            cx.spawn(async move |this, cx| {
+                let config = filled.await;
+                this.update(cx, |this, cx| this.connect_with(saved, config, cx))
+                    .ok();
+            })
+            .detach();
+            return id;
+        }
+        // A `:` keeps it apart from the ids saved connections get, which are made of
+        // letters, digits and dashes, so saving another connection never takes it. The
+        // time makes it new on every run: the history and saved queries keep connection
+        // ids, and what was run on one link must never show up as another's.
+        let mut n = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_or(1, |d| d.as_millis() as u64);
+        let id = loop {
+            let id = format!("link:{n:x}");
+            if self.saved_or_unsaved(&id).is_none() && self.session(&id).is_none() {
+                break id;
+            }
+            n += 1;
+        };
+        let saved = SavedConnection {
+            id,
+            name: link.name,
+            kind: link.kind,
+            config: link.config,
+            tag: ConnectionTag::None,
+            save_password: false,
+            read_only: false,
+        };
+        let config = saved.config.clone();
+        let id = saved.id.clone();
+        self.unsaved.push(saved.clone());
+        self.connect_with(saved, config, cx);
+        id
+    }
+
+    /// Tries the waiting connection again with `password`. Once it connects, the password
+    /// is kept: in memory for an unsaved connection, in the keychain for a saved one when
+    /// the person asks to.
+    pub fn answer_password(&mut self, password: String, remember: bool, cx: &mut Context<Self>) {
+        let Some(request) = self.password_request.take() else {
+            return;
+        };
+        let PasswordRequest {
+            saved, mut config, ..
+        } = request;
+        config.password = Some(password);
+        self.password_answers.insert(saved.id.clone(), remember);
+        self.connect_with(saved, config, cx);
+    }
+
+    /// Keeps a password that just worked.
+    fn keep_password(
+        &mut self,
+        id: &str,
+        password: String,
+        remember: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(u) = self.unsaved.iter_mut().find(|u| u.id == id) {
+            // For reconnecting until Deltos quits.
+            u.config.password = Some(password);
+            return;
+        }
+        if !remember || self.settings.connection(id).is_none() {
+            return;
+        }
+        if self
+            .settings
+            .connection(id)
+            .is_some_and(|c| !c.save_password)
+        {
+            self.update_settings(cx, |s| {
+                if let Some(c) = s.connections.iter_mut().find(|c| c.id == id) {
+                    c.save_password = true;
+                }
+            });
+        }
+        let key = id.to_owned();
+        let job = cx
+            .global::<Net>()
+            .run_blocking(move || deltos_settings::secrets::set_password(&key, &password));
+        cx.spawn(async move |_, _| {
+            if let Some(Err(e)) = job.await {
+                tracing::warn!("could not keep the password in the keychain: {e}");
+            }
+        })
+        .detach();
+    }
+
+    pub fn cancel_password(&mut self, cx: &mut Context<Self>) {
+        if self.password_request.take().is_some() {
+            cx.emit(StateEvent::Sessions);
+            cx.notify();
+        }
     }
 
     pub fn open_demo(&mut self, cx: &mut Context<Self>) {
@@ -928,6 +1090,10 @@ pub fn init(
             history: VecDeque::new(),
             themes,
             demo,
+            unsaved: Vec::new(),
+            password_request: None,
+            password_serial: 0,
+            password_answers: HashMap::new(),
             save_task: None,
         };
         state.rebuild_theme(cx);
