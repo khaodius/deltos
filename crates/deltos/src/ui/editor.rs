@@ -183,6 +183,8 @@ pub struct Editor {
     placeholder: SharedString,
     /// What the last paint laid out, for mouse and IME positions.
     layout: Option<Layout>,
+    /// Plain text in a field: no line numbers, no highlighting.
+    plain: bool,
 }
 
 struct Layout {
@@ -209,9 +211,38 @@ impl Editor {
             selecting: false,
             placeholder: placeholder.into(),
             layout: None,
+            plain: false,
         };
         this.reindex();
         this
+    }
+
+    /// Makes it a plain multi-line field, for values rather than queries.
+    pub fn plain(mut self) -> Self {
+        self.plain = true;
+        self
+    }
+
+    /// Changes what shows while the text is empty.
+    pub fn set_placeholder(&mut self, placeholder: &'static str, cx: &mut Context<Self>) {
+        if self.placeholder != placeholder {
+            self.placeholder = placeholder.into();
+            cx.notify();
+        }
+    }
+
+    /// Replaces the whole text, the cursor at its end.
+    pub fn set_text(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
+        self.text = text.into();
+        self.reindex();
+        let end = self.text.len();
+        self.selected = end..end;
+        self.reversed = false;
+        self.marked = None;
+        self.scroll_y = 0.0;
+        self.goal_x = None;
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
     }
 
     pub fn text(&self) -> &str {
@@ -664,7 +695,12 @@ impl Render for Editor {
         let entity = cx.entity();
         let line_height = (t.editor_size * 1.55).round();
         let digits = self.line_count().to_string().len().max(2) as f32;
-        let gutter = px(digits * f32::from(t.editor_size) * 0.62 + 24.);
+        let plain = self.plain;
+        let gutter = if plain {
+            px(6.)
+        } else {
+            px(digits * f32::from(t.editor_size) * 0.62 + 24.)
+        };
         let lines_total = self.line_count();
         let text = self.text.clone();
         let starts = self.line_starts.clone();
@@ -697,20 +733,33 @@ impl Render for Editor {
                         .matches("*/")
                         .count();
                 let mut shaped = Vec::with_capacity(last.saturating_sub(first));
-                window.paint_quad(fill(
-                    Bounds {
-                        origin: bounds.origin,
-                        size: size(gutter - px(8.), bounds.size.height),
-                    },
-                    t.surface,
-                ));
+                if !plain {
+                    window.paint_quad(fill(
+                        Bounds {
+                            origin: bounds.origin,
+                            size: size(gutter - px(8.), bounds.size.height),
+                        },
+                        t.surface,
+                    ));
+                }
                 let cursor_line = starts.partition_point(|s| *s <= cursor).saturating_sub(1);
                 for line in first..last {
                     let start = starts[line];
                     let end = starts.get(line + 1).map_or(text.len(), |n| n - 1);
                     let y = bounds.top() + lh * (line as f32) - px(scroll_y);
                     let content: SharedString = text[start..end].to_owned().into();
-                    let runs = highlight(&content, t, &font, &mut in_comment);
+                    let runs = if plain {
+                        vec![TextRun {
+                            len: content.len(),
+                            font: font.clone(),
+                            color: t.text,
+                            background_color: None,
+                            underline: None,
+                            strikethrough: None,
+                        }]
+                    } else {
+                        highlight(&content, t, &font, &mut in_comment)
+                    };
                     let line_shaped =
                         window
                             .text_system()
@@ -735,6 +784,21 @@ impl Render for Editor {
                             },
                             t.selection,
                         ));
+                    }
+                    let _ = line_shaped.paint(point(text_left, y), lh, window, cx);
+                    if focused && line == cursor_line && selected.is_empty() {
+                        let x = line_shaped.x_for_index(cursor - start);
+                        window.paint_quad(fill(
+                            Bounds {
+                                origin: point(text_left + x, y + px(2.)),
+                                size: size(px(1.5), lh - px(4.)),
+                            },
+                            t.accent,
+                        ));
+                    }
+                    if plain {
+                        shaped.push(line_shaped);
+                        continue;
                     }
                     let number: SharedString = (line + 1).to_string().into();
                     let num_run = TextRun {
@@ -761,17 +825,6 @@ impl Render for Editor {
                         window,
                         cx,
                     );
-                    let _ = line_shaped.paint(point(text_left, y), lh, window, cx);
-                    if focused && line == cursor_line && selected.is_empty() {
-                        let x = line_shaped.x_for_index(cursor - start);
-                        window.paint_quad(fill(
-                            Bounds {
-                                origin: point(text_left + x, y + px(2.)),
-                                size: size(px(1.5), lh - px(4.)),
-                            },
-                            t.accent,
-                        ));
-                    }
                     shaped.push(line_shaped);
                 }
                 if text.is_empty() {
@@ -810,7 +863,7 @@ impl Render for Editor {
             .size_full()
             .relative()
             .overflow_hidden()
-            .bg(t.surface)
+            .bg(if plain { t.input } else { t.surface })
             .cursor(CursorStyle::IBeam)
             .on_action(cx.listener(|this, _: &Backspace, _, cx| {
                 if this.selected.is_empty() {

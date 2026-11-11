@@ -11,6 +11,7 @@ pub mod icons;
 pub mod inspector;
 pub mod motion;
 pub mod panel_window;
+pub mod pending;
 pub mod query;
 pub mod screen_color;
 pub mod settings;

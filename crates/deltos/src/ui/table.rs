@@ -1,6 +1,12 @@
 //! A table, view or collection: its rows in the grid with a filter bar and a status bar,
 //! or its structure (columns, indexes, foreign keys). Rows come through a
 //! [`BrowseLoader`], which seeks by key, so any part of any size of table opens at once.
+//!
+//! Edits are staged: changed cells, deleted rows and new rows wait in the grid's
+//! [`PendingChanges`](crate::ui::pending::PendingChanges) until the person reviews and
+//! commits them, which runs them in one call to the driver (one transaction where the
+//! database has them). The "Commit edits immediately" setting writes each edit at once
+//! instead.
 
 use std::sync::Arc;
 
@@ -15,22 +21,57 @@ use deltos_dock::PanelId;
 use deltos_grid::{
     BrowseConfig, BrowseLoader, BrowseQuery, CacheConfig, GridCache, RowCount, Status,
 };
+use deltos_settings::PanelKind;
 use gpui::{
-    AnyElement, App, AppContext, Context, Entity, FontWeight, IntoElement, Render, SharedString,
-    Subscription, Window, div, prelude::*, px, uniform_list,
+    AnyElement, App, AppContext, ClipboardItem, Context, Entity, FocusHandle, FontWeight,
+    IntoElement, Render, SharedString, Subscription, Window, actions, div, prelude::*, px,
+    uniform_list,
 };
 
 use crate::net::Net;
-use crate::state::{AppState, Inspected, StateEvent};
+use crate::state::{AppState, Inspected, RowSource, StateEvent};
 use crate::theme::{Theme, theme};
 use crate::ui::edit;
-use crate::ui::grid::{CellInput, GridEvent, GridView, MenuTarget};
+use crate::ui::grid::{CellInput, GridEvent, GridView, MenuTarget, RowRef};
 use crate::ui::icons::{Icon, icon};
+use crate::ui::pending::RowMark;
 use crate::ui::text_input::{InputEvent, TextInput};
 use crate::ui::{
     ButtonStyle, MenuItem, Tooltip, button, empty_state, field, icon_button, menu, segmented,
     thousands,
 };
+
+actions!(
+    table,
+    [CommitChanges, ReviewChanges, DiscardChanges, AddRow]
+);
+
+/// What the inspector asks of the table its row came from.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Request {
+    /// Stage `input` for column `col` of grid row `row`, or take the field's staged change
+    /// back when `input` is `None`. `target` is the row the inspector shows, which goes
+    /// first when the rows moved since and another row is at `row` now.
+    Stage {
+        row: u64,
+        col: usize,
+        input: Option<CellInput>,
+        target: RowRef,
+    },
+    Commit,
+    Review,
+    Discard,
+}
+
+/// Most rows one delete, duplicate or restore takes, so a select-all over a huge table
+/// stays a request the person can review.
+const ROW_ACTION_LIMIT: usize = 10_000;
+
+/// The commit review: the statements a commit runs, as they were when it opened.
+struct Review {
+    statements: Arc<[SharedString]>,
+    generation: u64,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
@@ -86,6 +127,18 @@ pub struct TablePanel {
     notice_generation: u64,
     /// Rows waiting for the person to confirm they should be deleted.
     confirm_delete: Option<Vec<u64>>,
+    /// Waiting for the person to confirm that staged changes go.
+    confirm_discard: bool,
+    /// A commit is running; staging waits for it.
+    committing: bool,
+    /// The tab was made a real tab, so staged changes keep it open.
+    pinned: bool,
+    /// The inspector waits for its row to be read again, to show it.
+    reinspect: bool,
+    /// Why the last commit failed, until something changes.
+    commit_error: Option<SharedString>,
+    review: Option<Review>,
+    review_focus: FocusHandle,
     _subs: Vec<Subscription>,
 }
 
@@ -102,11 +155,20 @@ impl TablePanel {
             cx.subscribe(&grid, |this, _, event, cx| match event {
                 GridEvent::Sort(c) => this.cycle_sort(*c, cx),
                 GridEvent::Selected(row) => this.inspect_row(*row, cx),
-                GridEvent::Edit { row, col, input } => {
-                    this.save_cell(*row, *col, input.clone(), cx)
-                }
+                GridEvent::Edit {
+                    row,
+                    col,
+                    input,
+                    target,
+                } => this.save_cell(*row, *col, input.clone(), target.clone(), cx),
             }),
             cx.subscribe(&state, |this, _, event, cx| {
+                if let StateEvent::TableRequest { owner, request } = event {
+                    if *owner == cx.entity_id() {
+                        this.handle_request(request.clone(), cx);
+                    }
+                    return;
+                }
                 if let StateEvent::Sessions = event {
                     // A connection opened again (after an SSH tunnel came back, or a
                     // reconnect) has a new handle; load from that one.
@@ -122,7 +184,26 @@ impl TablePanel {
                     }
                 }
             }),
-            cx.observe(&grid, |_, _, cx| cx.notify()),
+            cx.observe(&grid, |this, _, cx| {
+                if this.reinspect {
+                    this.refresh_inspector(cx);
+                }
+                cx.notify()
+            }),
+            // A closed table's row leaves the inspector with it.
+            cx.on_release({
+                let id = cx.entity_id();
+                move |this, cx| {
+                    this.state.update(cx, |s, cx| {
+                        if s.inspected
+                            .as_ref()
+                            .is_some_and(|i| i.source.owner == Some(id))
+                        {
+                            s.inspect(None, cx);
+                        }
+                    })
+                }
+            }),
         ];
         let mut this = Self {
             state,
@@ -140,6 +221,13 @@ impl TablePanel {
             notice: None,
             notice_generation: 0,
             confirm_delete: None,
+            confirm_discard: false,
+            committing: false,
+            pinned: false,
+            reinspect: false,
+            commit_error: None,
+            review: None,
+            review_focus: cx.focus_handle(),
             _subs: subs,
         };
         let weak = cx.entity().downgrade();
@@ -264,7 +352,8 @@ impl TablePanel {
         }
     }
 
-    /// Re-reads with the current sort and filters, keeping the column widths.
+    /// Re-reads with the current sort and filters, keeping the column widths. Staged
+    /// changes stay: they are keyed by primary key and find their rows again.
     fn requery(&mut self, cx: &mut Context<Self>) {
         let Some(loader) = self.loader.clone() else {
             return;
@@ -289,26 +378,147 @@ impl TablePanel {
             g.set_sort(sort, cx);
             g.refreshed(cx);
         });
+        // Nothing is selected any more, so nothing of this table is inspected either.
+        let id = cx.entity_id();
+        self.reinspect = false;
+        self.state.update(cx, |s, cx| {
+            if s.inspected
+                .as_ref()
+                .is_some_and(|i| i.source.owner == Some(id))
+            {
+                s.inspect(None, cx);
+            }
+        });
         cx.notify();
     }
 
-    /// Shows `row` in the inspector.
+    fn handle_request(&mut self, request: Request, cx: &mut Context<Self>) {
+        match request {
+            Request::Stage {
+                row,
+                col,
+                input: Some(input),
+                target,
+            } => self.save_cell(row, col, input, Some(target), cx),
+            Request::Stage {
+                row,
+                col,
+                input: None,
+                target,
+            } => self.revert_cell(row, col, Some(target), cx),
+            Request::Commit => self.commit(None, cx),
+            Request::Review if self.pending_count(cx) > 0 => self.open_review(cx),
+            Request::Review => {}
+            Request::Discard if self.pending_count(cx) > 0 => {
+                self.confirm_discard = true;
+                cx.notify();
+            }
+            Request::Discard => {}
+        }
+    }
+
+    /// Reads the rows again where they are, keeping the selection, after a commit.
+    fn reload(&mut self, cx: &mut Context<Self>) {
+        self.grid.update(cx, |g, cx| {
+            if let Some(cache) = g.cache() {
+                cache.invalidate();
+            }
+            g.refreshed(cx);
+        });
+        cx.notify();
+    }
+
+    /// Shows `row` in the inspector, staged values in, with what it needs to stage
+    /// changes to its fields here.
     fn inspect_row(&mut self, row: u64, cx: &mut Context<Self>) {
         let g = self.grid.read(cx);
         let columns = g.columns().clone();
-        if let Some(values) = g.row_values(row) {
-            let title = self.object.name.clone();
-            self.state.update(cx, |s, cx| {
-                s.inspect(
-                    Some(Inspected {
-                        title,
-                        row,
-                        columns,
-                        values,
-                    }),
-                    cx,
-                )
-            });
+        let Some(values) = g.row_values(row) else {
+            return;
+        };
+        let mark = g.row_mark(row);
+        let target = g.row_ref(row);
+        let original = match &target {
+            Some(RowRef::Table(raw)) => match g.pending.row(raw) {
+                Some(change) => (0..columns.len())
+                    .map(|c| change.cell(c).map(|cell| cell.original.clone()))
+                    .collect(),
+                None => Vec::new(),
+            },
+            _ => Vec::new(),
+        };
+        let read_only = if !g.editable {
+            Some(
+                match self.object.kind {
+                    ObjectKind::Table | ObjectKind::Collection => {
+                        "This connection can't edit rows here"
+                    }
+                    _ => "Views can't be edited here",
+                }
+                .into(),
+            )
+        } else if !g.pending.has_key() && mark != RowMark::Inserted {
+            Some("This table has no primary key, so its rows can't be edited here".into())
+        } else if mark == RowMark::Deleted {
+            Some("This row is staged for deletion. Restore it to edit it.".into())
+        } else {
+            None
+        };
+        let source = RowSource {
+            owner: Some(cx.entity_id()),
+            read_only,
+            original,
+            mark,
+            target,
+        };
+        let title = self.object.name.clone();
+        self.state.update(cx, |s, cx| {
+            s.inspect(
+                Some(Inspected {
+                    title,
+                    row,
+                    columns,
+                    values,
+                    source,
+                }),
+                cx,
+            )
+        });
+    }
+
+    /// Shows the inspected row again when it is one of this table's, after its staged
+    /// values changed.
+    fn refresh_inspector(&mut self, cx: &mut Context<Self>) {
+        let ours = self
+            .state
+            .read(cx)
+            .inspected
+            .as_ref()
+            .filter(|i| i.source.owner == Some(cx.entity_id()))
+            .map(|i| i.row);
+        self.reinspect = false;
+        let Some(row) = ours else {
+            return;
+        };
+        let g = self.grid.read(cx);
+        let row = g.selection.map_or(row, |s| s.head.0);
+        if g.row_values(row).is_some() {
+            self.inspect_row(row, cx);
+            return;
+        }
+        // The rows are being read again: show the row once it is back, or nothing
+        // when it is gone.
+        let settled = g
+            .cache()
+            .is_none_or(|c| matches!(c.status(), Status::Idle | Status::Done | Status::Error(_)));
+        if settled
+            && g.row_count()
+                .value()
+                .is_some_and(|n| row >= g.inserted() + n)
+        {
+            self.state.update(cx, |s, cx| s.inspect(None, cx));
+        } else {
+            self.reinspect = true;
         }
     }
 
@@ -341,6 +551,16 @@ impl TablePanel {
             .map(|s| s.conn.clone())
     }
 
+    /// Whether edits go to the database at once rather than being staged.
+    fn immediate(&self, cx: &App) -> bool {
+        self.state.read(cx).settings.data.commit_immediately
+    }
+
+    /// The number of staged changes.
+    pub fn pending_count(&self, cx: &App) -> usize {
+        self.grid.read(cx).pending.count()
+    }
+
     /// Runs `edits` and then `done` with the outcome, back on the UI thread.
     fn apply(
         &mut self,
@@ -365,22 +585,81 @@ impl TablePanel {
         .detach();
     }
 
-    /// Saves one edited cell. The grid shows the new value at once and goes back to the
-    /// old one if the database refuses it.
-    fn save_cell(&mut self, row: u64, col: usize, input: CellInput, cx: &mut Context<Self>) {
+    /// After the staged changes moved: the tab stays open as a real tab, the inspector
+    /// and the review follow, and the status bar redraws.
+    fn staged(&mut self, cx: &mut Context<Self>) {
+        self.commit_error = None;
+        self.confirm_discard = false;
+        if !self.pinned && self.pending_count(cx) > 0 {
+            // A preview tab with staged changes would be replaced by the next table
+            // opened from the sidebar; keep it. Once is enough: showing the tab again
+            // on every change would pull its window to the front each time.
+            self.pinned = true;
+            let kind = PanelKind::Table {
+                connection: self.connection.clone(),
+                object: self.object.clone(),
+            };
+            self.state.update(cx, |s, cx| s.open(kind, true, cx));
+        }
+        if self.review.is_some() {
+            self.open_review(cx);
+        }
+        self.refresh_inspector(cx);
+        cx.notify();
+    }
+
+    /// Whether staging can go ahead; says why not when it can't.
+    fn can_stage(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.committing {
+            self.notify_user("Wait for the commit to finish", true, cx);
+            return false;
+        }
+        true
+    }
+
+    /// The row an edit of grid row `row` is for, and `row` again when that row is still
+    /// there. An edit carries the row it began on (`target`); when the rows were read
+    /// again meanwhile and another row took its place, the edit still goes to its own
+    /// row, found by its key, never to the one now at `row`. `None` when the edited row
+    /// is a staged new row that is gone.
+    fn edit_target(
+        &self,
+        row: u64,
+        target: Option<RowRef>,
+        cx: &App,
+    ) -> Option<(RowRef, Option<u64>)> {
+        let current = self.grid.read(cx).row_ref(row);
+        match target {
+            Some(t) if current.as_ref() == Some(&t) => Some((t, Some(row))),
+            Some(RowRef::New(_)) => None,
+            Some(t) => Some((t, None)),
+            None => current.map(|t| (t, Some(row))),
+        }
+    }
+
+    /// Saves one edited cell: stages it, or with "Commit edits immediately" writes it at
+    /// once. A cell of a staged new row is always staged with its row.
+    fn save_cell(
+        &mut self,
+        row: u64,
+        col: usize,
+        input: CellInput,
+        target: Option<RowRef>,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.can_stage(cx) {
+            return;
+        }
+        let Some((target, row)) = self.edit_target(row, target, cx) else {
+            self.notify_user("That row is gone; nothing was changed", true, cx);
+            return;
+        };
         let grid = self.grid.read(cx);
         let columns = grid.columns().clone();
-        let (Some(column), Some(values)) = (columns.get(col), grid.row_values(row)) else {
+        let Some(column) = columns.get(col) else {
             return;
         };
-        let Some(key) = edit::key_of(&columns, &values) else {
-            self.notify_user(
-                "This table has no primary key, so its rows can't be edited here",
-                true,
-                cx,
-            );
-            return;
-        };
+        let has_key = grid.pending.has_key();
         let value = match edit::parse_input(column, &input) {
             Ok(v) => v,
             Err(e) => {
@@ -388,28 +667,131 @@ impl TablePanel {
                 return;
             }
         };
-        let old = values.get(col).cloned().unwrap_or_default();
-        if old == value {
+        let values = match target {
+            RowRef::New(i) => {
+                self.grid.update(cx, |g, cx| {
+                    g.pending.set_insert(i, col, Some(value));
+                    cx.notify();
+                });
+                self.staged(cx);
+                return;
+            }
+            RowRef::Table(values) => values,
+        };
+        if !has_key {
+            self.notify_user(
+                "This table has no primary key, so its rows can't be edited here",
+                true,
+                cx,
+            );
+            return;
+        }
+        if self.driver.is_some_and(DriverKind::is_document) && column.name == "_id" {
+            self.notify_user(
+                "The _id of a document cannot be changed; duplicate the document instead",
+                true,
+                cx,
+            );
+            return;
+        }
+        if self.immediate(cx) {
+            self.write_cell(row, col, values, value, cx);
+            return;
+        }
+        self.grid.update(cx, |g, cx| {
+            g.pending.stage(&values, col, value);
+            cx.notify();
+        });
+        if column.primary_key.is_some() {
+            self.notify_user(
+                format!(
+                    "{} is part of the key; committing gives the row a new key",
+                    column.name
+                ),
+                false,
+                cx,
+            );
+        }
+        self.staged(cx);
+    }
+
+    /// Writes one cell now. The grid shows the new value at once, at `row` when the
+    /// row is still there, and the rows are read again if the database refuses it.
+    fn write_cell(
+        &mut self,
+        row: Option<u64>,
+        col: usize,
+        values: Vec<Value>,
+        value: Value,
+        cx: &mut Context<Self>,
+    ) {
+        let columns = self.grid.read(cx).columns().clone();
+        let (Some(column), Some(key)) = (columns.get(col), edit::key_of(&columns, &values)) else {
+            return;
+        };
+        if values.get(col) == Some(&value) {
             return;
         }
         let name = column.name.clone();
-        self.grid
-            .update(cx, |g, cx| g.set_value(row, col, value.clone(), cx));
+        if let Some(row) = row {
+            self.grid
+                .update(cx, |g, cx| g.set_value(row, col, value.clone(), cx));
+        }
         self.notify_user("Saving…", false, cx);
         let edits = vec![RowEdit::Update {
             key,
             changes: vec![(name.clone(), value)],
         }];
-        self.apply(edits, cx, move |this, result, cx| match result {
-            Ok(_) => {
-                this.notify_user(format!("Saved {name}"), false, cx);
-                this.inspect_row(row, cx);
+        // The rows may have moved by the time the answer comes, so the old value is not
+        // put back by position: the rows are read again instead.
+        self.apply(edits, cx, move |this, result, cx| {
+            match result {
+                Ok(_) if row.is_some() => {
+                    this.notify_user(format!("Saved {name}"), false, cx);
+                    this.refresh_inspector(cx);
+                    return;
+                }
+                Ok(_) => this.notify_user(format!("Saved {name}"), false, cx),
+                Err(e) => this.notify_user(format!("Not saved: {e}"), true, cx),
             }
-            Err(e) => {
-                this.grid.update(cx, |g, cx| g.set_value(row, col, old, cx));
-                this.notify_user(format!("Not saved: {e}"), true, cx);
-            }
+            this.reload(cx);
+            this.refresh_inspector(cx);
         });
+    }
+
+    /// Takes back the staged change of one cell; a new row's cell goes back to its
+    /// default.
+    fn revert_cell(
+        &mut self,
+        row: u64,
+        col: usize,
+        target: Option<RowRef>,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.can_stage(cx) {
+            return;
+        }
+        let Some((target, _)) = self.edit_target(row, target, cx) else {
+            return;
+        };
+        self.grid.update(cx, |g, cx| {
+            match target {
+                RowRef::New(i) => g.pending.set_insert(i, col, None),
+                RowRef::Table(values) => g.pending.revert_cell(&values, col),
+            }
+            cx.notify();
+        });
+        self.staged(cx);
+    }
+
+    /// The loaded rows among `rows` (at most [`ROW_ACTION_LIMIT`]), as staged changes
+    /// refer to them.
+    fn row_refs(&self, rows: &[u64], cx: &App) -> Vec<RowRef> {
+        let grid = self.grid.read(cx);
+        rows.iter()
+            .take(ROW_ACTION_LIMIT)
+            .filter_map(|r| grid.row_ref(*r))
+            .collect()
     }
 
     /// The loaded rows among `rows`, with their keys.
@@ -417,12 +799,66 @@ impl TablePanel {
         let grid = self.grid.read(cx);
         let columns = grid.columns().clone();
         rows.iter()
-            .map(|r| grid.row_values(*r).and_then(|v| edit::key_of(&columns, &v)))
+            .map(|r| match grid.row_ref(*r) {
+                Some(RowRef::Table(v)) => edit::key_of(&columns, &v),
+                _ => None,
+            })
             .collect()
     }
 
+    /// Deletes `rows`: stages their deletion, or with "Commit edits immediately" deletes
+    /// them now (after the person confirmed). Staged new rows among them just go.
     fn delete_rows(&mut self, rows: Vec<u64>, cx: &mut Context<Self>) {
         self.confirm_delete = None;
+        if !self.can_stage(cx) {
+            return;
+        }
+        let refs = self.row_refs(&rows, cx);
+        let mut new_rows: Vec<usize> = refs
+            .iter()
+            .filter_map(|r| match r {
+                RowRef::New(i) => Some(*i),
+                RowRef::Table(_) => None,
+            })
+            .collect();
+        let table_rows: Vec<Vec<Value>> = refs
+            .into_iter()
+            .filter_map(|r| match r {
+                RowRef::Table(v) => Some(v),
+                RowRef::New(_) => None,
+            })
+            .collect();
+        if self.immediate(cx) && !table_rows.is_empty() {
+            let rows: Vec<u64> = rows
+                .into_iter()
+                .filter(|r| self.grid.read(cx).cache_row(*r).is_some())
+                .collect();
+            self.delete_now(rows, cx);
+            return;
+        }
+        if !table_rows.is_empty() && !self.grid.read(cx).pending.has_key() {
+            self.notify_user(
+                "This table has no primary key, so its rows can't be deleted here",
+                true,
+                cx,
+            );
+            return;
+        }
+        new_rows.sort_unstable();
+        self.grid.update(cx, |g, cx| {
+            for i in new_rows.into_iter().rev() {
+                g.pending.remove_insert(i);
+            }
+            for values in &table_rows {
+                g.pending.delete(values);
+            }
+            g.selection = None;
+            cx.notify();
+        });
+        self.staged(cx);
+    }
+
+    fn delete_now(&mut self, rows: Vec<u64>, cx: &mut Context<Self>) {
         let Some(keys) = self.keys_of(&rows, cx) else {
             self.notify_user(
                 "Only loaded rows of a table with a key can be deleted",
@@ -452,41 +888,381 @@ impl TablePanel {
         });
     }
 
-    /// Inserts copies of `rows` without their key, so the database gives them new ones.
-    fn duplicate_rows(&mut self, rows: Vec<u64>, cx: &mut Context<Self>) {
-        let grid = self.grid.read(cx);
-        let columns = grid.columns().clone();
-        let mut edits = Vec::new();
-        for row in rows {
-            let Some(values) = grid.row_values(row) else {
-                continue;
-            };
-            let values = columns
-                .iter()
-                .zip(values)
-                .filter(|(c, _)| c.primary_key.is_none())
-                .map(|(c, v)| (c.name.clone(), v))
-                .collect();
-            edits.push(RowEdit::Insert { values });
-        }
-        if edits.is_empty() {
+    /// Takes back the staged deletion of `rows`, keeping their cell changes.
+    fn restore_rows(&mut self, rows: Vec<u64>, cx: &mut Context<Self>) {
+        if !self.can_stage(cx) {
             return;
         }
-        self.apply(edits, cx, |this, result, cx| match result {
-            Ok(n) => {
-                this.notify_user(
-                    format!(
-                        "Added {} {}",
-                        thousands(n),
-                        if n == 1 { "row" } else { "rows" }
-                    ),
-                    false,
-                    cx,
-                );
-                this.requery(cx);
-            }
-            Err(e) => this.notify_user(format!("Not added: {e}"), true, cx),
+        let refs = self.row_refs(&rows, cx);
+        self.grid.update(cx, |g, cx| {
+            g.pending.restore_rows(refs.iter().filter_map(|r| match r {
+                RowRef::Table(values) => Some(values.as_slice()),
+                RowRef::New(_) => None,
+            }));
+            cx.notify();
         });
+        self.staged(cx);
+    }
+
+    /// Takes back every staged change of `rows`; staged new rows among them go.
+    fn revert_rows(&mut self, rows: Vec<u64>, cx: &mut Context<Self>) {
+        if !self.can_stage(cx) {
+            return;
+        }
+        let refs = self.row_refs(&rows, cx);
+        let mut new_rows = Vec::new();
+        self.grid.update(cx, |g, cx| {
+            g.pending.revert_rows(refs.iter().filter_map(|r| match r {
+                RowRef::Table(values) => Some(values.as_slice()),
+                RowRef::New(i) => {
+                    new_rows.push(*i);
+                    None
+                }
+            }));
+            new_rows.sort_unstable();
+            for i in new_rows.into_iter().rev() {
+                g.pending.remove_insert(i);
+            }
+            cx.notify();
+        });
+        self.staged(cx);
+    }
+
+    /// Copies `rows` without their key, so the database gives the copies new ones. The
+    /// copies are staged as new rows, or with "Commit edits immediately" inserted now.
+    fn duplicate_rows(&mut self, rows: Vec<u64>, cx: &mut Context<Self>) {
+        if !self.can_stage(cx) {
+            return;
+        }
+        let immediate = self.immediate(cx);
+        let grid = self.grid.read(cx);
+        let columns = grid.columns().clone();
+        let mut copies: Vec<Vec<Option<Value>>> = Vec::new();
+        for row in rows.iter().take(ROW_ACTION_LIMIT) {
+            let Some(values) = grid.row_values(*row) else {
+                continue;
+            };
+            let defaults = grid.cache_row(*row).is_none();
+            copies.push(
+                columns
+                    .iter()
+                    .zip(values)
+                    .enumerate()
+                    .map(|(c, (column, v))| {
+                        let keep =
+                            column.primary_key.is_none() && !(defaults && grid.is_default(*row, c));
+                        keep.then_some(v)
+                    })
+                    .collect(),
+            );
+        }
+        if copies.is_empty() {
+            return;
+        }
+        if immediate {
+            let edits = copies
+                .into_iter()
+                .map(|values| RowEdit::Insert {
+                    values: columns
+                        .iter()
+                        .zip(values)
+                        .filter_map(|(c, v)| Some((c.name.clone(), v?)))
+                        .collect(),
+                })
+                .collect();
+            self.apply(edits, cx, |this, result, cx| match result {
+                Ok(n) => {
+                    this.notify_user(
+                        format!(
+                            "Added {} {}",
+                            thousands(n),
+                            if n == 1 { "row" } else { "rows" }
+                        ),
+                        false,
+                        cx,
+                    );
+                    this.requery(cx);
+                }
+                Err(e) => this.notify_user(format!("Not added: {e}"), true, cx),
+            });
+            return;
+        }
+        let n = copies.len();
+        self.grid.update(cx, |g, cx| {
+            let first = g.pending.inserts().len() as u64;
+            for values in copies {
+                g.pending.add_insert(values);
+            }
+            // The copies are the last of the new rows, above the table's rows.
+            let col = g.selection.map_or(0, |s| s.head.1);
+            g.selection = Some(crate::ui::grid::Selection {
+                anchor: (first, col),
+                head: (first + n as u64 - 1, col),
+            });
+            cx.notify();
+        });
+        self.notify_user(
+            format!(
+                "Staged {} new {}",
+                thousands(n as u64),
+                if n == 1 { "row" } else { "rows" }
+            ),
+            false,
+            cx,
+        );
+        self.staged(cx);
+    }
+
+    /// Stages an empty row, every value left to its default, and starts editing its
+    /// first column that is not part of the key.
+    fn add_row(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.can_stage(cx) {
+            return;
+        }
+        if !self.grid.read(cx).editable {
+            self.notify_user("Rows can't be added here", true, cx);
+            return;
+        }
+        if self.grid.read(cx).columns().is_empty() {
+            return;
+        }
+        self.mode = Mode::Data;
+        self.grid.update(cx, |g, cx| {
+            let row = g.pending.add_insert(Vec::new()) as u64;
+            let col = g
+                .columns()
+                .iter()
+                .position(|c| c.primary_key.is_none())
+                .unwrap_or(0);
+            g.select_cell((row, col), cx);
+            g.begin_edit((row, col), window, cx);
+        });
+        self.staged(cx);
+    }
+
+    /// Saves an edit still open in the grid, so it is part of what happens next.
+    fn flush_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((row, col, input, target)) =
+            self.grid.update(cx, |g, cx| g.take_edit(window, cx))
+        {
+            self.save_cell(row, col, input, target, cx);
+        }
+    }
+
+    /// Runs every staged change in one call to the driver: one transaction on databases
+    /// that have them. On success the staged state clears and the rows are read again;
+    /// on failure everything stays staged and the error shows. A database without
+    /// transactions gets the changes one by one, and the ones it saved before the
+    /// failing one are no longer staged. `done` hears whether it worked.
+    fn commit(
+        &mut self,
+        done: Option<Box<dyn FnOnce(&mut Self, bool, &mut Context<Self>)>>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.committing {
+            return;
+        }
+        let edits = self.grid.read(cx).pending.edits();
+        if edits.is_empty() {
+            if let Some(done) = done {
+                done(self, true, cx);
+            }
+            return;
+        }
+        let Some(conn) = self.connection(cx) else {
+            self.notify_user("Not connected", true, cx);
+            return;
+        };
+        self.committing = true;
+        self.confirm_discard = false;
+        self.commit_error = None;
+        self.notify_user("Committing…", false, cx);
+        let object = self.object.clone();
+        let total = edits.len();
+        let all_at_once = conn.capabilities().transactions;
+        let job = cx.global::<Net>().run(async move {
+            if all_at_once {
+                return conn
+                    .apply_edits(&object, &edits)
+                    .await
+                    .map(|_| total)
+                    .map_err(|e| (0, e.to_string()));
+            }
+            let mut saved = 0;
+            for edit in &edits {
+                conn.apply_edits(&object, std::slice::from_ref(edit))
+                    .await
+                    .map_err(|e| (saved, e.to_string()))?;
+                saved += 1;
+            }
+            Ok(saved)
+        });
+        cx.spawn(async move |this, cx| {
+            let result = job
+                .await
+                .unwrap_or_else(|| Err((0, "the commit was cancelled".into())));
+            this.update(cx, |this, cx| {
+                this.committing = false;
+                let ok = result.is_ok();
+                match result {
+                    Ok(n) => {
+                        this.grid.update(cx, |g, cx| {
+                            let inserts = g.pending.inserts().len() as u64;
+                            g.pending.clear();
+                            // The new rows are in the table now; the rows below them move
+                            // up, and the selection with them.
+                            if let Some(s) = g.selection.as_mut() {
+                                s.anchor.0 = s.anchor.0.saturating_sub(inserts);
+                                s.head.0 = s.head.0.saturating_sub(inserts);
+                            }
+                            cx.notify();
+                        });
+                        this.review = None;
+                        this.notify_user(
+                            format!(
+                                "Committed {} {}",
+                                thousands(n as u64),
+                                if n == 1 { "change" } else { "changes" }
+                            ),
+                            false,
+                            cx,
+                        );
+                        this.reload(cx);
+                    }
+                    Err((saved, e)) => {
+                        let message: SharedString = if saved > 0 {
+                            this.grid.update(cx, |g, _| g.pending.drop_applied(saved));
+                            this.reload(cx);
+                            format!("Saved {saved} of {total} changes, then one failed: {e}").into()
+                        } else {
+                            format!("Not committed: {e}").into()
+                        };
+                        this.commit_error = Some(message.clone());
+                        if this.review.is_some() {
+                            this.open_review(cx);
+                        }
+                        this.notify_user(message, true, cx);
+                    }
+                }
+                this.refresh_inspector(cx);
+                if let Some(done) = done {
+                    done(this, ok, cx);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Drops every staged change.
+    fn discard(&mut self, cx: &mut Context<Self>) {
+        if self.committing {
+            return;
+        }
+        let n = self.pending_count(cx);
+        self.grid.update(cx, |g, cx| {
+            let inserts = g.pending.inserts().len() as u64;
+            g.pending.clear();
+            // Rows below the new ones move up with them.
+            if let Some(s) = g.selection.as_mut() {
+                s.anchor.0 = s.anchor.0.saturating_sub(inserts);
+                s.head.0 = s.head.0.saturating_sub(inserts);
+            }
+            cx.notify();
+        });
+        self.review = None;
+        self.commit_error = None;
+        self.confirm_discard = false;
+        if n > 0 {
+            self.notify_user(
+                format!(
+                    "Discarded {} {}",
+                    thousands(n as u64),
+                    if n == 1 { "change" } else { "changes" }
+                ),
+                false,
+                cx,
+            );
+        }
+        self.refresh_inspector(cx);
+        cx.notify();
+    }
+
+    /// Opens the review of what a commit runs, or brings it up to date.
+    fn open_review(&mut self, cx: &mut Context<Self>) {
+        let grid = self.grid.read(cx);
+        let generation = grid.pending.generation();
+        if self
+            .review
+            .as_ref()
+            .is_some_and(|r| r.generation == generation)
+        {
+            return;
+        }
+        let kind = self.driver.unwrap_or(DriverKind::Postgres);
+        let edits = grid.pending.edits();
+        let statements: Arc<[SharedString]> =
+            edit::preview_statements(kind, &self.object, grid.columns(), &edits)
+                .into_iter()
+                .map(SharedString::from)
+                .collect();
+        self.review = Some(Review {
+            statements,
+            generation,
+        });
+        cx.notify();
+    }
+
+    /// Asks what happens to staged changes before the tab closes: commit them (and close
+    /// when that worked), discard them, or keep the tab. `close` closes it.
+    pub fn confirm_close(&mut self, close: Box<dyn FnOnce(&mut App)>, cx: &mut Context<Self>) {
+        let n = self.pending_count(cx);
+        let Some(window) = cx
+            .active_window()
+            .or_else(|| cx.windows().into_iter().next())
+        else {
+            return;
+        };
+        let message = format!(
+            "Commit {} {} to {}?",
+            thousands(n as u64),
+            if n == 1 { "change" } else { "changes" },
+            self.object.name
+        );
+        // Asked from a task: the window is busy with the click that closes the tab.
+        cx.spawn(async move |this, cx| {
+            let Ok(prompt) = window.update(cx, |_, window, cx| {
+                window.prompt(
+                    gpui::PromptLevel::Warning,
+                    &message,
+                    Some("Otherwise they are lost."),
+                    &["Commit", "Discard", "Cancel"],
+                    cx,
+                )
+            }) else {
+                return;
+            };
+            let answer = prompt.await.ok();
+            this.update(cx, |this, cx| match answer {
+                Some(0) => this.commit(
+                    Some(Box::new(move |_, ok, cx| {
+                        if ok {
+                            close(cx);
+                        }
+                    })),
+                    cx,
+                ),
+                Some(1) => {
+                    this.discard(cx);
+                    close(cx);
+                }
+                _ => {}
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Adds a filter on `column` and runs it.
@@ -527,7 +1303,7 @@ impl TablePanel {
         target: MenuTarget,
         grid: &GridView,
         this: &Entity<Self>,
-        _cx: &App,
+        cx: &App,
     ) -> Vec<crate::ui::MenuItem> {
         use crate::ui::MenuItem;
         let weak = this.downgrade();
@@ -654,29 +1430,86 @@ impl TablePanel {
                     items.push(MenuItem::separator());
                     let n = rows.len();
                     let plural = |n: usize| if n == 1 { "row" } else { "rows" };
-                    let dup = rows.clone();
-                    items.push(MenuItem::new(
-                        format!(
-                            "Duplicate {}",
-                            if n == 1 {
-                                "row".into()
-                            } else {
-                                format!("{n} rows")
+                    let count = |n: usize| {
+                        if n == 1 {
+                            "row".to_owned()
+                        } else {
+                            format!("{} rows", thousands(n as u64))
+                        }
+                    };
+                    let staging = !self.immediate(cx);
+                    let marks: Vec<RowMark> = rows
+                        .iter()
+                        .take(ROW_ACTION_LIMIT)
+                        .map(|r| grid.row_mark(*r))
+                        .collect();
+                    if staging && grid.value(row, col).is_some() {
+                        let cell_staged = match grid.row_ref(row) {
+                            Some(RowRef::Table(v)) => {
+                                grid.pending.row(&v).is_some_and(|c| c.cell(col).is_some())
                             }
-                        ),
-                        run(Box::new(move |t, cx| t.duplicate_rows(dup.clone(), cx))),
-                    ));
-                    let del = rows;
+                            Some(RowRef::New(_)) => !grid.is_default(row, col),
+                            None => false,
+                        };
+                        if cell_staged {
+                            items.push(MenuItem::new(
+                                "Revert cell",
+                                run(Box::new(move |t, cx| t.revert_cell(row, col, None, cx))),
+                            ));
+                        }
+                    }
+                    if marks.iter().any(|m| *m != RowMark::None) {
+                        let revert = rows.clone();
+                        items.push(MenuItem::new(
+                            format!("Revert changes to {}", count(n)),
+                            run(Box::new(move |t, cx| t.revert_rows(revert.clone(), cx))),
+                        ));
+                    }
+                    let dup = rows.clone();
                     items.push(
                         MenuItem::new(
-                            format!("Delete {} {}…", thousands(n as u64), plural(n)),
-                            run(Box::new(move |t, cx| {
-                                t.confirm_delete = Some(del.clone());
-                                cx.notify();
-                            })),
+                            format!("Duplicate {}", count(n)),
+                            run(Box::new(move |t, cx| t.duplicate_rows(dup.clone(), cx))),
                         )
-                        .danger(),
+                        .detail("Ctrl+D"),
                     );
+                    items.push(
+                        MenuItem::new("Add row", {
+                            let w = weak.clone();
+                            move |window: &mut Window, cx: &mut App| {
+                                w.update(cx, |t, cx| t.add_row(window, cx)).ok();
+                            }
+                        })
+                        .detail("Ctrl+Shift+N"),
+                    );
+                    let all_deleted =
+                        !marks.is_empty() && marks.iter().all(|m| *m == RowMark::Deleted);
+                    let del = rows;
+                    if all_deleted {
+                        items.push(MenuItem::new(
+                            format!("Restore {}", count(n)),
+                            run(Box::new(move |t, cx| t.restore_rows(del.clone(), cx))),
+                        ));
+                    } else if staging {
+                        items.push(
+                            MenuItem::new(
+                                format!("Delete {}", count(n)),
+                                run(Box::new(move |t, cx| t.delete_rows(del.clone(), cx))),
+                            )
+                            .danger(),
+                        );
+                    } else {
+                        items.push(
+                            MenuItem::new(
+                                format!("Delete {} {}…", thousands(n as u64), plural(n)),
+                                run(Box::new(move |t, cx| {
+                                    t.confirm_delete = Some(del.clone());
+                                    cx.notify();
+                                })),
+                            )
+                            .danger(),
+                        );
+                    }
                 }
                 items.push(MenuItem::separator());
                 items.push(
@@ -982,9 +1815,23 @@ impl TablePanel {
                 format!("{} {}", thousands(n), if n == 1 { "row" } else { "rows" }).into()
             }
         };
-        let selected = grid.selection.map(|s| s.head.0 + 1);
+        let inserted = grid.pending.inserts().len() as u64;
+        let selected = grid
+            .selection
+            .and_then(|s| grid.cache_row(s.head.0))
+            .map(|r| r + 1);
+        let pending = grid.pending.count();
+        let summary = pending_summary(
+            grid.pending.changed_cells(),
+            grid.pending.deleted_rows(),
+            inserted as usize,
+        );
         let mode = self.mode;
         let filters = self.filters.len();
+        let committing = self.committing;
+        let can_add = grid.editable && !grid.columns().is_empty();
+        let small =
+            |b: gpui::Stateful<gpui::Div>| b.h(t.s(22.)).px(t.s(9.)).text_size(t.small_size);
         div()
             .flex_none()
             .h(t.bar_height)
@@ -1026,6 +1873,13 @@ impl TablePanel {
                         }
                     })),
             )
+            .when(can_add, |el| {
+                el.child(
+                    icon_button("add-row", Icon::Plus, t)
+                        .tooltip(|_, cx| Tooltip::view("Add row (Ctrl+Shift+N)", cx))
+                        .on_click(cx.listener(|this, _, window, cx| this.add_row(window, cx))),
+                )
+            })
             .child(div().flex_1())
             .when_some(self.notice.clone(), |el, (text, error)| {
                 el.child(
@@ -1038,7 +1892,69 @@ impl TablePanel {
                         .child(text),
                 )
             })
+            .when(pending > 0, |el| {
+                el.child(
+                    div()
+                        .id("pending-count")
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(t.warning)
+                        .child(crate::ui::dot(t.warning, 6.))
+                        .child(format!(
+                            "{} {}",
+                            thousands(pending as u64),
+                            if pending == 1 { "change" } else { "changes" }
+                        ))
+                        .tooltip(move |_, cx| Tooltip::view(summary.clone(), cx)),
+                )
+                .child(
+                    small(button("review", "Review", ButtonStyle::Ghost, t))
+                        .tooltip(|_, cx| {
+                            Tooltip::view("See the statements a commit runs (Ctrl+Shift+S)", cx)
+                        })
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.flush_edit(window, cx);
+                            this.open_review(cx);
+                            window.focus(&this.review_focus);
+                        })),
+                )
+                .child(
+                    small(button("discard", "Discard", ButtonStyle::Ghost, t))
+                        .when(committing, |el| el.opacity(0.5))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.confirm_discard = true;
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    small(button(
+                        "commit",
+                        if committing {
+                            "Committing…"
+                        } else {
+                            "Commit"
+                        },
+                        ButtonStyle::Primary,
+                        t,
+                    ))
+                    .tooltip(|_, cx| Tooltip::view("Commit staged changes (Ctrl+S)", cx))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.flush_edit(window, cx);
+                        this.commit(None, cx);
+                    })),
+                )
+                .child(div().w(px(1.)).h(px(14.)).bg(t.border))
+            })
             .when_some(selected, |el, n| el.child(format!("Row {}", thousands(n))))
+            .when(selected.is_none() && inserted > 0, |el| {
+                el.when_some(
+                    self.grid.read(cx).selection.filter(|s| s.head.0 < inserted),
+                    |el, _| el.child("New row"),
+                )
+            })
             .child(
                 div()
                     .font_weight(FontWeight::MEDIUM)
@@ -1241,6 +2157,215 @@ impl TablePanel {
     }
 }
 
+impl TablePanel {
+    /// The review sheet over the grid: every statement a commit runs, in order.
+    fn review_sheet(&mut self, t: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let review = self.review.as_ref()?;
+        let statements = review.statements.clone();
+        let n = statements.len();
+        let error = self.commit_error.clone();
+        let committing = self.committing;
+        let tl = t.clone();
+        let list = uniform_list("review-statements", n, move |range, _, _| {
+            let t = &tl;
+            range
+                .map(|i| {
+                    div()
+                        .w_full()
+                        .h(t.row_height)
+                        .px(px(12.))
+                        .flex()
+                        .items_center()
+                        .gap(px(10.))
+                        .border_b_1()
+                        .border_color(t.grid_line)
+                        .child(
+                            div()
+                                .flex_none()
+                                .w(px(28.))
+                                .text_color(t.text_faint)
+                                .text_size(t.small_size)
+                                .child((i + 1).to_string()),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .font_family(t.mono_font.clone())
+                                .text_size(t.mono_size)
+                                .text_color(t.text)
+                                .child(statements[i].clone()),
+                        )
+                })
+                .collect()
+        })
+        .flex_1();
+        let all = review.statements.clone();
+        let title = format!(
+            "{} {} to {}",
+            thousands(n as u64),
+            if n == 1 { "statement" } else { "statements" },
+            self.object.name
+        );
+        let note = if self.driver.is_some_and(DriverKind::is_document) {
+            "Run in order. MongoDB has no transaction here: what succeeds before a failure stays saved."
+        } else {
+            "Run in order in one transaction: all of them, or none if one fails. Values are sent as parameters."
+        };
+        Some(
+            div()
+                .id("review-sheet")
+                .key_context("ReviewSheet")
+                .track_focus(&self.review_focus)
+                .occlude()
+                .absolute()
+                .top(px(0.))
+                .left(px(0.))
+                .right(px(0.))
+                .max_h(px(420.))
+                .h(px((n as f32 * f32::from(t.row_height) + 110.).min(420.)))
+                .flex()
+                .flex_col()
+                .bg(t.floating)
+                .border_b_1()
+                .border_color(t.border_strong)
+                .shadow_lg()
+                .on_key_down(cx.listener(|this, e: &gpui::KeyDownEvent, window, cx| {
+                    if e.keystroke.key == "escape" {
+                        this.review = None;
+                        this.grid.read(cx).focus(window);
+                        cx.stop_propagation();
+                        cx.notify();
+                    }
+                }))
+                .child(
+                    div()
+                        .flex_none()
+                        .px(px(12.))
+                        .pt(px(10.))
+                        .pb(px(6.))
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.))
+                        .child(
+                            div()
+                                .text_size(t.ui_size)
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(t.text)
+                                .child(title),
+                        )
+                        .child(
+                            div()
+                                .text_size(t.small_size)
+                                .text_color(t.text_faint)
+                                .child(note),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .flex()
+                        .flex_col()
+                        .border_t_1()
+                        .border_color(t.border)
+                        .child(list),
+                )
+                .children(error.map(|e| {
+                    div()
+                        .flex_none()
+                        .mx(px(12.))
+                        .mt(px(8.))
+                        .p(px(8.))
+                        .rounded(t.radius_small)
+                        .border_1()
+                        .border_color(t.danger)
+                        .text_size(t.small_size)
+                        .text_color(t.danger)
+                        .whitespace_normal()
+                        .child(e)
+                }))
+                .child(
+                    div()
+                        .flex_none()
+                        .px(px(12.))
+                        .py(px(8.))
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(
+                            button("review-copy", "Copy SQL", ButtonStyle::Ghost, t).on_click(
+                                move |_, _, cx| {
+                                    let text = all
+                                        .iter()
+                                        .map(|s| s.as_ref())
+                                        .collect::<Vec<_>>()
+                                        .join("\n");
+                                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                                },
+                            ),
+                        )
+                        .child(div().flex_1())
+                        .child(
+                            button("review-close", "Close", ButtonStyle::Secondary, t).on_click(
+                                cx.listener(|this, _, window, cx| {
+                                    this.review = None;
+                                    this.grid.read(cx).focus(window);
+                                    cx.notify();
+                                }),
+                            ),
+                        )
+                        .child(
+                            button("review-discard", "Discard all", ButtonStyle::Danger, t)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.confirm_discard = true;
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            button(
+                                "review-commit",
+                                if committing {
+                                    "Committing…"
+                                } else {
+                                    "Commit"
+                                },
+                                ButtonStyle::Primary,
+                                t,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| this.commit(None, cx))),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+}
+
+/// What the staged changes are, for the status bar's tooltip.
+fn pending_summary(cells: usize, deleted: usize, inserted: usize) -> SharedString {
+    let mut parts = Vec::new();
+    let mut part = |n: usize, one: &str, many: &str| {
+        if n > 0 {
+            parts.push(format!(
+                "{} {}",
+                thousands(n as u64),
+                if n == 1 { one } else { many }
+            ));
+        }
+    };
+    part(cells, "changed cell", "changed cells");
+    part(deleted, "row to delete", "rows to delete");
+    part(inserted, "new row", "new rows");
+    if parts.is_empty() {
+        "Nothing staged".into()
+    } else {
+        format!("{}. Not committed yet.", parts.join(", ")).into()
+    }
+}
+
 impl Render for TablePanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx).clone();
@@ -1333,14 +2458,79 @@ impl Render for TablePanel {
                     ),
                 )
         });
+        let discard = self.confirm_discard.then(|| {
+            let n = self.pending_count(cx);
+            div()
+                .flex_none()
+                .px(px(10.))
+                .py(px(6.))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .bg(t.base)
+                .border_b_1()
+                .border_color(t.danger)
+                .text_size(t.ui_size)
+                .child(div().flex_1().text_color(t.text).child(format!(
+                    "Discard {} staged {} to {}? They have not been committed.",
+                    thousands(n as u64),
+                    if n == 1 { "change" } else { "changes" },
+                    self.object.name
+                )))
+                .child(
+                    button("discard-cancel", "Keep", ButtonStyle::Secondary, &t).on_click(
+                        cx.listener(|this, _, _, cx| {
+                            this.confirm_discard = false;
+                            cx.notify();
+                        }),
+                    ),
+                )
+                .child(
+                    button("discard-confirm", "Discard", ButtonStyle::Danger, &t)
+                        .on_click(cx.listener(|this, _, _, cx| this.discard(cx))),
+                )
+        });
+        let review = self.review_sheet(&t, cx);
         div()
             .size_full()
             .flex()
             .flex_col()
+            .key_context("TablePanel")
             .bg(t.surface)
+            .on_action(cx.listener(|this, _: &CommitChanges, window, cx| {
+                this.flush_edit(window, cx);
+                this.commit(None, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ReviewChanges, window, cx| {
+                this.flush_edit(window, cx);
+                if this.review.is_some() {
+                    this.review = None;
+                    this.grid.read(cx).focus(window);
+                    cx.notify();
+                } else if this.pending_count(cx) > 0 {
+                    this.open_review(cx);
+                    window.focus(&this.review_focus);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &DiscardChanges, window, cx| {
+                this.flush_edit(window, cx);
+                if this.pending_count(cx) > 0 {
+                    this.confirm_discard = true;
+                    cx.notify();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &AddRow, window, cx| this.add_row(window, cx)))
             .children(confirm)
+            .children(discard)
             .children(filters)
-            .child(div().flex_1().min_h_0().child(body))
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .child(body)
+                    .children(review),
+            )
             .child(self.status_bar(&t, cx))
             .into_any_element()
     }

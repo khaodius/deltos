@@ -506,6 +506,26 @@ impl Workspace {
     }
 
     pub fn close(&mut self, panel: PanelId, cx: &mut Context<Self>) {
+        // A table with staged changes asks first, and closes when the person says so.
+        if let Some(PanelView::Table(t)) = self.views.get(&panel)
+            && t.read(cx).pending_count(cx) > 0
+        {
+            let (t, ws) = (t.clone(), cx.entity().downgrade());
+            t.update(cx, |t, cx| {
+                t.confirm_close(
+                    Box::new(move |cx| {
+                        ws.update(cx, |w, cx| w.close_now(panel, cx)).ok();
+                    }),
+                    cx,
+                )
+            });
+            return;
+        }
+        self.close_now(panel, cx);
+    }
+
+    /// Closes a panel without asking.
+    fn close_now(&mut self, panel: PanelId, cx: &mut Context<Self>) {
         self.layout.dock.remove(panel);
         self.layout.panels.retain(|p| p.id != panel);
         self.views.remove(&panel);
@@ -537,6 +557,17 @@ impl Workspace {
     pub fn active_document(&self) -> Option<PanelId> {
         let anchor = self.document_anchor()?;
         self.layout.dock.stack_of(anchor)?.active_panel()
+    }
+
+    /// Staged changes in every open table, for quitting.
+    pub fn pending_changes(&self, cx: &App) -> usize {
+        self.views
+            .values()
+            .map(|v| match v {
+                PanelView::Table(t) => t.read(cx).pending_count(cx),
+                _ => 0,
+            })
+            .sum()
     }
 
     /// Reloads the table in front, for the refresh shortcut.

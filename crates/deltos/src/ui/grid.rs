@@ -31,6 +31,7 @@ use gpui::{
 use crate::net::Net;
 use crate::theme::{Theme, theme};
 use crate::ui::icons::{Icon, icon};
+use crate::ui::pending::{NewRow, PendingChanges, RowChange, RowMark};
 use crate::ui::text_input::{InputEvent, TextInput};
 use crate::ui::{MenuItem, context_menu};
 
@@ -135,11 +136,14 @@ pub enum GridEvent {
     Sort(usize),
     /// The selection moved to this row.
     Selected(u64),
-    /// An edited cell was saved: Enter, or a click somewhere else.
+    /// An edited cell was saved: Enter, or a click somewhere else. `target` is the row
+    /// the edit was started on, so a reload that moved the rows meanwhile cannot send it
+    /// to another row; `None` means the row now at `row`.
     Edit {
         row: u64,
         col: usize,
         input: CellInput,
+        target: Option<RowRef>,
     },
 }
 
@@ -148,6 +152,89 @@ pub enum GridEvent {
 pub enum CellInput {
     Text(String),
     Null,
+}
+
+/// A grid row as the owner needs it to stage a change: a staged new row by its place
+/// among them, or a table row with the values it was read with.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RowRef {
+    New(usize),
+    Table(Vec<Value>),
+}
+
+/// One row as the grid shows it.
+enum Shown<'a> {
+    New(&'a NewRow),
+    Row(&'a [Value], Option<&'a RowChange>),
+    Loading,
+}
+
+impl<'a> Shown<'a> {
+    /// The value shown in `col`, and whether it is a staged one. `None` is a new row's
+    /// default.
+    fn cell(&self, col: usize) -> Option<(Option<&'a Value>, bool)> {
+        match *self {
+            Shown::New(row) => Some((row.values.get(col)?.as_ref(), true)),
+            Shown::Row(values, change) => match change.and_then(|c| c.cell(col)) {
+                Some(c) => Some((Some(&c.value), true)),
+                None => Some((Some(values.get(col)?), false)),
+            },
+            Shown::Loading => None,
+        }
+    }
+
+    fn mark(&self) -> RowMark {
+        match self {
+            Shown::New(_) => RowMark::Inserted,
+            Shown::Row(_, Some(c)) if c.deleted => RowMark::Deleted,
+            Shown::Row(_, Some(_)) => RowMark::Changed,
+            _ => RowMark::None,
+        }
+    }
+
+    /// The values as shown, staged changes in, defaults as NULL.
+    fn values(&self, n: usize) -> Option<Vec<Value>> {
+        match self {
+            Shown::Loading => None,
+            _ => Some(
+                (0..n)
+                    .map(|c| {
+                        self.cell(c)
+                            .and_then(|(v, _)| v.cloned())
+                            .unwrap_or(Value::Null)
+                    })
+                    .collect(),
+            ),
+        }
+    }
+}
+
+/// Calls `f` for each grid row in `range`: staged new rows first, then the cache's rows.
+fn each_row<'a>(
+    cache: Option<&'a GridCache>,
+    pending: &'a PendingChanges,
+    range: Range<u64>,
+    mut f: impl FnMut(u64, Shown<'_>),
+) {
+    let inserts = pending.inserts();
+    let n = inserts.len() as u64;
+    for i in range.start..range.end.min(n) {
+        f(i, Shown::New(&inserts[i as usize]));
+    }
+    let rest = range.start.max(n)..range.end.max(n);
+    if rest.is_empty() {
+        return;
+    }
+    let Some(cache) = cache else {
+        return;
+    };
+    cache.with_rows(rest.start - n..rest.end - n, |i, row| {
+        let shown = match row {
+            Some(values) => Shown::Row(values, pending.row(values)),
+            None => Shown::Loading,
+        };
+        f(i + n, shown);
+    });
 }
 
 /// What a right click landed on.
@@ -164,6 +251,8 @@ pub type MenuProvider = Rc<dyn Fn(MenuTarget, &GridView, &App) -> Vec<MenuItem>>
 struct CellEditor {
     row: u64,
     col: usize,
+    /// The row being edited, as it was read when the edit began.
+    target: Option<RowRef>,
     input: Entity<TextInput>,
     original: String,
     _subs: Vec<Subscription>,
@@ -234,6 +323,10 @@ pub struct GridView {
     /// An open right-click menu: where, and over what.
     context: Option<(Point<Pixels>, MenuTarget)>,
     menu_provider: Option<MenuProvider>,
+    /// Changes the owner staged and has not committed, drawn over the rows they change.
+    pub pending: PendingChanges,
+    /// The staged state the formatted texts were made from.
+    pending_seen: u64,
     _pump: Option<Task<()>>,
 }
 
@@ -259,6 +352,8 @@ impl GridView {
             editor: None,
             context: None,
             menu_provider: None,
+            pending: PendingChanges::default(),
+            pending_seen: 0,
             _pump: None,
         }
     }
@@ -272,18 +367,69 @@ impl GridView {
         self.selection.map(|s| (s.rows(), s.cols()))
     }
 
-    /// One loaded value.
+    /// Staged new rows, shown above the table's rows.
+    pub fn inserted(&self) -> u64 {
+        self.pending.inserts().len() as u64
+    }
+
+    /// The cache's row behind grid row `row`, or `None` for a staged new row.
+    pub fn cache_row(&self, row: u64) -> Option<u64> {
+        row.checked_sub(self.inserted())
+    }
+
+    /// Runs `f` on one grid row as shown, when it is there.
+    fn with_shown<T>(&self, row: u64, f: impl FnOnce(&Shown<'_>) -> T) -> Option<T> {
+        let mut out = None;
+        let mut f = Some(f);
+        each_row(
+            self.cache.as_deref(),
+            &self.pending,
+            row..row + 1,
+            |_, shown| {
+                if let Some(f) = f.take() {
+                    out = Some(f(&shown));
+                }
+            },
+        );
+        out
+    }
+
+    /// One value as shown, a staged one where there is one. A new row's default is NULL.
     pub fn value(&self, row: u64, col: usize) -> Option<Value> {
-        self.cache
-            .as_ref()?
-            .with_row(row, |r| r.get(col).cloned())
-            .flatten()
+        self.with_shown(row, |s| {
+            s.cell(col).map(|(v, _)| v.cloned().unwrap_or_default())
+        })
+        .flatten()
+    }
+
+    /// Whether a cell of a staged new row is left to the database's default.
+    pub fn is_default(&self, row: u64, col: usize) -> bool {
+        self.with_shown(row, |s| {
+            matches!((s, s.cell(col)), (Shown::New(_), Some((None, _))))
+        })
+        .unwrap_or(false)
+    }
+
+    /// How staged changes mark a row.
+    pub fn row_mark(&self, row: u64) -> RowMark {
+        self.with_shown(row, |s| s.mark()).unwrap_or_default()
+    }
+
+    /// A loaded row as its staged changes refer to it.
+    pub fn row_ref(&self, row: u64) -> Option<RowRef> {
+        match self.cache_row(row) {
+            None => Some(RowRef::New(row as usize)),
+            Some(r) => self
+                .cache
+                .as_ref()?
+                .with_row(r, |v| RowRef::Table(v.to_vec())),
+        }
     }
 
     /// Shows a value the database accepted, without reloading.
     pub fn set_value(&mut self, row: u64, col: usize, value: Value, cx: &mut Context<Self>) {
-        if let Some(cache) = &self.cache {
-            cache.set_cell(row, col, value);
+        if let (Some(cache), Some(r)) = (&self.cache, self.cache_row(row)) {
+            cache.set_cell(r, col, value);
         }
         self.texts.remove(&(row, col as u32));
         cx.notify();
@@ -297,6 +443,10 @@ impl GridView {
         let Some(value) = self.value(cell.0, cell.1) else {
             return;
         };
+        if self.row_mark(cell.0) == RowMark::Deleted {
+            return;
+        }
+        let target = self.row_ref(cell.0);
         self.commit_edit(false, window, cx);
         self.context = None;
         let original = if value.is_null() {
@@ -304,7 +454,13 @@ impl GridView {
         } else {
             value.to_string()
         };
-        let placeholder = if value.is_null() { "NULL" } else { "" };
+        let placeholder = if self.is_default(cell.0, cell.1) {
+            "DEFAULT"
+        } else if value.is_null() {
+            "NULL"
+        } else {
+            ""
+        };
         let text = original.clone();
         let input = cx.new(|cx| {
             let mut input = TextInput::new(placeholder, cx);
@@ -332,6 +488,7 @@ impl GridView {
         self.editor = Some(CellEditor {
             row: cell.0,
             col: cell.1,
+            target,
             input,
             original,
             _subs: subs,
@@ -353,12 +510,44 @@ impl GridView {
                 row: editor.row,
                 col: editor.col,
                 input: CellInput::Text(text),
+                target: editor.target,
             });
         }
         if refocus {
             window.focus(&self.focus);
         }
         cx.notify();
+    }
+
+    /// Closes the editor and hands back what it holds when that changed, for an owner
+    /// that saves it before doing something else, such as committing.
+    pub fn take_edit(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<(u64, usize, CellInput, Option<RowRef>)> {
+        let editor = self.editor.take()?;
+        window.focus(&self.focus);
+        cx.notify();
+        let text = editor.input.read(cx).text().to_owned();
+        (text != editor.original).then_some((
+            editor.row,
+            editor.col,
+            CellInput::Text(text),
+            editor.target,
+        ))
+    }
+
+    /// Puts the keyboard on the grid.
+    pub fn focus(&self, window: &mut Window) {
+        window.focus(&self.focus);
+    }
+
+    /// Selects one cell and scrolls to it.
+    pub fn select_cell(&mut self, cell: (u64, usize), cx: &mut Context<Self>) {
+        self.select(cell, false, cx);
+        let t = theme(cx).clone();
+        self.reveal(&t);
     }
 
     fn cancel_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -379,6 +568,7 @@ impl GridView {
                     row,
                     col,
                     input: CellInput::Null,
+                    target: None,
                 });
             }
         }
@@ -430,19 +620,30 @@ impl GridView {
         &self.columns
     }
 
-    /// The values of `row`, when it is loaded.
+    /// The values of `row` as shown, staged changes in, when it is loaded.
     pub fn row_values(&self, row: u64) -> Option<Vec<Value>> {
-        self.cache.as_ref()?.with_row(row, |r| r.to_vec())
+        let n = self.columns.len();
+        self.with_shown(row, |s| s.values(n)).flatten()
     }
 
+    /// The table's rows, without staged new rows.
     pub fn row_count(&self) -> RowCount {
         self.cache
             .as_ref()
             .map_or(RowCount::Unknown, |c| c.row_count())
     }
 
+    /// Grid rows: staged new rows, then the table's.
     fn total_rows(&self) -> u64 {
-        self.row_count().value().unwrap_or(0)
+        self.inserted() + self.row_count().value().unwrap_or(0)
+    }
+
+    /// Drops formatted texts when the staged changes moved on since they were made.
+    fn sync_pending(&mut self) {
+        if self.pending.generation() != self.pending_seen {
+            self.pending_seen = self.pending.generation();
+            self.texts.clear();
+        }
     }
 
     fn row_height(t: &Theme) -> f32 {
@@ -507,6 +708,7 @@ impl GridView {
             self.widths
                 .push(by_type.max(by_name).max(char_w * 4.0).min(420.0));
         }
+        self.pending.set_columns(&columns);
         self.columns = columns;
         self.texts.clear();
     }
@@ -516,6 +718,7 @@ impl GridView {
         let Some(cache) = self.cache.clone() else {
             return;
         };
+        let first = first.saturating_sub(self.inserted());
         if self.fitted || self.columns.is_empty() || !cache.is_loaded(first) {
             return;
         }
@@ -546,26 +749,6 @@ impl GridView {
             self.widths[c] = fit;
         }
         self.fitted = true;
-    }
-
-    /// The text and style of one cell, formatted once and kept.
-    fn cell_text(
-        &mut self,
-        row: u64,
-        col: usize,
-        value: &Value,
-        t: &Theme,
-    ) -> (SharedString, CellKind) {
-        if let Some(v) = self.texts.get(&(row, col as u32)) {
-            return v.clone();
-        }
-        if self.texts.len() >= TEXT_CACHE_LIMIT {
-            self.texts.clear();
-        }
-        let kind = self.columns.get(col).map_or(ValueKind::Text, |c| c.kind);
-        let out = format_cell(value, kind, t.null_text, t.date_format);
-        self.texts.insert((row, col as u32), out.clone());
-        out
     }
 
     /// The row and column under `p`, a point in window coordinates.
@@ -660,10 +843,14 @@ impl GridView {
             .map(|c| self.columns[*c].name.as_str())
             .collect();
         let mut values: Vec<Vec<Value>> = Vec::new();
-        cache.with_rows(rows, |_, row| {
+        each_row(Some(&*cache), &self.pending, rows, |_, row| {
             values.push(
                 cols.iter()
-                    .map(|c| row.and_then(|r| r.get(*c)).cloned().unwrap_or(Value::Null))
+                    .map(|c| {
+                        row.cell(*c)
+                            .and_then(|(v, _)| v.cloned())
+                            .unwrap_or(Value::Null)
+                    })
                     .collect(),
             );
         });
@@ -688,12 +875,12 @@ impl GridView {
             out.push_str(&names.join("\t"));
             out.push('\n');
         }
-        cache.with_rows(rows, |_, row| {
+        each_row(Some(&*cache), &self.pending, rows, |_, row| {
             for (i, c) in cols.clone().enumerate() {
                 if i > 0 {
                     out.push('\t');
                 }
-                if let Some(v) = row.and_then(|r| r.get(c))
+                if let Some((Some(v), _)) = row.cell(c)
                     && !v.is_null()
                 {
                     let text = v.to_string();
@@ -956,11 +1143,16 @@ impl GridView {
         let char_w = f32::from(t.mono_size) * 0.62 / t.scale;
         let first = self.top.floor() as u64;
         let mut widest = column.name.chars().count();
-        cache.with_rows(first..first + self.visible_rows(&t), |_, row| {
-            if let Some(v) = row.and_then(|r| r.get(col)) {
-                widest = widest.max(v.preview(120).chars().count());
-            }
-        });
+        each_row(
+            Some(&*cache),
+            &self.pending,
+            first..first + self.visible_rows(&t),
+            |_, row| {
+                if let Some((Some(v), _)) = row.cell(col) {
+                    widest = widest.max(v.preview(120).chars().count());
+                }
+            },
+        );
         if let Some(w) = self.widths.get_mut(col) {
             *w = (widest as f32 * char_w + 30.0).clamp(MIN_COLUMN, 900.0);
         }
@@ -1208,13 +1400,39 @@ impl Focusable for GridView {
 struct PaintRow {
     index: u64,
     y: f32,
-    cells: Option<Vec<(SharedString, CellKind)>>,
+    mark: RowMark,
+    /// Per visible column: the text, its style, and whether it is a staged value.
+    cells: Option<Vec<(SharedString, CellKind, bool)>>,
+}
+
+const DEFAULT_TEXT: SharedString = SharedString::new_static("DEFAULT");
+
+/// The text and style of one cell, formatted once and kept.
+fn cell_text(
+    texts: &mut HashMap<(u64, u32), (SharedString, CellKind)>,
+    columns: &[Column],
+    row: u64,
+    col: usize,
+    value: &Value,
+    t: &Theme,
+) -> (SharedString, CellKind) {
+    if let Some(v) = texts.get(&(row, col as u32)) {
+        return v.clone();
+    }
+    if texts.len() >= TEXT_CACHE_LIMIT {
+        texts.clear();
+    }
+    let kind = columns.get(col).map_or(ValueKind::Text, |c| c.kind);
+    let out = format_cell(value, kind, t.null_text, t.date_format);
+    texts.insert((row, col as u32), out.clone());
+    out
 }
 
 impl Render for GridView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx).clone();
         self.sync_columns(&t);
+        self.sync_pending();
         self.clamp(&t);
         let rh = Self::row_height(&t);
         let total = self.total_rows();
@@ -1226,7 +1444,9 @@ impl Render for GridView {
             // Past a count that is not exact (a result still streaming in) the rows may
             // exist, so ask for a full screen and let the loader find out.
             let exact = matches!(cache.row_count(), RowCount::Exact(_));
-            cache.set_viewport(first..first + if exact { count } else { wanted });
+            let n = self.pending.inserts().len() as u64;
+            let end = first + if exact { count } else { wanted };
+            cache.set_viewport(first.saturating_sub(n)..end.saturating_sub(n));
         }
         self.fit_columns(&t, first, count);
 
@@ -1247,25 +1467,37 @@ impl Render for GridView {
         let content_right = x.min(view_w);
 
         let mut rows: Vec<PaintRow> = Vec::with_capacity(count as usize);
-        if let Some(cache) = self.cache.clone() {
+        {
             // Only the visible columns are looked at, and a cell already formatted is
-            // reused, so nothing is copied out of the cache.
-            cache.with_rows(first..first + count, |i, row| {
-                let cells = row.map(|r| {
-                    visible
-                        .iter()
-                        .map(|(c, _, _)| match r.get(*c) {
-                            Some(v) => self.cell_text(i, *c, v, &t),
-                            None => (SharedString::default(), CellKind::Plain),
-                        })
-                        .collect()
-                });
-                rows.push(PaintRow {
-                    index: i,
-                    y: (i - first) as f32 * rh - offset,
-                    cells,
-                });
-            });
+            // reused, so nothing is copied out of the cache. Staged changes are found by
+            // the row's key without copying it.
+            let (texts, columns) = (&mut self.texts, &self.columns);
+            each_row(
+                self.cache.as_deref(),
+                &self.pending,
+                first..first + count,
+                |i, shown| {
+                    let cells = (!matches!(shown, Shown::Loading)).then(|| {
+                        visible
+                            .iter()
+                            .map(|(c, _, _)| match shown.cell(*c) {
+                                Some((Some(v), staged)) => {
+                                    let (text, kind) = cell_text(texts, columns, i, *c, v, &t);
+                                    (text, kind, staged)
+                                }
+                                Some((None, _)) => (DEFAULT_TEXT, CellKind::Null, false),
+                                None => (SharedString::default(), CellKind::Plain, false),
+                            })
+                            .collect()
+                    });
+                    rows.push(PaintRow {
+                        index: i,
+                        y: (i - first) as f32 * rh - offset,
+                        mark: shown.mark(),
+                        cells,
+                    });
+                },
+            );
         }
 
         let status = self.cache.as_ref().map(|c| c.status());
@@ -1294,6 +1526,16 @@ impl Render for GridView {
                         if t.zebra && r.index % 2 == 1 {
                             window.paint_quad(fill(row_bounds, t.surface_alt));
                         }
+                        let deleted = r.mark == RowMark::Deleted;
+                        match r.mark {
+                            RowMark::Deleted => {
+                                window.paint_quad(fill(row_bounds, t.staged_delete))
+                            }
+                            RowMark::Inserted => {
+                                window.paint_quad(fill(row_bounds, t.staged_insert))
+                            }
+                            _ => {}
+                        }
                         if selection.is_some_and(|s| s.rows().contains(&r.index)) {
                             window.paint_quad(fill(row_bounds, t.selected_row));
                         }
@@ -1302,6 +1544,14 @@ impl Render for GridView {
                                 origin: point(origin.x + px(x), top),
                                 size: size(px(w), px(rh)),
                             };
+                            let staged = r.mark == RowMark::Changed
+                                && r.cells
+                                    .as_ref()
+                                    .and_then(|cells| cells.get(n))
+                                    .is_some_and(|(_, _, staged)| *staged);
+                            if staged {
+                                window.paint_quad(fill(cell, t.staged_change));
+                            }
                             if selection.is_some_and(|s| {
                                 s.rows().contains(&r.index) && s.cols().contains(&c)
                             }) {
@@ -1309,13 +1559,14 @@ impl Render for GridView {
                             }
                             match &r.cells {
                                 Some(cells) => {
-                                    let Some((text, kind)) = cells.get(n) else {
+                                    let Some((text, kind, _)) = cells.get(n) else {
                                         continue;
                                     };
                                     if text.is_empty() {
                                         continue;
                                     }
                                     let color: Hsla = match kind {
+                                        _ if deleted => t.text_faint,
                                         CellKind::Null => t.text_faint,
                                         CellKind::Bool => t.syntax_keyword,
                                         _ => t.text,
@@ -1326,7 +1577,12 @@ impl Render for GridView {
                                         color,
                                         background_color: None,
                                         underline: None,
-                                        strikethrough: None,
+                                        strikethrough: deleted.then_some(
+                                            gpui::StrikethroughStyle {
+                                                thickness: px(1.),
+                                                color: Some(t.text_faint),
+                                            },
+                                        ),
                                     };
                                     let line = window.text_system().shape_line(
                                         text.clone(),
@@ -1374,6 +1630,22 @@ impl Render for GridView {
                                     );
                                 }
                             }
+                        }
+                        // A staged row carries a bar at its left edge, in its color.
+                        let bar = match r.mark {
+                            RowMark::Changed => Some(t.warning),
+                            RowMark::Deleted => Some(t.danger),
+                            RowMark::Inserted => Some(t.success),
+                            RowMark::None => None,
+                        };
+                        if let Some(color) = bar {
+                            window.paint_quad(fill(
+                                Bounds {
+                                    origin: point(origin.x, top),
+                                    size: size(px(2.), px(rh)),
+                                },
+                                color,
+                            ));
                         }
                         if t.grid_lines {
                             window.paint_quad(fill(
@@ -1525,7 +1797,7 @@ impl Render for GridView {
                 Some(_) => Some("Loading…".into()),
                 None => None,
             }
-        } else if matches!(self.row_count(), RowCount::Exact(0)) {
+        } else if matches!(self.row_count(), RowCount::Exact(0)) && self.inserted() == 0 {
             Some("No rows".into())
         } else {
             None

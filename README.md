@@ -48,6 +48,16 @@ the table has a key, so the end of a big table is as quick to reach as the start
 filtering run in the database. Query results larger than memory spill to a temporary file
 instead of filling RAM.
 
+## Editing
+
+Edits are staged, the way a careful client should work. Change cells in the grid or fields in
+the inspector, delete rows, add new ones: each change is drawn in the grid (amber for a
+changed cell, red for a deleted row, green for a new one) and nothing reaches the database
+until you commit. Review shows the exact SQL, or the mongosh calls for MongoDB, and a commit
+runs in one transaction where the database has them. A failed commit keeps every change
+staged. If you prefer each edit to be written at once, turn on Commit edits immediately in
+Settings.
+
 ## Connecting
 
 Paste a connection URL such as `mysql://user:pass@db.example.com:3306/shop` anywhere in the
@@ -149,6 +159,8 @@ publisher the first time.
 | Reset the panel layout      | `Ctrl+Shift+0`     |
 | Edit the selected cell      | `Enter` or `F2`, or double-click |
 | Save / cancel an edit       | `Enter` or click elsewhere / `Esc` |
+| Commit / review / discard staged changes | `Ctrl+S` / `Ctrl+Shift+S` / `Ctrl+Shift+Z` |
+| Add a row                   | `Ctrl+Shift+N`     |
 
 Every binding can be changed in Settings → Keyboard.
 

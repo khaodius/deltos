@@ -57,6 +57,12 @@ pub struct Theme {
     pub danger: Hsla,
     pub warning: Hsla,
     pub success: Hsla,
+    /// Behind a grid cell or inspector field with a staged change.
+    pub staged_change: Hsla,
+    /// Behind a row staged for deletion.
+    pub staged_delete: Hsla,
+    /// Behind a staged new row.
+    pub staged_insert: Hsla,
     pub syntax_keyword: Hsla,
     pub syntax_string: Hsla,
     pub syntax_number: Hsla,
@@ -456,6 +462,10 @@ impl Theme {
             danger: hsla(if dark { 0xff6961 } else { 0xd93025 }),
             warning: hsla(if dark { 0xffb340 } else { 0xb86e00 }),
             success: hsla(if dark { 0x5fd38a } else { 0x1e8e3e }),
+            // Set from the warning, danger and success colors below, after a theme file.
+            staged_change: Hsla::default(),
+            staged_delete: Hsla::default(),
+            staged_insert: Hsla::default(),
             syntax_keyword: hsla(p.keyword),
             syntax_string: hsla(p.string),
             syntax_number: hsla(p.number),
@@ -502,6 +512,9 @@ impl Theme {
         if let Some(custom) = custom {
             theme.apply(custom);
         }
+        theme.staged_change = with_alpha(theme.warning, if dark { 0.20 } else { 0.16 });
+        theme.staged_delete = with_alpha(theme.danger, if dark { 0.18 } else { 0.11 });
+        theme.staged_insert = with_alpha(theme.success, if dark { 0.16 } else { 0.11 });
         theme
     }
 

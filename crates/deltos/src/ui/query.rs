@@ -92,6 +92,7 @@ impl QueryPanel {
                                     row,
                                     columns,
                                     values,
+                                    source: Default::default(),
                                 }),
                                 cx,
                             )
