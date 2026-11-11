@@ -8,7 +8,9 @@ use gpui::{
     Subscription, Window, canvas, div, prelude::*, px, relative,
 };
 
+use crate::safety::Environment;
 use crate::theme::{Theme, theme};
+use crate::ui::environment;
 use crate::ui::icons::{Icon, icon};
 use crate::ui::motion;
 use crate::ui::workspace::{SplitResize, StackZone, TreeZones, Workspace};
@@ -381,6 +383,11 @@ impl DockView {
             let preview = ws.is_preview(panel);
             let title = view.title(cx);
             let which = view.icon(cx);
+            let mark = environment::tab_mark(
+                view.connection(cx)
+                    .and_then(|id| Environment::of(ws.state.read(cx), &id))
+                    .as_ref(),
+            );
             let press = self.press_handler(panel);
             let close_ws = self.workspace.clone();
             let zones = ws.zones.clone();
@@ -436,10 +443,22 @@ impl DockView {
                     })
                     .when(lifted, |el| el.opacity(0.5))
                     .on_mouse_down(MouseButton::Left, press)
-                    .child(icon(which).size(t.s(13.)).text_color(if is_active {
-                        t.accent
-                    } else {
-                        t.text_faint
+                    // Staging and production tabs carry their color along the top.
+                    .when_some(mark.line, |el, c| {
+                        el.child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .right_0()
+                                .h(px(2.))
+                                .bg(c.opacity(if is_active { 1.0 } else { 0.7 })),
+                        )
+                    })
+                    .child(icon(which).size(t.s(13.)).text_color(match mark.color {
+                        Some(c) => c,
+                        None if is_active => t.accent,
+                        None => t.text_faint,
                     }))
                     .child(
                         div()
@@ -451,6 +470,14 @@ impl DockView {
                             .when(preview, |el| el.italic())
                             .child(title),
                     )
+                    .when(mark.read_only, |el| {
+                        el.child(
+                            icon(Icon::Lock)
+                                .size(t.s(10.))
+                                .flex_none()
+                                .text_color(t.text_faint),
+                        )
+                    })
                     .child(
                         div()
                             .id(("tab-close", panel.0))

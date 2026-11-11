@@ -42,6 +42,26 @@ task, which waits 8 ms for more pages and then calls `notify` once.
 and subscribe to its `StateEvent`s. Settings changes go through `update_settings`, which
 sanitizes, rebuilds the `Theme` global, redraws every window and saves 400 ms later.
 
+### Connection safety
+
+A saved connection marked read-only opens behind `safety::ReadOnly` (`safety.rs`), which
+wraps the session's `Arc<dyn Connection>`. Every panel goes through the session, so no path
+can get around it: it reports `edit_rows: false`, refuses `apply_edits`, and refuses every
+statement that `deltos_drivers::classify` does not know to be a read (`SELECT`, `WITH` without
+data-modifying parts, `SHOW`, `EXPLAIN` without `ANALYZE` of a write, `DESCRIBE`, reading
+`PRAGMA`s, `VALUES`, and MongoDB reads without `$out` or `$merge`; a `SELECT` that calls
+`set_config`, `dblink` or another function that acts counts as a write). The connection is
+also opened with the driver option `read_only`: PostgreSQL and MySQL make every session
+read-only as it opens (the drivers open several, and open them again after a lost
+connection), and SQLite opens the file read-only, so a function that writes from inside a
+`SELECT` fails too.
+
+The same classifier decides which statements the query tab asks about first
+(`safety::confirmation`): `UPDATE` and `DELETE` without `WHERE`, `DROP` and `TRUNCATE` on
+every connection, and on connections tagged Staging or Production also `ALTER` and every
+write. The tag's color marks the connection in the title bar, its tabs, the status bars and
+the connection list (`ui/environment.rs`).
+
 The `Theme` global (`theme.rs`) is computed once per change from the appearance settings,
 the system appearance and an optional theme file (see [THEMES.md](THEMES.md)). Views copy the
 colors they need from it; nothing parses colors while drawing.

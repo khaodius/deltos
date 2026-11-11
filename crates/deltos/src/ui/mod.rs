@@ -5,6 +5,7 @@ pub mod connections;
 pub mod dock;
 pub mod edit;
 pub mod editor;
+pub mod environment;
 pub mod grid;
 pub mod history;
 pub mod icons;

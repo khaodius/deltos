@@ -11,6 +11,7 @@ use gpui::{
 
 use crate::state::{AppState, ConnectState, DEMO_ID, StateEvent, fill_secrets, open_connection};
 use crate::theme::{Theme, color, theme};
+use crate::ui::environment;
 use crate::ui::icons::{Icon, icon};
 use crate::ui::text_input::{InputEvent, TextInput};
 use crate::ui::{
@@ -44,6 +45,7 @@ struct Form {
     tag: ConnectionTag,
     tls: TlsMode,
     save_password: bool,
+    read_only: bool,
     name: Entity<TextInput>,
     url: Entity<TextInput>,
     host: Entity<TextInput>,
@@ -93,6 +95,7 @@ impl ConnectionsPanel {
             tag: ConnectionTag::None,
             tls: TlsMode::Prefer,
             save_password: true,
+            read_only: false,
             name: input("My database", cx),
             url: input("Paste a connection URL to fill in the form", cx),
             host: input("localhost", cx),
@@ -409,6 +412,7 @@ impl ConnectionsPanel {
         self.form.tag = c.tag;
         self.form.tls = c.config.tls;
         self.form.save_password = c.save_password;
+        self.form.read_only = c.read_only;
         self.set_kind(c.kind, cx);
         // A new connection offers a database URL that is on the clipboard.
         self.clipboard_url = (selected == Some(Selected::New))
@@ -517,6 +521,7 @@ impl ConnectionsPanel {
             },
             tag: f.tag,
             save_password: f.save_password,
+            read_only: f.read_only,
         })
     }
 
@@ -532,8 +537,12 @@ impl ConnectionsPanel {
         self.error = None;
         let id = saved.id.clone();
         self.state.update(cx, |s, cx| {
+            // Read-only is enforced by the session, so an open one changes by reconnecting.
+            let reconnect = s
+                .session(&id)
+                .is_some_and(|open| open.read_only != saved.read_only);
             s.save_connection(saved.clone(), cx);
-            if connect {
+            if connect || reconnect {
                 if s.session(&id).is_some() {
                     s.disconnect(&id, cx);
                 }
@@ -603,7 +612,7 @@ impl ConnectionsPanel {
     fn list(&mut self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let s = self.state.read(cx);
         let mut rows = div().flex().flex_col().gap(px(1.)).px(px(6.));
-        let mut entries: Vec<(String, SharedString, SharedString, Option<u32>)> = s
+        let mut entries: Vec<(String, SharedString, SharedString, ConnectionTag, bool)> = s
             .settings
             .connections
             .iter()
@@ -638,7 +647,8 @@ impl ConnectionsPanel {
                     c.id.clone(),
                     c.name.clone().into(),
                     format!("{} · {}", c.kind.label(), target).into(),
-                    c.tag.color(),
+                    c.tag,
+                    c.read_only,
                 )
             })
             .collect();
@@ -648,10 +658,16 @@ impl ConnectionsPanel {
                 DEMO_ID.to_owned(),
                 "Demo".into(),
                 "Built-in sample data · 50M rows".into(),
-                ConnectionTag::Local.color(),
+                ConnectionTag::Local,
+                false,
             ),
         );
-        for (id, name, detail, tag) in entries {
+        for (id, name, detail, env, read_only) in entries {
+            let tag = env.color();
+            // Staging and production say so by name too; the quieter tags have the tile.
+            let badge = (environment::emphasis(env) >= Some(environment::Emphasis::Strong))
+                .then(|| environment::badge(env, t))
+                .flatten();
             let selected = self.selected == Some(Selected::Saved(id.clone()));
             let connected = s.session(&id).is_some();
             let status = s.connecting.get(&id).cloned();
@@ -735,6 +751,10 @@ impl ConnectionsPanel {
                                     }),
                             ),
                     )
+                    .children(badge)
+                    .when(read_only, |el| {
+                        el.child(icon(Icon::Lock).size(px(11.)).text_color(t.text_faint))
+                    })
                     .when(connected, |el| el.child(dot(t.success, 7.))),
             );
         }
@@ -1115,6 +1135,7 @@ impl ConnectionsPanel {
             t,
         );
         let save_pw = f.save_password;
+        let read_only = f.read_only;
         let masked = f.password.read(cx).is_masked();
         let kind = f.kind;
         let test_line = self.test.clone().map(|test| {
@@ -1241,6 +1262,33 @@ impl ConnectionsPanel {
                             .gap(px(8.))
                             .child(div().flex_1().child(field(&f.name, t, window, cx)))
                             .child(div().w(px(130.)).child(tag))
+                            .into_any_element(),
+                    ))
+                    .child(row(
+                        "Read-only",
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(switch("conn-read-only", read_only, t).on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    this.form.read_only = !this.form.read_only;
+                                    cx.notify();
+                                },
+                            )))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_size(t.small_size)
+                                    .text_color(t.text_muted)
+                                    .whitespace_normal()
+                                    .child(if read_only {
+                                        "Only reads run. Edits and writes are refused."
+                                    } else {
+                                        "Refuse edits and every statement that writes."
+                                    }),
+                            )
                             .into_any_element(),
                     ))
                     .child(div().h(px(1.)).bg(t.border).my(px(4.)))

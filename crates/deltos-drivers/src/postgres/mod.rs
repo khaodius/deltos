@@ -83,6 +83,8 @@ struct Inner {
     default_db: String,
     version: String,
     databases: Mutex<HashMap<String, Arc<Database>>>,
+    /// Every session is made read-only as it opens (see [`util::read_only`]).
+    read_only: bool,
 }
 
 #[derive(Default)]
@@ -116,7 +118,8 @@ impl PostgresConnection {
     async fn open(config: &ConnectionConfig, rt: Handle) -> Result<Self> {
         let (pg_config, mode) = pg_config(config)?;
         let tls = MakeRustlsConnect::new(tls::client_config(mode).map_err(Error::Connect)?);
-        let first = Session::connect(&pg_config, &tls, &rt).await?;
+        let read_only = util::read_only(config);
+        let first = Session::connect(&pg_config, &tls, &rt, read_only).await?;
         let row = first
             .client
             .query_one(
@@ -143,6 +146,7 @@ impl PostgresConnection {
                 default_db,
                 version,
                 databases: Mutex::new(databases),
+                read_only,
             }),
         })
     }
@@ -175,7 +179,8 @@ impl Inner {
         }
         let mut config = self.config.clone();
         config.dbname(db);
-        let session = Arc::new(Session::connect(&config, &self.tls, &self.rt).await?);
+        let session =
+            Arc::new(Session::connect(&config, &self.tls, &self.rt, self.read_only).await?);
         *slot = Some(session.clone());
         Ok(session)
     }
@@ -208,10 +213,13 @@ impl Inner {
 }
 
 impl Session {
+    /// Opens a session; a `read_only` one has the server refuse writes in every
+    /// transaction, and is not opened when the server will not do that.
     async fn connect(
         config: &tokio_postgres::Config,
         tls: &MakeRustlsConnect,
         rt: &Handle,
+        read_only: bool,
     ) -> Result<Session> {
         let (client, connection) = config.connect(tls.clone()).await.map_err(connect_error)?;
         let notices = Arc::new(Mutex::new(Vec::new()));
@@ -236,6 +244,17 @@ impl Session {
                 }
             }
         });
+        if read_only {
+            client
+                .batch_execute("SET default_transaction_read_only = on")
+                .await
+                .map_err(|e| {
+                    Error::Connect(format!(
+                        "the server could not make the session read-only: {}",
+                        pg_error(e)
+                    ))
+                })?;
+        }
         Ok(Session {
             cancel: client.cancel_token(),
             cancel_target: cancel::Target::of(config),
@@ -1004,6 +1023,8 @@ fn pg_config(config: &ConnectionConfig) -> Result<(tokio_postgres::Config, TlsMo
                     pg.connect_timeout(std::time::Duration::from_secs(seconds));
                 }
             }
+            // Applied to each session as it opens.
+            "read_only" => {}
             other => tracing::debug!("ignoring PostgreSQL option {other}"),
         }
     }

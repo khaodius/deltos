@@ -61,6 +61,8 @@ pub struct Session {
     pub name: String,
     pub kind: DriverKind,
     pub tag: ConnectionTag,
+    /// Whether `conn` refuses everything but reads (see [`crate::safety`]).
+    pub read_only: bool,
     pub conn: Arc<dyn Connection>,
     /// The SSH tunnel the connection runs through, if it has one.
     pub tunnel: Option<Arc<deltos_ssh::Tunnel>>,
@@ -253,6 +255,12 @@ impl AppState {
         let ssh_secret = conn.config.ssh.secret.clone();
         let id = conn.id.clone();
         let keep = conn.save_password;
+        // An open session shows the new name and tag at once. Read-only takes a
+        // reconnect, which the form does.
+        if let Some(open) = self.session_mut(&id) {
+            open.name = conn.name.clone();
+            open.tag = conn.tag;
+        }
         self.update_settings(cx, |s| {
             match s.connections.iter_mut().find(|c| c.id == conn.id) {
                 Some(c) => *c = conn,
@@ -329,6 +337,8 @@ impl AppState {
         config: ConnectionConfig,
         cx: &mut Context<Self>,
     ) {
+        // The server refuses writes on every session too; the tunnel reconnect reuses it.
+        let config = crate::safety::read_only_config(config, saved.read_only);
         let id = saved.id.clone();
         self.connecting.insert(id.clone(), ConnectState::Connecting);
         cx.emit(StateEvent::Sessions);
@@ -347,8 +357,9 @@ impl AppState {
                             name: saved.name.clone(),
                             kind: saved.kind,
                             tag: saved.tag,
+                            read_only: saved.read_only,
                             version: opened.conn.server_version(),
-                            conn: opened.conn,
+                            conn: crate::safety::guard(opened.conn, saved.read_only),
                             tunnel: opened.tunnel,
                             config: opened.config,
                             namespaces: Vec::new(),
@@ -381,6 +392,7 @@ impl AppState {
                 name: "Demo".into(),
                 kind: conn.kind(),
                 tag: ConnectionTag::Local,
+                read_only: false,
                 version: conn.server_version(),
                 conn,
                 tunnel: None,
@@ -499,6 +511,7 @@ impl AppState {
                             Ok(conn) => {
                                 this.connecting.remove(&id);
                                 if let Some(s) = this.session_mut(&id) {
+                                    let conn = crate::safety::guard(conn, s.read_only);
                                     let old = std::mem::replace(&mut s.conn, conn);
                                     s.version = s.conn.server_version();
                                     cx.global::<Net>().spawn(async move { old.close().await });

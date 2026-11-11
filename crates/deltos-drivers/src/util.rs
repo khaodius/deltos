@@ -24,6 +24,19 @@ pub(crate) fn channel_stream(
     ))
 }
 
+/// Whether the connection asks for a read-only session: the `read_only` option set to
+/// `true`, `1` or `yes`. The app sets it for connections marked read-only.
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+pub(crate) fn read_only(config: &deltos_data::ConnectionConfig) -> bool {
+    config.options.iter().any(|(key, value)| {
+        key.eq_ignore_ascii_case("read_only")
+            && matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "true" | "1" | "yes"
+            )
+    })
+}
+
 pub(crate) fn row(values: Vec<Value>) -> Row {
     values.into_boxed_slice()
 }

@@ -246,6 +246,10 @@ impl TablePanel {
         self.object.name.clone().into()
     }
 
+    pub fn connection_id(&self) -> &str {
+        &self.connection
+    }
+
     pub fn icon(&self) -> Icon {
         match self.object.kind {
             ObjectKind::View | ObjectKind::MaterializedView => Icon::View,
@@ -1832,6 +1836,7 @@ impl TablePanel {
         let can_add = grid.editable && !grid.columns().is_empty();
         let small =
             |b: gpui::Stateful<gpui::Div>| b.h(t.s(22.)).px(t.s(9.)).text_size(t.small_size);
+        let env = crate::safety::Environment::of(self.state.read(cx), &self.connection);
         div()
             .flex_none()
             .h(t.bar_height)
@@ -1948,6 +1953,7 @@ impl TablePanel {
                 )
                 .child(div().w(px(1.)).h(px(14.)).bg(t.border))
             })
+            .children(crate::ui::environment::status(env.as_ref(), t))
             .when_some(selected, |el, n| el.child(format!("Row {}", thousands(n))))
             .when(selected.is_none() && inserted > 0, |el| {
                 el.when_some(
