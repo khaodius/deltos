@@ -30,8 +30,9 @@ use crate::state::{AppState, Inspected, RowSource, StateEvent};
 use crate::theme::{Theme, theme};
 use crate::ui::edit;
 use crate::ui::grid::{Batch, CellInput, GridEvent, GridView, MenuTarget, RowRef};
-use crate::ui::icons::{Icon, icon};
+use crate::ui::icons::Icon;
 use crate::ui::pending::RowMark;
+use crate::ui::structure::{StructureEvent, StructureView};
 use crate::ui::{
     ButtonStyle, Tooltip, button, empty_state, icon_button, menu, segmented, thousands,
 };
@@ -152,6 +153,7 @@ pub struct TablePanel {
     review_focus: FocusHandle,
     /// The status bar's import and export menu is open.
     transfer_menu: bool,
+    structure: Option<Entity<StructureView>>,
     _subs: Vec<Subscription>,
 }
 
@@ -249,6 +251,7 @@ impl TablePanel {
             review: None,
             review_focus: cx.focus_handle(),
             transfer_menu: false,
+            structure: None,
             _subs: subs,
         };
         let weak = cx.entity().downgrade();
@@ -336,6 +339,7 @@ impl TablePanel {
             let info = job.await.unwrap_or_else(|| Err("cancelled".into()));
             this.update(cx, |this, cx| {
                 this.info = Some(info);
+                this.sync_structure(cx);
                 cx.notify();
             })
             .ok();
@@ -1993,176 +1997,80 @@ impl TablePanel {
         el.into_any_element()
     }
 
-    fn structure(&mut self, t: &Theme) -> AnyElement {
-        let info = match &self.info {
-            None => return empty_state("Loading structure…", None, t).into_any_element(),
-            Some(Err(e)) => {
-                return empty_state("Could not read the structure", Some(e.clone().into()), t)
-                    .into_any_element();
-            }
-            Some(Ok(info)) => info.clone(),
-        };
-        let columns = Arc::new(info.columns.clone());
-        let n = columns.len();
-        let t2 = t.clone();
-        let cols = columns.clone();
-        let header = |cells: &[(&'static str, f32)]| {
-            let mut row = div()
-                .flex_none()
-                .h(t.row_height)
-                .flex()
-                .items_center()
-                .bg(t.grid_header)
-                .border_b_1()
-                .border_color(t.border)
-                .text_size(t.small_size)
-                .font_weight(t.header_weight())
-                .text_color(t.text_muted);
-            for (label, w) in cells {
-                row = row.child(
-                    div()
-                        .w(px(*w))
-                        .px(px(8.))
-                        .flex_none()
-                        .child(t.header_text(label)),
-                );
-            }
-            row
-        };
-        let list = uniform_list("structure-columns", n, move |range, _, _| {
-            let t = &t2;
-            range
-                .map(|i| {
-                    let c = &cols[i];
-                    div()
-                        .h(t.row_height)
-                        .flex()
-                        .items_center()
-                        .when(t.zebra && i % 2 == 1, |el| el.bg(t.surface_alt))
-                        .border_b_1()
-                        .border_color(t.grid_line)
-                        .font_family(t.mono_font.clone())
-                        .text_size(t.mono_size)
-                        .child(
-                            div()
-                                .w(px(220.))
-                                .px(px(8.))
-                                .flex()
-                                .gap(px(6.))
-                                .items_center()
-                                .when(c.primary_key.is_some(), |el| {
-                                    el.child(icon(Icon::Key).size(px(11.)).text_color(t.warning))
-                                })
-                                .child(c.name.clone()),
-                        )
-                        .child(
-                            div()
-                                .w(px(180.))
-                                .px(px(8.))
-                                .text_color(t.syntax_keyword)
-                                .child(c.type_name.clone()),
-                        )
-                        .child(div().w(px(90.)).px(px(8.)).text_color(t.text_muted).child(
-                            match c.nullable {
-                                Some(true) => "YES",
-                                Some(false) => "NO",
-                                None => "",
-                            },
-                        ))
-                        .child(
-                            div()
-                                .w(px(180.))
-                                .px(px(8.))
-                                .text_color(if c.default.is_some() {
-                                    t.text
-                                } else {
-                                    t.text_faint
-                                })
-                                .child(c.default.clone().unwrap_or_else(|| t.null_text.to_owned())),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .px(px(8.))
-                                .text_color(t.text_muted)
-                                .child(c.comment.clone().unwrap_or_default()),
-                        )
-                })
-                .collect()
-        })
-        .flex_1();
-        let mut extra = div()
-            .flex_none()
-            .flex()
-            .flex_col()
-            .gap(px(4.))
-            .p(px(10.))
-            .border_t_1()
-            .border_color(t.border);
-        if !info.indexes.is_empty() {
-            extra = extra.child(crate::ui::caption("Indexes", t));
-            for ix in &info.indexes {
-                extra = extra.child(
-                    div()
-                        .flex()
-                        .gap(px(10.))
-                        .font_family(t.mono_font.clone())
-                        .text_size(t.mono_size)
-                        .child(div().w(px(240.)).child(ix.name.clone()))
-                        .child(
-                            div()
-                                .text_color(t.text_muted)
-                                .child(format!("({})", ix.columns.join(", "))),
-                        )
-                        .when(ix.primary, |el| {
-                            el.child(div().text_color(t.warning).child("PRIMARY"))
-                        })
-                        .when(ix.unique && !ix.primary, |el| {
-                            el.child(div().text_color(t.syntax_keyword).child("UNIQUE"))
-                        })
-                        .children(
-                            ix.method
-                                .clone()
-                                .map(|m| div().text_color(t.text_faint).child(m)),
-                        ),
-                );
-            }
+    /// The structure view, made on first show. It edits the table's columns, indexes and
+    /// keys; see [`crate::ui::structure`].
+    fn structure(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        if self.structure.is_none() {
+            let (state, connection, object) = (
+                self.state.clone(),
+                self.connection.clone(),
+                self.object.clone(),
+            );
+            let view = cx.new(|cx| StructureView::new(state, connection, object, window, cx));
+            self._subs
+                .push(cx.subscribe(&view, |this, _, event, cx| match event {
+                    StructureEvent::Applied => this.structure_changed(cx),
+                }));
+            self.structure = Some(view);
+            self.sync_structure(cx);
         }
-        if !info.foreign_keys.is_empty() {
-            extra = extra.child(crate::ui::caption("Foreign keys", t).mt(px(6.)));
-            for fk in &info.foreign_keys {
-                extra = extra.child(
-                    div()
-                        .flex()
-                        .gap(px(10.))
-                        .font_family(t.mono_font.clone())
-                        .text_size(t.mono_size)
-                        .child(div().w(px(240.)).child(fk.name.clone()))
-                        .child(div().text_color(t.text_muted).child(format!(
-                            "({}) → {}({})",
-                            fk.columns.join(", "),
-                            fk.target.name,
-                            fk.target_columns.join(", ")
-                        ))),
-                );
-            }
+        // Row changes are staged against the columns as they are: they go to the database
+        // first, or are discarded, before the columns change under them.
+        let pending = self.pending_count(cx);
+        let blocked = if self.committing {
+            Some("Wait for the row changes to be committed".to_owned())
+        } else if pending > 0 {
+            Some(format!(
+                "Commit or discard the {} staged row {} first",
+                thousands(pending as u64),
+                if pending == 1 { "change" } else { "changes" }
+            ))
+        } else {
+            None
+        };
+        if let Some(view) = &self.structure {
+            view.update(cx, |v, _| v.set_blocked(blocked));
         }
-        let has_extra = !info.indexes.is_empty() || !info.foreign_keys.is_empty();
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .bg(t.surface)
-            .child(header(&[
-                ("Column", 220.),
-                ("Type", 180.),
-                ("Nullable", 90.),
-                ("Default", 180.),
-                ("Comment", 200.),
-            ]))
-            .child(list)
-            .when(has_extra, |el| el.child(extra))
-            .into_any_element()
+        self.structure
+            .clone()
+            .map_or_else(|| div().into_any_element(), |v| v.into_any_element())
+    }
+
+    fn sync_structure(&mut self, cx: &mut Context<Self>) {
+        if let Some(view) = &self.structure {
+            let info = self.info.clone();
+            view.update(cx, |v, cx| v.set_info(info, cx));
+        }
+    }
+
+    /// The table's shape changed: columns the sort and filters name may be gone, so they
+    /// go, and everything loads again.
+    fn structure_changed(&mut self, cx: &mut Context<Self>) {
+        self.sort.clear();
+        self.filters.rows.clear();
+        self.filters.raw.update(cx, |i, cx| i.clear(cx));
+        self.filters.raw_mode = false;
+        self.filters.open = false;
+        self.filters.menu = None;
+        // Reopened later in the session, the table comes back without them too.
+        let view = self.saved_view(cx);
+        memory::remember(cx, &self.connection, &self.object, view);
+        self.pager.counting = None;
+        self.loader = None;
+        self.info = None;
+        // The row in the inspector had the old columns.
+        let id = cx.entity_id();
+        self.reinspect = false;
+        self.state.update(cx, |s, cx| {
+            if s.inspected
+                .as_ref()
+                .is_some_and(|i| i.source.owner == Some(id))
+            {
+                s.inspect(None, cx);
+            }
+        });
+        self.sync_structure(cx);
+        self.attach(cx);
     }
 }
 
@@ -2430,7 +2338,7 @@ impl Render for TablePanel {
         }
         let body = match self.mode {
             Mode::Data => self.grid.clone().into_any_element(),
-            Mode::Structure => self.structure(&t),
+            Mode::Structure => self.structure(window, cx),
         };
         let filters =
             (self.filters.open && self.mode == Mode::Data).then(|| self.filter_bar(&t, window, cx));

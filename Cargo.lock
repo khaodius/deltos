@@ -1671,7 +1671,7 @@ dependencies = [
 
 [[package]]
 name = "deltos"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "anyhow",
  "async-channel 2.5.0",
@@ -1699,7 +1699,7 @@ dependencies = [
 
 [[package]]
 name = "deltos-data"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "futures",
  "serde",
@@ -1708,7 +1708,7 @@ dependencies = [
 
 [[package]]
 name = "deltos-dock"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "serde",
  "serde_json",
@@ -1716,7 +1716,7 @@ dependencies = [
 
 [[package]]
 name = "deltos-drivers"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "bson",
  "bytes",
@@ -1738,7 +1738,7 @@ dependencies = [
 
 [[package]]
 name = "deltos-grid"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "deltos-data",
  "futures",
@@ -1748,7 +1748,7 @@ dependencies = [
 
 [[package]]
 name = "deltos-settings"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "deltos-data",
  "deltos-dock",
@@ -1762,7 +1762,7 @@ dependencies = [
 
 [[package]]
 name = "deltos-ssh"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "data-encoding",
  "deltos-data",
@@ -1777,7 +1777,7 @@ dependencies = [
 
 [[package]]
 name = "deltos-updater"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek",

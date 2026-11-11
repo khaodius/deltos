@@ -3,6 +3,7 @@
 //! thousands of tables scrolls as smoothly as one with ten.
 
 use std::rc::Rc;
+use std::sync::Arc;
 
 use deltos_data::{ObjectKind, ObjectRef};
 use deltos_settings::PanelKind;
@@ -176,6 +177,8 @@ impl ObjectsPanel {
                     })),
                 ));
                 items.push(MenuItem::separator());
+                items.extend(structure_items(&this, &sid, kind, &conn, &safety, object));
+                items.push(MenuItem::separator());
                 let (state, sid, path) = (this.clone(), sid.clone(), object.namespace.clone());
                 items.push(MenuItem::new("Reload the list", move |_, cx| {
                     state.update(cx, |s, cx| s.load_objects(&sid, &path, cx))
@@ -191,6 +194,24 @@ impl ObjectsPanel {
                 items.push(MenuItem::new("Reload", move |_, cx| {
                     state.update(cx, |s, cx| s.load_objects(&s2, &p2, cx))
                 }));
+                // A PostgreSQL database holds schemas; tables go in those.
+                if edit::speaks_sql(kind)
+                    && !(kind == deltos_data::DriverKind::Postgres && path.len() < 2)
+                {
+                    let (state, s4, p4) = (this.clone(), sid.clone(), path.clone());
+                    items.push(read_only_off(
+                        MenuItem::new("New table…", move |window, cx| {
+                            crate::ui::structure::new_table(
+                                state.clone(),
+                                s4.clone(),
+                                p4.clone(),
+                                window,
+                                cx,
+                            )
+                        }),
+                        &safety,
+                    ));
+                }
                 if edit::speaks_sql(kind) {
                     let (state, s3, p3) = (this.clone(), sid.clone(), path.clone());
                     items.push(crate::ui::transfer::script_item(
@@ -507,4 +528,106 @@ impl Render for ObjectsPanel {
             .children(menu)
             .into_any_element()
     }
+}
+
+/// `item`, turned off with the reason on a read-only connection.
+fn read_only_off(item: MenuItem, safety: &crate::ui::transfer::Safety) -> MenuItem {
+    if safety.read_only() {
+        item.enabled(false).detail(crate::ui::transfer::READ_ONLY)
+    } else {
+        item
+    }
+}
+
+/// "New table", "Empty" and "Drop" for an object of the list.
+fn structure_items(
+    state: &Entity<AppState>,
+    connection: &str,
+    kind: deltos_data::DriverKind,
+    conn: &Arc<dyn deltos_data::Connection>,
+    safety: &crate::ui::transfer::Safety,
+    object: &ObjectRef,
+) -> Vec<MenuItem> {
+    let mut items = Vec::new();
+    let changes = conn.capabilities().edit_rows;
+    if edit::speaks_sql(kind) {
+        let (state, sid, path) = (
+            state.clone(),
+            connection.to_string(),
+            object.namespace.clone(),
+        );
+        items.push(read_only_off(
+            MenuItem::new("New table…", move |window, cx| {
+                crate::ui::structure::new_table(
+                    state.clone(),
+                    sid.clone(),
+                    path.clone(),
+                    window,
+                    cx,
+                )
+            }),
+            safety,
+        ));
+    }
+    let reload = |state: &Entity<AppState>| {
+        let (state, sid, path) = (
+            state.clone(),
+            connection.to_string(),
+            object.namespace.clone(),
+        );
+        move || -> Box<dyn FnOnce(&mut gpui::App)> {
+            let (state, sid, path) = (state.clone(), sid.clone(), path.clone());
+            Box::new(move |cx| state.update(cx, |s, cx| s.load_objects(&sid, &path, cx)))
+        }
+    };
+    let holds_rows = matches!(object.kind, ObjectKind::Table | ObjectKind::Collection);
+    if holds_rows {
+        let (conn, object, done) = (conn.clone(), object.clone(), reload(state));
+        let env = safety.environment.clone();
+        let empty = if object.kind == ObjectKind::Collection {
+            "Empty collection…"
+        } else {
+            "Empty table…"
+        };
+        items.push(read_only_off(
+            MenuItem::new(empty, move |window, cx| {
+                crate::ui::structure::confirm_truncate(
+                    conn.clone(),
+                    env.clone(),
+                    &object,
+                    done(),
+                    window,
+                    cx,
+                )
+            })
+            .enabled(changes)
+            .danger(),
+            safety,
+        ));
+    }
+    if holds_rows || matches!(object.kind, ObjectKind::View | ObjectKind::MaterializedView) {
+        let (conn, object, done) = (conn.clone(), object.clone(), reload(state));
+        let env = safety.environment.clone();
+        let label = match object.kind {
+            ObjectKind::View | ObjectKind::MaterializedView => "Drop view…",
+            ObjectKind::Collection => "Drop collection…",
+            _ => "Drop table…",
+        };
+        items.push(read_only_off(
+            MenuItem::new(label, move |window, cx| {
+                crate::ui::structure::confirm_drop(
+                    conn.clone(),
+                    env.clone(),
+                    &object,
+                    done(),
+                    window,
+                    cx,
+                )
+            })
+            .enabled(changes)
+            .danger(),
+            safety,
+        ));
+    }
+    items
 }

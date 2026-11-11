@@ -479,7 +479,7 @@ impl Shared {
     }
 
     fn on_count(shared: &Arc<Shared>, generation: u64, result: Result<RowCount>) {
-        {
+        let requests = {
             let mut inner = shared.inner.lock();
             inner.counting = false;
             if inner.generation != generation {
@@ -489,12 +489,17 @@ impl Shared {
                 Ok(count) => inner.row_count.refine(count),
                 Err(e) => inner.load_error = Some(e.to_string()),
             }
+            inner.header_requests()
+        };
+        GridCache {
+            shared: shared.clone(),
         }
+        .start(requests);
         (shared.hooks.notify)();
     }
 
     fn on_event(shared: &Arc<Shared>, attachment: u64, event: LoaderEvent) {
-        {
+        let requests = {
             let mut inner = shared.inner.lock();
             // Events from a loader that `set_loader` replaced are stale. A plain
             // `invalidate` keeps the loader, and its events stay welcome.
@@ -512,7 +517,12 @@ impl Shared {
                 LoaderEvent::Finished => inner.finished = true,
                 LoaderEvent::Error(message) => inner.source_error = Some(message),
             }
+            inner.header_requests()
+        };
+        GridCache {
+            shared: shared.clone(),
         }
+        .start(requests);
         (shared.hooks.notify)();
     }
 }
@@ -561,6 +571,21 @@ impl Inner {
         }
     }
 
+    /// An empty result has no rows on screen to ask for a page, yet only a page brings
+    /// the columns its header shows.
+    fn wants_header(&self) -> bool {
+        self.row_count == RowCount::Exact(0) && self.columns.is_empty()
+    }
+
+    /// The loads to start when a count or event leaves an empty result without columns.
+    fn header_requests(&mut self) -> Vec<(PageRequest, u64, Arc<dyn PageLoader>)> {
+        if self.wants_header() {
+            self.plan()
+        } else {
+            Vec::new()
+        }
+    }
+
     /// Works out the window for the current viewport, marks its pages most recently
     /// used, rebuilds the queue and returns the loads to start now.
     fn plan(&mut self) -> Vec<(PageRequest, u64, Arc<dyn PageLoader>)> {
@@ -568,6 +593,9 @@ impl Inner {
         let mut rows = self.viewport.clone();
         if let RowCount::Exact(n) = self.row_count {
             rows.end = rows.end.min(n);
+        }
+        if rows.is_empty() && self.wants_header() {
+            rows = 0..1;
         }
         self.queue.clear();
         if rows.start >= rows.end {
@@ -1008,6 +1036,34 @@ mod tests {
         assert!(cache.is_loaded(500_000));
         assert_eq!(cache.stats().in_flight, 0);
         assert_eq!(cache.status(), Status::Idle);
+    }
+
+    #[test]
+    fn an_empty_result_still_loads_its_columns() {
+        let exec = TestExecutor::new();
+        let loader = Arc::new(FakeLoader::new(0));
+        let cache = GridCache::new(loader.clone(), config(64 << 20), exec.hooks());
+        exec.run();
+        assert_eq!(cache.row_count(), RowCount::Exact(0));
+        cache.set_viewport(0..0);
+        exec.run();
+        assert_eq!(loader.requested_pages(), vec![0]);
+        assert_eq!(cache.columns().map(|c| c.len()), Some(4));
+        assert_eq!(cache.status(), Status::Idle);
+
+        // A source with no columns at all is asked once, not again on every count.
+        let loader = Arc::new(FakeLoader::new(0));
+        loader.set_columns_for_page(|_| Vec::new());
+        let cache = GridCache::new(loader.clone(), config(64 << 20), exec.hooks());
+        exec.run();
+        cache.invalidate();
+        exec.run();
+        assert!(cache.columns().is_none());
+        assert!(
+            loader.requested_pages().len() <= 2,
+            "{:?}",
+            loader.requested_pages()
+        );
     }
 
     #[test]

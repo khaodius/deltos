@@ -224,6 +224,18 @@ impl Connection for ReadOnly {
         })
     }
 
+    fn apply_schema<'a>(
+        &'a self,
+        _namespace: &'a [String],
+        _statements: &'a [String],
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async {
+            Err(Error::Query(
+                "Read-only connection: the structure of tables can't be changed. Turn off Read-only in the connection's settings to change it.".into(),
+            ))
+        })
+    }
+
     fn cancel_handle(&self) -> Option<Arc<dyn CancelHandle>> {
         self.inner.cancel_handle()
     }
@@ -352,6 +364,12 @@ mod tests {
         );
         assert!(edit.is_err());
         assert_eq!(*inner.edits.lock(), 0);
+        let schema = futures::executor::block_on(conn.apply_schema(
+            &["public".to_owned()],
+            &["ALTER TABLE t ADD COLUMN c int".to_owned()],
+        ));
+        let refused = schema.err().map(|e| e.to_string());
+        assert!(refused.is_some_and(|e| e.starts_with("Read-only connection")));
         // Only the reads reach the server.
         assert_eq!(
             *inner.ran.lock(),

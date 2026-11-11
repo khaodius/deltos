@@ -78,6 +78,12 @@ Export a table, a filtered view or a query result to CSV, JSON, SQL or Markdown.
 stream to disk, so the size of the table does not matter. Import CSV or JSON into a table,
 matching columns by name, or run a `.sql` file.
 
+## Structure
+
+Edit columns, indexes and foreign keys in a table's Structure tab, review the exact SQL, and
+apply it in one transaction on PostgreSQL and SQLite. Create, empty and drop tables from the
+sidebar.
+
 ## Connecting
 
 Paste a connection URL such as `mysql://user:pass@db.example.com:3306/shop` anywhere in the

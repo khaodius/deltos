@@ -17,9 +17,9 @@ use std::time::Duration;
 
 use deltos_data::{
     BrowsePage, BrowseRequest, CancelHandle, Capabilities, Column, Connection, ConnectionConfig,
-    Driver, DriverKind, Error, ExecuteOptions, ForeignKey, Index, Namespace, NamespaceKind,
-    ObjectEntry, ObjectInfo, ObjectKind, ObjectRef, Result, Row, RowBatch, RowEdit, RowStream,
-    Value, ValueKind,
+    Driver, DriverKind, Error, ExecuteOptions, ForeignKey, ForeignKeyAction, Index, Namespace,
+    NamespaceKind, ObjectEntry, ObjectInfo, ObjectKind, ObjectRef, Result, Row, RowBatch, RowEdit,
+    RowStream, Value, ValueKind,
 };
 use futures::future::BoxFuture;
 use rusqlite::types::ValueRef;
@@ -272,6 +272,15 @@ impl Connection for SqliteConnection {
         let object = object.clone();
         let edits = edits.to_vec();
         self.call(move |conn| apply_edits(conn, &object, &edits))
+    }
+
+    fn apply_schema<'a>(
+        &'a self,
+        _namespace: &'a [String],
+        statements: &'a [String],
+    ) -> BoxFuture<'a, Result<()>> {
+        let statements = statements.to_vec();
+        self.call(move |conn| apply_schema(conn, &statements))
     }
 
     fn cancel_handle(&self) -> Option<Arc<dyn CancelHandle>> {
@@ -1096,6 +1105,8 @@ fn describe(conn: &rusqlite::Connection, object: &ObjectRef) -> Result<ObjectInf
                 unique,
                 primary: origin == "pk",
                 method: None,
+                // Indexes SQLite made for PRIMARY KEY and UNIQUE clauses ("pk", "u").
+                constraint: origin != "c",
             });
         }
         let key: Vec<String> = {
@@ -1112,6 +1123,7 @@ fn describe(conn: &rusqlite::Connection, object: &ObjectRef) -> Result<ObjectInf
                     unique: true,
                     primary: true,
                     method: None,
+                    constraint: true,
                 },
             );
         }
@@ -1156,7 +1168,7 @@ fn describe(conn: &rusqlite::Connection, object: &ObjectRef) -> Result<ObjectInf
 fn foreign_keys(conn: &rusqlite::Connection, schema: &str, table: &str) -> Result<Vec<ForeignKey>> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, \"table\", \"from\", \"to\" FROM pragma_foreign_key_list(?1, ?2) ORDER BY id, seq",
+            "SELECT id, \"table\", \"from\", \"to\", on_update, on_delete FROM pragma_foreign_key_list(?1, ?2) ORDER BY id, seq",
         )
         .map_err(error)?;
     let rows = stmt
@@ -1166,13 +1178,15 @@ fn foreign_keys(conn: &rusqlite::Connection, schema: &str, table: &str) -> Resul
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
             ))
         })
         .map_err(error)?
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(error)?;
     let mut out: Vec<(i64, ForeignKey)> = Vec::new();
-    for (id, target, from, to) in rows {
+    for (id, target, from, to, on_update, on_delete) in rows {
         let entry = match out.iter_mut().find(|(i, _)| *i == id) {
             Some((_, fk)) => fk,
             None => {
@@ -1187,6 +1201,8 @@ fn foreign_keys(conn: &rusqlite::Connection, schema: &str, table: &str) -> Resul
                             kind: ObjectKind::Table,
                         },
                         target_columns: Vec::new(),
+                        on_delete: ForeignKeyAction::parse(on_delete.as_deref().unwrap_or("")),
+                        on_update: ForeignKeyAction::parse(on_update.as_deref().unwrap_or("")),
                     },
                 ));
                 match out.last_mut() {
@@ -1250,6 +1266,57 @@ fn apply_edits(conn: &rusqlite::Connection, object: &ObjectRef, edits: &[RowEdit
             Err(e)
         }
     }
+}
+
+/// Runs schema statements in one transaction, with foreign key enforcement off while
+/// they run, as SQLite's guide to rebuilding a table asks. When enforcement was on, the
+/// keys are checked before the commit and any row that breaks one undoes the change.
+fn apply_schema(conn: &rusqlite::Connection, statements: &[String]) -> Result<()> {
+    if !conn.is_autocommit() {
+        return Err(Error::Query(
+            "A transaction is open on this connection. Commit or roll it back before changing the structure."
+                .into(),
+        ));
+    }
+    let enforced = conn
+        .query_row("PRAGMA foreign_keys", [], |row| row.get::<_, i64>(0))
+        .map_err(error)?
+        != 0;
+    // A rebuild turns the legacy rename on and off around its rename. A rollback does not
+    // undo a pragma, so a failure in between would leave it on for every later rename.
+    let legacy = conn
+        .query_row("PRAGMA legacy_alter_table", [], |row| row.get::<_, i64>(0))
+        .map_err(error)?;
+    if enforced {
+        conn.execute_batch("PRAGMA foreign_keys = OFF")
+            .map_err(error)?;
+    }
+    let result = (|| {
+        conn.execute_batch("BEGIN").map_err(error)?;
+        for statement in statements {
+            conn.execute_batch(statement)
+                .map_err(|e| error(e).in_statement(statement))?;
+        }
+        if enforced {
+            let mut check = conn.prepare("PRAGMA foreign_key_check").map_err(error)?;
+            let mut rows = check.query([]).map_err(error)?;
+            if let Some(row) = rows.next().map_err(error)? {
+                let table: String = row.get(0).unwrap_or_default();
+                return Err(Error::Query(format!(
+                    "Rows in {table} would no longer match their foreign key, so nothing was changed."
+                )));
+            }
+        }
+        conn.execute_batch("COMMIT").map_err(error)
+    })();
+    if result.is_err() && !conn.is_autocommit() {
+        let _ = conn.execute_batch("ROLLBACK");
+    }
+    let _ = conn.execute_batch(&format!("PRAGMA legacy_alter_table = {}", legacy != 0));
+    if enforced {
+        let _ = conn.execute_batch("PRAGMA foreign_keys = ON");
+    }
+    result
 }
 
 #[cfg(test)]

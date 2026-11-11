@@ -1,8 +1,8 @@
 //! The MySQL catalog, from `information_schema` and `SHOW CREATE`.
 
 use deltos_data::{
-    Column, Error, ForeignKey, Index, Namespace, NamespaceKind, ObjectEntry, ObjectInfo,
-    ObjectKind, ObjectRef, Result, Value, ValueKind,
+    Column, Error, ForeignKey, ForeignKeyAction, Index, Namespace, NamespaceKind, ObjectEntry,
+    ObjectInfo, ObjectKind, ObjectRef, Result, Value, ValueKind,
 };
 use mysql_async::Conn;
 use mysql_async::prelude::Queryable;
@@ -231,12 +231,16 @@ impl TableInfo {
             let position = match indexes.iter().position(|i| i.name == name) {
                 Some(i) => i,
                 None => {
+                    let primary = name == "PRIMARY";
                     indexes.push(Index {
-                        primary: name == "PRIMARY",
+                        primary,
                         name,
                         columns: Vec::new(),
                         unique,
                         method: text(row.as_ref(3)),
+                        // MySQL drops a UNIQUE key like any index; only the primary key
+                        // needs its own clause.
+                        constraint: primary,
                     });
                     usable.push(unique);
                     indexes.len() - 1
@@ -324,10 +328,14 @@ pub(super) async fn describe(conn: &mut Conn, object: &ObjectRef) -> Result<Obje
     let info = TableInfo::load(conn, object).await?;
     let fk_rows = rows(
         conn,
-        "SELECT CONSTRAINT_NAME, COLUMN_NAME, REFERENCED_TABLE_SCHEMA, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME \
-         FROM information_schema.KEY_COLUMN_USAGE \
-         WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND REFERENCED_TABLE_NAME IS NOT NULL \
-         ORDER BY CONSTRAINT_NAME, ORDINAL_POSITION",
+        "SELECT k.CONSTRAINT_NAME, k.COLUMN_NAME, k.REFERENCED_TABLE_SCHEMA, k.REFERENCED_TABLE_NAME, \
+                k.REFERENCED_COLUMN_NAME, r.DELETE_RULE, r.UPDATE_RULE \
+         FROM information_schema.KEY_COLUMN_USAGE k \
+         LEFT JOIN information_schema.REFERENTIAL_CONSTRAINTS r \
+           ON r.CONSTRAINT_SCHEMA = k.CONSTRAINT_SCHEMA AND r.TABLE_NAME = k.TABLE_NAME \
+          AND r.CONSTRAINT_NAME = k.CONSTRAINT_NAME \
+         WHERE k.TABLE_SCHEMA = ? AND k.TABLE_NAME = ? AND k.REFERENCED_TABLE_NAME IS NOT NULL \
+         ORDER BY k.CONSTRAINT_NAME, k.ORDINAL_POSITION",
         &[Value::text(db), Value::text(object.name.as_str())],
     )
     .await?;
@@ -350,6 +358,8 @@ pub(super) async fn describe(conn: &mut Conn, object: &ObjectRef) -> Result<Obje
                     kind: ObjectKind::Table,
                 },
                 target_columns: vec![target_column],
+                on_delete: ForeignKeyAction::parse(&text(row.as_ref(5)).unwrap_or_default()),
+                on_update: ForeignKeyAction::parse(&text(row.as_ref(6)).unwrap_or_default()),
             }),
         }
     }

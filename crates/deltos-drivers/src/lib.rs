@@ -57,6 +57,7 @@ use std::sync::Arc;
 use deltos_data::{Driver, DriverKind};
 
 pub mod classify;
+pub mod ddl;
 mod runtime;
 pub mod sql;
 mod tunnel;

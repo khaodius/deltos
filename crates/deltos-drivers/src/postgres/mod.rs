@@ -508,6 +508,21 @@ impl Connection for PostgresConnection {
         })
     }
 
+    fn apply_schema<'a>(
+        &'a self,
+        namespace: &'a [String],
+        statements: &'a [String],
+    ) -> BoxFuture<'a, Result<()>> {
+        let namespace = namespace.to_vec();
+        let statements = statements.to_vec();
+        self.spawn(|inner| async move {
+            let (db, _) = inner.locate(&namespace);
+            let session = inner.session(db, Role::Meta).await?;
+            let _guard = session.lock.lock().await;
+            apply_schema(&session, &statements).await
+        })
+    }
+
     fn cancel_handle(&self) -> Option<Arc<dyn CancelHandle>> {
         Some(Arc::new(Cancel(self.inner.clone())))
     }
@@ -890,6 +905,41 @@ async fn apply_edits(session: &Session, table: &str, edits: &[RowEdit]) -> Resul
                 .await
                 .map_err(pg_error)?;
             Ok(total)
+        }
+        Err(e) => {
+            let _ = session.client.batch_execute("ROLLBACK").await;
+            Err(e)
+        }
+    }
+}
+
+/// Runs schema statements in one transaction. PostgreSQL's DDL is transactional, so a
+/// failure part way leaves the tables as they were.
+async fn apply_schema(session: &Session, statements: &[String]) -> Result<()> {
+    session
+        .client
+        .batch_execute("BEGIN")
+        .await
+        .map_err(pg_error)?;
+    let mut result = Ok(());
+    for statement in statements {
+        if let Err(e) = session.client.batch_execute(statement).await {
+            result = Err(pg_error(e).in_statement(statement));
+            break;
+        }
+    }
+    match result {
+        Ok(()) => {
+            session
+                .client
+                .batch_execute("COMMIT")
+                .await
+                .map_err(pg_error)?;
+            // Cached plans may describe the old shape of a table.
+            if let Ok(mut cache) = session.statements.lock() {
+                cache.clear();
+            }
+            Ok(())
         }
         Err(e) => {
             let _ = session.client.batch_execute("ROLLBACK").await;
