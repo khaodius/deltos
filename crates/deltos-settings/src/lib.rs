@@ -444,6 +444,10 @@ pub struct Editor {
     pub line_numbers: bool,
     pub wrap: bool,
     pub highlight: bool,
+    /// Offers tables, columns and keywords in a popup while typing.
+    pub autocomplete: bool,
+    /// Format SQL writes keywords in uppercase.
+    pub format_uppercase: bool,
 }
 
 impl Default for Editor {
@@ -455,6 +459,8 @@ impl Default for Editor {
             line_numbers: true,
             wrap: false,
             highlight: true,
+            autocomplete: true,
+            format_uppercase: true,
         }
     }
 }
@@ -507,6 +513,10 @@ pub struct Keybinds(pub BTreeMap<String, String>);
 /// Every bindable action, its default keys and what the settings screen calls it.
 pub const KEYBIND_ACTIONS: &[(&str, &str, &str)] = &[
     ("run-query", "ctrl-enter", "Run statement"),
+    ("run-all", "ctrl-shift-enter", "Run all statements"),
+    ("explain-query", "ctrl-e", "Explain statement"),
+    ("format-sql", "ctrl-shift-f", "Format SQL"),
+    ("autocomplete", "ctrl-space", "Show completions"),
     ("new-query", "ctrl-t", "New query tab"),
     ("close-tab", "ctrl-w", "Close tab"),
     ("next-tab", "ctrl-tab", "Next tab"),

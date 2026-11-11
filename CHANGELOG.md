@@ -4,6 +4,25 @@ Packages for every version are attached to its
 [release](https://github.com/khaodius/deltos/releases), with SHA-256 checksums and a signed
 update manifest.
 
+## 0.1.7 - 2026-11-11
+
+- **Suggestions while you type.** The query editor suggests tables, columns, keywords and
+  functions as you type, and Ctrl+Space asks for them. It knows which tables a statement
+  names, aliases included. In MongoDB it suggests collections after `db.`, then their methods.
+  Settings → Editor → Suggest while typing turns the automatic popup off.
+- **Run the statement or everything.** Ctrl+Enter runs the selection or the statement at the
+  cursor, which is shaded when the editor holds several. Ctrl+Shift+Enter runs them all in
+  order and stops at the first error.
+- **A tab per result.** Each statement that returns rows gets its own result tab, with a
+  summary of every statement's rows, affected count or error. A pinned tab stays through the
+  next run.
+- **See the plan.** Ctrl+E shows how the database will run a statement as a tree, with each
+  step's share of the cost and time and the most expensive step marked: PostgreSQL, MySQL,
+  SQLite and MongoDB. On PostgreSQL and MongoDB, Analyze measures it by running it; on
+  PostgreSQL its changes are rolled back.
+- **Format SQL.** Ctrl+Shift+F formats the selection or the whole query, keeping comments,
+  strings and quoted names exactly as they are.
+
 ## 0.1.6 - 2026-11-11
 
 - **Keyboard-first grid.** Type on a cell to start editing it with that character. Enter saves

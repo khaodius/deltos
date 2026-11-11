@@ -1,6 +1,9 @@
 //! A multi-line code editor for queries: monospace text with SQL highlighting, line
 //! numbers, selection, the clipboard and IME input. Only the lines on screen are shaped
 //! and painted, so a long script scrolls as fast as a short one.
+//!
+//! It knows where its statements are (for the language its owner sets), marks the one the
+//! cursor is in, and shows a completion popup filled by the owner's completer.
 
 use std::ops::Range;
 
@@ -12,7 +15,9 @@ use gpui::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
+use crate::lang::{self, Language};
 use crate::theme::{Theme, theme};
+use crate::ui::completion::{Completer, CompletionMenu, Request};
 
 actions!(
     editor,
@@ -43,6 +48,8 @@ actions!(
         Copy,
         Cut,
         Paste,
+        Dismiss,
+        ShowCompletions,
     ]
 );
 
@@ -76,6 +83,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-x", Cut, ctx),
         KeyBinding::new("ctrl-v", Paste, ctx),
         KeyBinding::new("shift-insert", Paste, ctx),
+        KeyBinding::new("escape", Dismiss, ctx),
     ]);
 }
 
@@ -185,6 +193,11 @@ pub struct Editor {
     layout: Option<Layout>,
     /// Plain text in a field: no line numbers, no highlighting.
     plain: bool,
+    language: Language,
+    /// Where each statement is, kept with the text.
+    statements: Vec<Range<usize>>,
+    completer: Option<Completer>,
+    completion: Option<CompletionMenu>,
 }
 
 struct Layout {
@@ -212,6 +225,10 @@ impl Editor {
             placeholder: placeholder.into(),
             layout: None,
             plain: false,
+            language: Language::default(),
+            statements: Vec::new(),
+            completer: None,
+            completion: None,
         };
         this.reindex();
         this
@@ -249,13 +266,65 @@ impl Editor {
         &self.text
     }
 
-    /// The selection, or the statement the cursor is in: text between semicolons that
-    /// are not inside quotes or comments.
-    pub fn statement_at_cursor(&self) -> String {
-        if !self.selected.is_empty() {
-            return self.text[self.selected.clone()].trim().to_owned();
+    /// Sets the language, which decides where statements end.
+    pub fn set_language(&mut self, language: Language, cx: &mut Context<Self>) {
+        if self.language != language {
+            self.language = language;
+            self.reindex();
+            cx.notify();
         }
-        statement_at(&self.text, self.cursor()).trim().to_owned()
+    }
+
+    pub fn set_completer(&mut self, completer: Completer) {
+        self.completer = Some(completer);
+    }
+
+    /// The selected range, which may be empty.
+    pub fn selection(&self) -> Range<usize> {
+        self.selected.clone()
+    }
+
+    /// The selection, or the statement the cursor is in, trimmed.
+    pub fn current_statement(&self) -> Option<Range<usize>> {
+        if !self.selected.is_empty() {
+            let piece = &self.text[self.selected.clone()];
+            let lead = piece.len() - piece.trim_start().len();
+            let trail = piece.len() - piece.trim_end().len();
+            let r = self.selected.start + lead..self.selected.end - trail;
+            return (!r.is_empty()).then_some(r);
+        }
+        lang::split::statement_at(&self.statements, &self.text, self.cursor())
+    }
+
+    /// The text of [`Editor::current_statement`], or nothing.
+    pub fn statement_at_cursor(&self) -> String {
+        self.current_statement()
+            .map(|r| self.text[r].trim_end_matches(';').trim().to_owned())
+            .unwrap_or_default()
+    }
+
+    /// Every statement in the selection, or in the whole text when nothing is selected.
+    pub fn all_statements(&self) -> Vec<String> {
+        let (base, text) = if self.selected.is_empty() {
+            (0, self.text.as_str())
+        } else {
+            (self.selected.start, &self.text[self.selected.clone()])
+        };
+        let ranges = if base == 0 && self.selected.is_empty() {
+            self.statements.clone()
+        } else {
+            lang::split::statement_ranges(text, self.language)
+        };
+        ranges
+            .into_iter()
+            .filter_map(|r| text.get(r).map(str::to_owned))
+            .collect()
+    }
+
+    /// Replaces `range` with `new`, leaving the cursor after it.
+    pub fn replace_range(&mut self, range: Range<usize>, new: &str, cx: &mut Context<Self>) {
+        self.completion = None;
+        self.replace(range, new, cx);
     }
 
     fn reindex(&mut self) {
@@ -266,6 +335,70 @@ impl Editor {
                 self.line_starts.push(i + 1);
             }
         }
+        self.statements = lang::split::statement_ranges(&self.text, self.language);
+    }
+
+    // ---- completion -------------------------------------------------------------------
+
+    /// Asks the completer what fits at the cursor and opens, updates or closes the popup.
+    /// `explicit` is a request by key, which shows the popup even with nothing typed.
+    pub fn complete(&mut self, explicit: bool, cx: &mut Context<Self>) {
+        let Some(completer) = self.completer.clone() else {
+            return;
+        };
+        if !self.selected.is_empty() {
+            self.completion = None;
+            cx.notify();
+            return;
+        }
+        let request = Request {
+            text: &self.text,
+            cursor: self.cursor(),
+            statement: lang::split::statement_at(&self.statements, &self.text, self.cursor()),
+            explicit,
+            editor: cx.entity().downgrade(),
+        };
+        let found = completer(&request, cx);
+        let keep = self.completion.as_ref().map(|m| m.selected_label());
+        self.completion = found.and_then(|c| {
+            let mut menu = CompletionMenu::new(c)?;
+            if let Some(label) = keep.flatten() {
+                menu.select_label(&label);
+            }
+            Some(menu)
+        });
+        cx.notify();
+    }
+
+    /// Runs the completer again for an open popup, as when the columns it waited for
+    /// arrive.
+    pub fn refresh_completions(&mut self, cx: &mut Context<Self>) {
+        if self.completion.is_some() {
+            let explicit = self.completion.as_ref().is_some_and(|m| m.explicit);
+            self.complete(explicit, cx);
+        }
+    }
+
+    fn close_completions(&mut self, cx: &mut Context<Self>) {
+        if self.completion.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Accepts the popup's item `index`, as a click on it does.
+    pub fn pick_completion(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.accept_completion(Some(index), cx);
+    }
+
+    fn accept_completion(&mut self, index: Option<usize>, cx: &mut Context<Self>) -> bool {
+        let Some(menu) = self.completion.take() else {
+            return false;
+        };
+        let Some((range, insert)) = menu.accept(index) else {
+            return false;
+        };
+        self.replace(range, &insert, cx);
+        true
     }
 
     fn line_count(&self) -> usize {
@@ -297,6 +430,7 @@ impl Editor {
     }
 
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        self.completion = None;
         let offset = offset.min(self.text.len());
         self.selected = offset..offset;
         self.reversed = false;
@@ -305,6 +439,7 @@ impl Editor {
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        self.completion = None;
         let offset = offset.min(self.text.len());
         if self.reversed {
             self.selected.start = offset;
@@ -479,39 +614,6 @@ impl Editor {
     }
 }
 
-/// The statement around byte `at`, splitting on semicolons outside quotes and comments.
-pub fn statement_at(text: &str, at: usize) -> &str {
-    let bytes = text.as_bytes();
-    let mut start = 0;
-    let mut i = 0;
-    let mut quote: Option<u8> = None;
-    while i < bytes.len() {
-        let b = bytes[i];
-        match quote {
-            Some(q) if b == q => quote = None,
-            Some(_) => {}
-            None => match b {
-                b'\'' | b'"' | b'`' => quote = Some(b),
-                b'-' if bytes.get(i + 1) == Some(&b'-') => {
-                    while i < bytes.len() && bytes[i] != b'\n' {
-                        i += 1;
-                    }
-                    continue;
-                }
-                b';' => {
-                    if at <= i {
-                        return &text[start..i];
-                    }
-                    start = i + 1;
-                }
-                _ => {}
-            },
-        }
-        i += 1;
-    }
-    &text[start..]
-}
-
 /// Colored runs for one line of SQL. `in_comment` carries a block comment across lines.
 fn highlight(line: &str, t: &Theme, font: &gpui::Font, in_comment: &mut bool) -> Vec<TextRun> {
     let run = |len: usize, color: Hsla| TextRun {
@@ -633,6 +735,18 @@ impl EntityInputHandler for Editor {
             .or(self.marked.clone())
             .unwrap_or(self.selected.clone());
         self.replace(range, new, cx);
+        // A name character keeps the popup coming; anything else closes it.
+        let mut chars = new.chars();
+        let typed = match (chars.next(), chars.next()) {
+            (Some(c), None) => c.is_alphanumeric() || c == '_' || c == '.' || c == '$',
+            _ => false,
+        };
+        if typed {
+            let explicit = self.completion.as_ref().is_some_and(|m| m.explicit);
+            self.complete(explicit, cx);
+        } else {
+            self.close_completions(cx);
+        }
     }
 
     fn replace_and_mark_text_in_range(
@@ -708,6 +822,20 @@ impl Render for Editor {
         let cursor = self.cursor();
         let scroll_y = self.scroll_y;
         let placeholder = self.placeholder.clone();
+        // The statement a run would take, marked when there is more than one.
+        let active = (self.statements.len() > 1 && self.selected.is_empty())
+            .then(|| self.current_statement())
+            .flatten();
+        let popup = self.completion.as_ref().and_then(|menu| {
+            let layout = self.layout.as_ref()?;
+            let start = menu.replace.start;
+            let line = self.line_of(start);
+            let x = layout.text_left + self.x_in_line(start) - px(6.);
+            let y = layout.bounds.top() + layout.line_height * (line as f32 + 1.0)
+                - px(self.scroll_y)
+                + px(2.);
+            Some(menu.render(point(x, y), cx.entity().downgrade(), &t))
+        });
         let tp = t.clone();
         let painter = canvas(
             |_, _, _| {},
@@ -747,6 +875,25 @@ impl Render for Editor {
                     let start = starts[line];
                     let end = starts.get(line + 1).map_or(text.len(), |n| n - 1);
                     let y = bounds.top() + lh * (line as f32) - px(scroll_y);
+                    if let Some(a) = &active
+                        && start <= a.end
+                        && a.start <= end
+                    {
+                        window.paint_quad(fill(
+                            Bounds {
+                                origin: point(text_left - px(4.), y),
+                                size: size(bounds.right() - text_left + px(4.), lh),
+                            },
+                            t.accent.opacity(0.035),
+                        ));
+                        window.paint_quad(fill(
+                            Bounds {
+                                origin: point(text_left - px(8.), y),
+                                size: size(px(2.), lh),
+                            },
+                            t.accent.opacity(0.5),
+                        ));
+                    }
                     let content: SharedString = text[start..end].to_owned().into();
                     let runs = if plain {
                         vec![TextRun {
@@ -872,8 +1019,13 @@ impl Render for Editor {
                     this.selected = p..c;
                 }
                 this.replace(this.selected.clone(), "", cx);
+                // An open popup follows what is left of the word.
+                if let Some(explicit) = this.completion.as_ref().map(|m| m.explicit) {
+                    this.complete(explicit, cx);
+                }
             }))
             .on_action(cx.listener(|this, _: &Delete, _, cx| {
+                this.close_completions(cx);
                 if this.selected.is_empty() {
                     let c = this.cursor();
                     let n = this.next_boundary(c);
@@ -881,6 +1033,14 @@ impl Render for Editor {
                 }
                 this.replace(this.selected.clone(), "", cx);
             }))
+            .on_action(cx.listener(|this, _: &Dismiss, _, cx| {
+                if this.completion.is_some() {
+                    this.close_completions(cx);
+                } else {
+                    cx.propagate();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &ShowCompletions, _, cx| this.complete(true, cx)))
             .on_action(cx.listener(|this, _: &Left, _, cx| {
                 this.goal_x = None;
                 let to = if this.selected.is_empty() {
@@ -909,12 +1069,40 @@ impl Render for Editor {
                 let to = this.next_boundary(this.cursor());
                 this.select_to(to, cx);
             }))
-            .on_action(cx.listener(|this, _: &Up, _, cx| this.vertical(-1, false, cx)))
-            .on_action(cx.listener(|this, _: &Down, _, cx| this.vertical(1, false, cx)))
+            .on_action(cx.listener(|this, _: &Up, _, cx| {
+                if let Some(menu) = &mut this.completion {
+                    menu.move_by(-1);
+                    cx.notify();
+                } else {
+                    this.vertical(-1, false, cx)
+                }
+            }))
+            .on_action(cx.listener(|this, _: &Down, _, cx| {
+                if let Some(menu) = &mut this.completion {
+                    menu.move_by(1);
+                    cx.notify();
+                } else {
+                    this.vertical(1, false, cx)
+                }
+            }))
             .on_action(cx.listener(|this, _: &SelectUp, _, cx| this.vertical(-1, true, cx)))
             .on_action(cx.listener(|this, _: &SelectDown, _, cx| this.vertical(1, true, cx)))
-            .on_action(cx.listener(|this, _: &PageUp, _, cx| this.vertical(-20, false, cx)))
-            .on_action(cx.listener(|this, _: &PageDown, _, cx| this.vertical(20, false, cx)))
+            .on_action(cx.listener(|this, _: &PageUp, _, cx| {
+                if let Some(menu) = &mut this.completion {
+                    menu.move_by(-8);
+                    cx.notify();
+                } else {
+                    this.vertical(-20, false, cx)
+                }
+            }))
+            .on_action(cx.listener(|this, _: &PageDown, _, cx| {
+                if let Some(menu) = &mut this.completion {
+                    menu.move_by(8);
+                    cx.notify();
+                } else {
+                    this.vertical(20, false, cx)
+                }
+            }))
             .on_action(cx.listener(|this, _: &WordLeft, _, cx| {
                 let c = this.cursor();
                 let to = this.text[..c]
@@ -958,6 +1146,9 @@ impl Render for Editor {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &Newline, _, cx| {
+                if this.accept_completion(None, cx) {
+                    return;
+                }
                 // The new line keeps the indentation of the one it splits.
                 let line = this.line_range(this.line_of(this.cursor()));
                 let indent: String = this.text[line]
@@ -967,6 +1158,9 @@ impl Render for Editor {
                 this.replace(this.selected.clone(), &format!("\n{indent}"), cx);
             }))
             .on_action(cx.listener(|this, _: &Tab, _, cx| {
+                if this.accept_completion(None, cx) {
+                    return;
+                }
                 this.replace(this.selected.clone(), "    ", cx);
             }))
             .on_action(cx.listener(|this, _: &Copy, _, cx| {
@@ -977,6 +1171,7 @@ impl Render for Editor {
                 }
             }))
             .on_action(cx.listener(|this, _: &Cut, _, cx| {
+                this.close_completions(cx);
                 if !this.selected.is_empty() {
                     cx.write_to_clipboard(ClipboardItem::new_string(
                         this.text[this.selected.clone()].to_owned(),
@@ -985,6 +1180,7 @@ impl Render for Editor {
                 }
             }))
             .on_action(cx.listener(|this, _: &Paste, _, cx| {
+                this.close_completions(cx);
                 if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
                     let text = text.replace("\r\n", "\n");
                     this.replace(this.selected.clone(), &text, cx);
@@ -1012,21 +1208,6 @@ impl Render for Editor {
                 cx.notify();
             }))
             .child(painter)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn statements_split_on_semicolons_outside_quotes() {
-        let text = "select 1; select ';' as x;\n-- a; comment\nselect 3";
-        assert_eq!(statement_at(text, 3), "select 1");
-        assert_eq!(statement_at(text, 12).trim(), "select ';' as x");
-        assert_eq!(
-            statement_at(text, text.len()).trim(),
-            "-- a; comment\nselect 3"
-        );
+            .children(popup)
     }
 }

@@ -546,6 +546,46 @@ impl Inner {
                     .collect();
                 Ok(documents_stream(docs, batch))
             }
+            Command::Explain {
+                database,
+                collection,
+                operation,
+                verbosity,
+            } => {
+                let db = in_db(database)?;
+                let inner = match operation {
+                    Operation::Find(find) if find.count => {
+                        let mut command = doc! { "count": &collection, "query": find.filter };
+                        if let Some(skip) = find.skip {
+                            command.insert("skip", i64::try_from(skip).unwrap_or(i64::MAX));
+                        }
+                        if let Some(limit) = find.limit.filter(|l| *l != 0) {
+                            command.insert("limit", limit.saturating_abs());
+                        }
+                        command
+                    }
+                    Operation::Find(find) => {
+                        query::find_command(&collection, &find, batch, &op.tag)
+                    }
+                    Operation::Aggregate { pipeline, options } => query::aggregate_command(
+                        Bson::String(collection.clone()),
+                        &pipeline,
+                        &options,
+                        batch,
+                        &op.tag,
+                    ),
+                    Operation::Count { filter } => doc! { "count": &collection, "query": filter },
+                    Operation::Distinct { field, filter } => {
+                        doc! { "distinct": &collection, "key": field, "query": filter }
+                    }
+                    _ => return Err(Error::Unsupported("explain() of this operation")),
+                };
+                let command = doc! { "explain": inner, "verbosity": verbosity };
+                let reply = op
+                    .run(async { db.run_command(command).await.map_err(mongo_error) })
+                    .await?;
+                Ok(documents_stream(vec![reply], batch))
+            }
             Command::Collection {
                 database,
                 collection,
