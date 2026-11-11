@@ -23,9 +23,9 @@ use deltos_settings::DateFormat;
 use futures::StreamExt;
 use gpui::{
     App, BorderStyle, Bounds, ClipboardItem, Context, ElementId, Entity, EventEmitter, FocusHandle,
-    Focusable, Hsla, IntoElement, KeyBinding, MouseButton, Pixels, Point, Render, SharedString,
-    Subscription, Task, TextRun, Window, actions, canvas, div, fill, outline, point, prelude::*,
-    px, size,
+    Focusable, Hsla, IntoElement, KeyBinding, KeyDownEvent, MouseButton, Pixels, Point, Render,
+    SharedString, Subscription, Task, TextRun, Window, actions, canvas, div, fill, outline, point,
+    prelude::*, px, size,
 };
 
 use crate::net::Net;
@@ -33,6 +33,7 @@ use crate::theme::{Theme, theme};
 use crate::ui::icons::{Icon, icon};
 use crate::ui::pending::{NewRow, PendingChanges, RowChange, RowMark};
 use crate::ui::text_input::{InputEvent, TextInput};
+use crate::ui::tsv;
 use crate::ui::{MenuItem, context_menu};
 
 actions!(
@@ -56,6 +57,14 @@ actions!(
         CopyWithHeaders,
         SelectAllCells,
         EditCell,
+        JumpUp,
+        JumpDown,
+        JumpLeft,
+        JumpRight,
+        NextCell,
+        PreviousCell,
+        ClearCells,
+        PasteCells,
     ]
 );
 
@@ -84,6 +93,14 @@ pub fn bind_keys(cx: &mut App) {
     ]);
 }
 
+/// The context of the text field that edits a cell, for keys that save it and move on
+/// (Tab), bound after the field's own keys so they win.
+pub const EDITOR_CONTEXT: &str = "Grid > TextInput";
+
+/// A step past any edge: `step` clamps it to the first or last row or column.
+const JUMP: i64 = i64::MAX / 4;
+/// Most rows a paste or a clear changes at once; the staged changes stay small.
+pub const EDIT_ROWS: usize = 10_000;
 /// Most rows a copy takes, so a select-all over a huge table cannot fill the clipboard
 /// with gigabytes.
 const COPY_LIMIT: u64 = 100_000;
@@ -145,6 +162,23 @@ pub enum GridEvent {
         input: CellInput,
         target: Option<RowRef>,
     },
+    /// Several cells changed at once. `outside` counts the pasted cells that fell past
+    /// the last row or column; `limited` says rows past [`EDIT_ROWS`] were left out.
+    Edits {
+        cells: Vec<(u64, usize, CellInput)>,
+        batch: Batch,
+        outside: usize,
+        limited: bool,
+    },
+}
+
+/// What changed several cells at once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Batch {
+    /// Delete, or "Set to NULL": each cell to NULL, or to empty text in a column that
+    /// can't be NULL.
+    Clear,
+    Paste,
 }
 
 /// What the person entered in a cell, before it is read as the column's type.
@@ -437,6 +471,18 @@ impl GridView {
 
     /// Opens the editor on `cell`, its text selected so typing replaces it.
     pub fn begin_edit(&mut self, cell: (u64, usize), window: &mut Window, cx: &mut Context<Self>) {
+        self.begin_edit_with(cell, None, window, cx);
+    }
+
+    /// Opens the editor on `cell`. With `typed`, the text starts as that instead of the
+    /// value, as when typing on a selected cell.
+    fn begin_edit_with(
+        &mut self,
+        cell: (u64, usize),
+        typed: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if !self.editable || cell.1 >= self.columns.len() {
             return;
         }
@@ -461,17 +507,21 @@ impl GridView {
         } else {
             ""
         };
-        let text = original.clone();
+        let text = typed.map_or_else(|| original.clone(), str::to_owned);
+        let select = typed.is_none();
         let input = cx.new(|cx| {
             let mut input = TextInput::new(placeholder, cx);
             input.set_text(text, cx);
-            input.select_everything(cx);
+            if select {
+                input.select_everything(cx);
+            }
             input
         });
         let focus = input.read(cx).focus_handle(cx);
         let subs = vec![
             cx.subscribe_in(&input, window, |this, _, e, window, cx| match e {
-                InputEvent::Submit => this.commit_edit(true, window, cx),
+                // Enter saves and moves down, as in a spreadsheet.
+                InputEvent::Submit => this.step(1, 0, false, window, cx),
                 InputEvent::Cancel => this.cancel_edit(window, cx),
                 InputEvent::Changed => {}
             }),
@@ -557,21 +607,113 @@ impl GridView {
         }
     }
 
-    /// Sets the selected cells to NULL, one edit per cell.
+    /// Sets the selected cells to NULL.
     pub fn set_null(&mut self, cx: &mut Context<Self>) {
+        self.clear_cells(true, cx);
+    }
+
+    /// Clears the selected cells: NULL where the column takes it, otherwise empty text.
+    /// `null_only` asks for NULL everywhere, which a column that can't be NULL refuses.
+    fn clear_cells(&mut self, null_only: bool, cx: &mut Context<Self>) {
         let Some((rows, cols)) = self.selected_ranges() else {
             return;
         };
-        for row in rows.take(1000) {
+        if !self.editable || self.editor.is_some() {
+            return;
+        }
+        let cols = cols.start..cols.end.min(self.columns.len());
+        let all = (rows.end - rows.start) as usize;
+        let mut cells = Vec::new();
+        for row in rows.take(EDIT_ROWS) {
             for col in cols.clone() {
-                cx.emit(GridEvent::Edit {
-                    row,
-                    col,
-                    input: CellInput::Null,
-                    target: None,
-                });
+                let input = if null_only || self.columns[col].nullable != Some(false) {
+                    CellInput::Null
+                } else {
+                    CellInput::Text(String::new())
+                };
+                cells.push((row, col, input));
             }
         }
+        cx.emit(GridEvent::Edits {
+            cells,
+            batch: Batch::Clear,
+            outside: 0,
+            limited: all > EDIT_ROWS,
+        });
+    }
+
+    /// Pastes tab-separated text from the clipboard, a spreadsheet's cells, starting
+    /// at the selection's first cell. One value pasted on a selection fills all of it.
+    /// An empty field is NULL where the column takes it, as a copy writes NULL.
+    fn paste_cells(&mut self, cx: &mut Context<Self>) {
+        let Some((rows, cols)) = self.selected_ranges() else {
+            return;
+        };
+        if !self.editable || self.columns.is_empty() {
+            return;
+        }
+        let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) else {
+            return;
+        };
+        let (grid, more) = tsv::decode(&text, EDIT_ROWS);
+        if grid.is_empty() {
+            return;
+        }
+        let total = self.total_rows();
+        let n_cols = self.columns.len();
+        let mut cells = Vec::new();
+        let mut outside = 0;
+        let mut limited = more;
+        let input = |col: usize, text: &str| {
+            if text.is_empty() && self.columns[col].nullable != Some(false) {
+                CellInput::Null
+            } else {
+                CellInput::Text(text.to_owned())
+            }
+        };
+        if let [row] = grid.as_slice()
+            && let [one] = row.as_slice()
+        {
+            for r in rows.clone().take(EDIT_ROWS) {
+                for c in cols.start..cols.end.min(n_cols) {
+                    cells.push((r, c, input(c, one)));
+                }
+            }
+            limited = rows.end - rows.start > EDIT_ROWS as u64;
+        } else {
+            for (i, fields) in grid.iter().enumerate() {
+                let r = rows.start + i as u64;
+                if r >= total {
+                    outside += fields.len();
+                    continue;
+                }
+                for (j, field) in fields.iter().enumerate() {
+                    let c = cols.start + j;
+                    if c < n_cols {
+                        cells.push((r, c, input(c, field)));
+                    } else {
+                        outside += 1;
+                    }
+                }
+            }
+            // The pasted block becomes the selection, as in a spreadsheet.
+            let last_row = (rows.start + grid.len() as u64)
+                .min(total)
+                .saturating_sub(1);
+            let width = grid.iter().map(Vec::len).max().unwrap_or(1);
+            let last_col = (cols.start + width).min(n_cols).saturating_sub(1);
+            self.selection = Some(Selection {
+                anchor: (rows.start, cols.start),
+                head: (last_row.max(rows.start), last_col.max(cols.start)),
+            });
+        }
+        cx.emit(GridEvent::Edits {
+            cells,
+            batch: Batch::Paste,
+            outside,
+            limited,
+        });
+        cx.notify();
     }
 
     /// Hooks for a cache this grid will show; redraws go to this grid.
@@ -812,7 +954,17 @@ impl GridView {
         self.clamp(t);
     }
 
-    fn step(&mut self, dr: i64, dc: i64, extend: bool, cx: &mut Context<Self>) {
+    /// Moves the selection's head by rows and columns, or extends the selection there.
+    /// An open edit is saved first.
+    fn step(
+        &mut self,
+        dr: i64,
+        dc: i64,
+        extend: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.commit_edit(true, window, cx);
         self.context = None;
         let total = self.total_rows();
         if total == 0 || self.columns.is_empty() {
@@ -824,6 +976,58 @@ impl GridView {
         self.select((row, col), extend, cx);
         let t = theme(cx).clone();
         self.reveal(&t);
+    }
+
+    /// Tab and Shift+Tab: saves an open edit and moves to the next or previous cell,
+    /// round to the next or previous row at the end of one.
+    fn tab(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let cols = self.columns.len();
+        let Some((row, col)) = self.selection.map(|s| s.head) else {
+            self.step(0, 0, false, window, cx);
+            return;
+        };
+        let (dr, dc) = match (forward, col) {
+            (true, c) if c + 1 >= cols => (1, -JUMP),
+            (true, _) => (0, 1),
+            (false, 0) => (-1, JUMP),
+            (false, _) => (0, -1),
+        };
+        // At the very first or last cell there is nowhere to go round to.
+        let total = self.total_rows();
+        if (dr > 0 && row + 1 >= total) || (dr < 0 && row == 0) {
+            self.step(0, 0, false, window, cx);
+            return;
+        }
+        self.step(dr, dc, false, window, cx);
+    }
+
+    /// Typing a character on a selected cell edits it, starting with that character.
+    fn on_key_down(&mut self, e: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let m = &e.keystroke.modifiers;
+        if self.editor.is_some()
+            || !self.editable
+            || !self.focus.is_focused(window)
+            || m.control
+            || m.alt
+            || m.platform
+            || m.function
+        {
+            return;
+        }
+        let Some(typed) = e.keystroke.key_char.as_deref() else {
+            return;
+        };
+        if typed.is_empty() || typed.chars().any(char::is_control) {
+            return;
+        }
+        let Some(head) = self.selection.map(|s| s.head) else {
+            return;
+        };
+        self.begin_edit_with(head, Some(typed), window, cx);
+        if self.editor.is_some() {
+            // Handled: the window must not type the character into the editor again.
+            cx.stop_propagation();
+        }
     }
 
     fn page(&self, cx: &App) -> i64 {
@@ -858,7 +1062,8 @@ impl GridView {
         cx.write_to_clipboard(ClipboardItem::new_string(out));
     }
 
-    /// The selected cells as tab-separated text, rows on lines.
+    /// The selected cells as tab-separated text, rows on lines, a value with a tab, a
+    /// line break or a quote in quotes as spreadsheets expect. NULL is an empty field.
     fn copy(&mut self, headers: bool, cx: &mut Context<Self>) {
         let (Some(s), Some(cache)) = (self.selection, self.cache.clone()) else {
             return;
@@ -868,11 +1073,15 @@ impl GridView {
         let cols = s.cols();
         let mut out = String::new();
         if headers {
-            let names: Vec<&str> = cols
+            let names = cols
                 .clone()
-                .filter_map(|c| self.columns.get(c).map(|c| c.name.as_str()))
-                .collect();
-            out.push_str(&names.join("\t"));
+                .filter_map(|c| self.columns.get(c).map(|c| c.name.as_str()));
+            for (i, name) in names.enumerate() {
+                if i > 0 {
+                    out.push('\t');
+                }
+                tsv::push_field(&mut out, name);
+            }
             out.push('\n');
         }
         each_row(Some(&*cache), &self.pending, rows, |_, row| {
@@ -883,14 +1092,7 @@ impl GridView {
                 if let Some((Some(v), _)) = row.cell(c)
                     && !v.is_null()
                 {
-                    let text = v.to_string();
-                    out.extend(text.chars().map(|ch| {
-                        if ch == '\t' || ch == '\n' || ch == '\r' {
-                            ' '
-                        } else {
-                            ch
-                        }
-                    }));
+                    tsv::push_field(&mut out, &v.to_string());
                 }
             }
             out.push('\n');
@@ -1051,6 +1253,9 @@ impl GridView {
                             act(|g, _, cx| g.set_null(cx)),
                         )
                         .enabled(nullable),
+                    );
+                    items.push(
+                        MenuItem::new("Paste", act(|g, _, cx| g.paste_cells(cx))).detail("Ctrl+V"),
                     );
                     items.push(MenuItem::separator());
                 }
@@ -1863,28 +2068,78 @@ impl Render for GridView {
             .flex()
             .flex_col()
             .bg(t.surface)
-            .on_action(cx.listener(|this, _: &MoveUp, _, cx| this.step(-1, 0, false, cx)))
-            .on_action(cx.listener(|this, _: &MoveDown, _, cx| this.step(1, 0, false, cx)))
-            .on_action(cx.listener(|this, _: &MoveLeft, _, cx| this.step(0, -1, false, cx)))
-            .on_action(cx.listener(|this, _: &MoveRight, _, cx| this.step(0, 1, false, cx)))
-            .on_action(cx.listener(|this, _: &SelectUp, _, cx| this.step(-1, 0, true, cx)))
-            .on_action(cx.listener(|this, _: &SelectDown, _, cx| this.step(1, 0, true, cx)))
-            .on_action(cx.listener(|this, _: &SelectLeft, _, cx| this.step(0, -1, true, cx)))
-            .on_action(cx.listener(|this, _: &SelectRight, _, cx| this.step(0, 1, true, cx)))
-            .on_action(cx.listener(|this, _: &PageUp, _, cx| {
-                let n = this.page(cx);
-                this.step(-n, 0, false, cx)
-            }))
-            .on_action(cx.listener(|this, _: &PageDown, _, cx| {
-                let n = this.page(cx);
-                this.step(n, 0, false, cx)
-            }))
-            .on_action(cx.listener(|this, _: &GoTop, _, cx| this.step(i64::MIN / 2, 0, false, cx)))
+            .on_key_down(cx.listener(Self::on_key_down))
             .on_action(
-                cx.listener(|this, _: &GoBottom, _, cx| this.step(i64::MAX / 2, 0, false, cx)),
+                cx.listener(|this, _: &MoveUp, window, cx| this.step(-1, 0, false, window, cx)),
             )
-            .on_action(cx.listener(|this, _: &RowStart, _, cx| this.step(0, -(1 << 20), false, cx)))
-            .on_action(cx.listener(|this, _: &RowEnd, _, cx| this.step(0, 1 << 20, false, cx)))
+            .on_action(
+                cx.listener(|this, _: &MoveDown, window, cx| this.step(1, 0, false, window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &MoveLeft, window, cx| this.step(0, -1, false, window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &MoveRight, window, cx| this.step(0, 1, false, window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &SelectUp, window, cx| this.step(-1, 0, true, window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &SelectDown, window, cx| this.step(1, 0, true, window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &SelectLeft, window, cx| this.step(0, -1, true, window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &SelectRight, window, cx| this.step(0, 1, true, window, cx)),
+            )
+            .on_action(cx.listener(|this, _: &PageUp, window, cx| {
+                let n = this.page(cx);
+                this.step(-n, 0, false, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &PageDown, window, cx| {
+                let n = this.page(cx);
+                this.step(n, 0, false, window, cx)
+            }))
+            // Ctrl+Home and Ctrl+End go to the first and the last cell, as in spreadsheets.
+            .on_action(
+                cx.listener(|this, _: &GoTop, window, cx| {
+                    this.step(-JUMP, -JUMP, false, window, cx)
+                }),
+            )
+            .on_action(cx.listener(|this, _: &GoBottom, window, cx| {
+                this.step(JUMP, JUMP, false, window, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &RowStart, window, cx| {
+                    this.step(0, -JUMP, false, window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &RowEnd, window, cx| this.step(0, JUMP, false, window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &JumpUp, window, cx| this.step(-JUMP, 0, false, window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &JumpDown, window, cx| this.step(JUMP, 0, false, window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &JumpLeft, window, cx| {
+                    this.step(0, -JUMP, false, window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &JumpRight, window, cx| {
+                    this.step(0, JUMP, false, window, cx)
+                }),
+            )
+            .on_action(cx.listener(|this, _: &NextCell, window, cx| this.tab(true, window, cx)))
+            .on_action(cx.listener(|this, _: &ClearCells, _, cx| this.clear_cells(false, cx)))
+            .on_action(cx.listener(|this, _: &PasteCells, _, cx| this.paste_cells(cx)))
+            .on_action(
+                cx.listener(|this, _: &PreviousCell, window, cx| this.tab(false, window, cx)),
+            )
             .on_action(cx.listener(|this, _: &CopyCells, _, cx| this.copy(false, cx)))
             .on_action(cx.listener(|this, _: &CopyWithHeaders, _, cx| this.copy(true, cx)))
             .on_action(cx.listener(|this, _: &SelectAllCells, _, cx| this.select_all(cx)))

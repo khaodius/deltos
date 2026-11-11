@@ -4,6 +4,21 @@ Packages for every version are attached to its
 [release](https://github.com/khaodius/deltos/releases), with SHA-256 checksums and a signed
 update manifest.
 
+## 0.1.6 - 2026-11-11
+
+- **Keyboard-first grid.** Type on a cell to start editing it with that character. Enter saves
+  and moves down, Tab and Shift+Tab save and move across, wrapping at the ends of a row, and
+  Escape cancels. Ctrl+arrows jump to the first or last row or column, and Ctrl+Home and
+  Ctrl+End go to the first and last cell.
+- **Clear cells.** Delete or Backspace sets the selected cells to NULL, or to empty text where
+  the column can't be NULL, and the status bar says which. The change is staged like any
+  other edit.
+- **Copy and paste like a spreadsheet.** Ctrl+C copies tab-separated text quoted the way
+  spreadsheets expect, and Ctrl+Shift+C adds the headers. Ctrl+V pastes it into the grid from
+  the focused cell as staged edits and tells you which cells didn't fit. One value pasted on a
+  selection fills all of it.
+- **Duplicate rows.** Ctrl+D stages copies of the selected rows.
+
 ## 0.1.5 - 2026-11-11
 
 - **Production looks like production.** A connection's tag colors the strip under the title
