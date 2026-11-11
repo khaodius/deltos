@@ -4,6 +4,15 @@ Packages for every version are attached to its
 [release](https://github.com/khaodius/deltos/releases), with SHA-256 checksums and a signed
 update manifest.
 
+## 0.1.4 - 2026-11-11
+
+- **Command palette.** Ctrl+K, or Ctrl+Shift+P, finds actions, open tabs, connections,
+  tables, views and collections, and Settings pages from a few typed letters, with the
+  matched letters marked and each action's shortcut shown. Start with `>` for commands, `@`
+  for tables or `#` for connections. Items you used recently come first.
+- **Ctrl+P searches tables in the palette.** Search objects now opens the palette on tables,
+  views and collections of every open connection.
+
 ## 0.1.3 - 2026-11-11
 
 - **Edits wait for Commit.** Changed cells, deleted rows and new rows are staged and drawn in

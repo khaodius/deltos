@@ -520,6 +520,12 @@ pub const KEYBIND_ACTIONS: &[(&str, &str, &str)] = &[
     ("review-changes", "ctrl-shift-s", "Review staged changes"),
     ("discard-changes", "ctrl-shift-z", "Discard staged changes"),
     ("add-row", "ctrl-shift-n", "Add a row"),
+    ("command-palette", "ctrl-k", "Command palette"),
+    (
+        "command-palette-alt",
+        "ctrl-shift-p",
+        "Command palette (second shortcut)",
+    ),
 ];
 
 impl Default for Keybinds {

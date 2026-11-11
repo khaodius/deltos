@@ -10,6 +10,7 @@ pub mod history;
 pub mod icons;
 pub mod inspector;
 pub mod motion;
+pub mod palette;
 pub mod panel_window;
 pub mod pending;
 pub mod query;

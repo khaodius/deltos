@@ -40,6 +40,13 @@ stack. Pull it past the window's edge and it becomes a window of its own, which 
 the pointer until you let go. Drop that window on the main one, or hold it there, and it docks again. The
 layout is saved and comes back on the next start.
 
+## Command palette
+
+Ctrl+K opens the command palette: type a few letters of an action, a tab, a connection, a
+table or a Settings page and press Enter. `>` limits it to commands, `@` to tables, views and
+collections, and `#` to connections. What you used recently comes first. Ctrl+P opens it on
+tables.
+
 ## Large tables
 
 Rows are fetched page by page as you scroll and kept in a cache with a fixed memory budget.
@@ -151,7 +158,7 @@ publisher the first time.
 | New query tab               | `Ctrl+T`           |
 | Close tab                   | `Ctrl+W`           |
 | Next / previous tab         | `Ctrl+Tab` / `Ctrl+Shift+Tab` |
-| Search tables and views     | `Ctrl+P`           |
+| Search tables and views     | `Ctrl+P` (the palette, on tables) |
 | Reload                      | `Ctrl+R`           |
 | Sidebar / inspector         | `Ctrl+B` / `Ctrl+I` |
 | Settings                    | `Ctrl+,`           |
@@ -161,6 +168,7 @@ publisher the first time.
 | Save / cancel an edit       | `Enter` or click elsewhere / `Esc` |
 | Commit / review / discard staged changes | `Ctrl+S` / `Ctrl+Shift+S` / `Ctrl+Shift+Z` |
 | Add a row                   | `Ctrl+Shift+N`     |
+| Command palette             | `Ctrl+K` or `Ctrl+Shift+P` |
 
 Every binding can be changed in Settings → Keyboard.
 
