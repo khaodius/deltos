@@ -93,6 +93,8 @@ Ctrl+Enter runs the statement at the cursor or the selection, and Ctrl+Shift+Ent
 all, with a result tab for each statement that returns rows and a summary of the rest. Pin a
 tab to keep it through the next run. Ctrl+E draws the query plan as a tree with the costly
 step marked, and Ctrl+Shift+F formats the query without touching its strings or comments.
+Every statement you run is kept in a searchable history between sessions, and Ctrl+Shift+S
+saves a query by name for one connection or all of them.
 
 ## Safety
 
@@ -205,6 +207,7 @@ publisher the first time.
 | Explain the statement       | `Ctrl+E`           |
 | Format SQL                  | `Ctrl+Shift+F`     |
 | Filter rows                 | `Ctrl+F`           |
+| Save the query              | `Ctrl+Shift+S` in a query tab |
 
 Every binding can be changed in Settings → Keyboard.
 

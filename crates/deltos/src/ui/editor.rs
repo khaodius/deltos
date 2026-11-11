@@ -327,6 +327,12 @@ impl Editor {
         self.replace(range, new, cx);
     }
 
+    /// Types `new` over the selection.
+    pub fn insert_at_cursor(&mut self, new: &str, cx: &mut Context<Self>) {
+        let range = self.selected.clone();
+        self.replace_range(range, new, cx);
+    }
+
     fn reindex(&mut self) {
         self.line_starts.clear();
         self.line_starts.push(0);

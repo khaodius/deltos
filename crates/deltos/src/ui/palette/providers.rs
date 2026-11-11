@@ -26,6 +26,8 @@ pub enum Kind {
     Object,
     /// A page of Settings.
     Setting,
+    /// A query saved by name.
+    SavedQuery,
 }
 
 impl Kind {
@@ -37,6 +39,7 @@ impl Kind {
             Kind::Connection => "Connection",
             Kind::Object => "Object",
             Kind::Setting => "Settings",
+            Kind::SavedQuery => "Saved query",
         }
     }
 }
@@ -162,7 +165,14 @@ impl Sources<'_> {
 pub type Provider = fn(&Sources, &mut Vec<PaletteItem>);
 
 /// Every source of items, in the order they list before anything is typed.
-pub const PROVIDERS: &[Provider] = &[actions, panels, connections, objects, settings_pages];
+pub const PROVIDERS: &[Provider] = &[
+    actions,
+    panels,
+    connections,
+    objects,
+    saved_queries,
+    settings_pages,
+];
 
 /// Every item from every provider.
 pub fn collect(sources: &Sources) -> Vec<PaletteItem> {
@@ -443,6 +453,34 @@ fn objects(s: &Sources, out: &mut Vec<PaletteItem>) {
     }
 }
 
+/// The connection a saved query belongs to, by name, or that it is for all of them.
+fn saved_query_detail(connection: Option<&str>, name: impl Fn(&str) -> String) -> String {
+    match connection {
+        Some(id) => name(id),
+        None => "All connections".to_owned(),
+    }
+}
+
+/// Saved queries; running one opens it in a new query tab, as the History panel does.
+fn saved_queries(s: &Sources, out: &mut Vec<PaletteItem>) {
+    let state = s.app_state();
+    for snippet in crate::snippets::all_snippets(s.cx) {
+        let detail = saved_query_detail(snippet.connection.as_deref(), |id| {
+            connection_name(state, id)
+        });
+        let id = format!("snippet:{}", snippet.id);
+        let title = snippet.name.clone();
+        let app = s.state.clone();
+        out.push(
+            PaletteItem::new(id, Kind::SavedQuery, Icon::Code, title, move |_, cx| {
+                crate::snippets::open(&app, &snippet, cx)
+            })
+            .search(format!("saved query {detail}"))
+            .detail(detail),
+        );
+    }
+}
+
 fn settings_pages(s: &Sources, out: &mut Vec<PaletteItem>) {
     for section in Section::ALL {
         let ws = s.workspace.clone();
@@ -518,6 +556,17 @@ mod tests {
         assert_eq!(first_line("   \n"), None);
         let long = "x".repeat(80);
         assert_eq!(first_line(&long).map(|l| l.chars().count()), Some(61));
+    }
+
+    #[test]
+    fn saved_queries_name_their_connection() {
+        let name = |id: &str| format!("name of {id}");
+        assert_eq!(saved_query_detail(Some("prod"), name), "name of prod");
+        assert_eq!(saved_query_detail(None, name), "All connections");
+        assert_eq!(Kind::SavedQuery.label(), "Saved query");
+        assert!(Scope::All.admits(Kind::SavedQuery));
+        assert!(!Scope::Commands.admits(Kind::SavedQuery));
+        assert!(!Scope::Connections.admits(Kind::SavedQuery));
     }
 
     #[test]

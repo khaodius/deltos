@@ -517,6 +517,7 @@ pub const KEYBIND_ACTIONS: &[(&str, &str, &str)] = &[
     ("explain-query", "ctrl-e", "Explain statement"),
     ("format-sql", "ctrl-shift-f", "Format SQL"),
     ("autocomplete", "ctrl-space", "Show completions"),
+    ("save-query", "ctrl-shift-s", "Save query"),
     ("new-query", "ctrl-t", "New query tab"),
     ("close-tab", "ctrl-w", "Close tab"),
     ("next-tab", "ctrl-tab", "Next tab"),
@@ -826,11 +827,13 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), Error> {
 }
 
 /// Where Deltos keeps its files: settings and themes under the config folder, spilled
-/// query results and downloads under the cache folder.
+/// query results and downloads under the cache folder, the query history under the data
+/// folder.
 #[derive(Debug, Clone)]
 pub struct Paths {
     pub config_dir: PathBuf,
     pub cache_dir: PathBuf,
+    pub data_dir: PathBuf,
 }
 
 impl Paths {
@@ -839,6 +842,7 @@ impl Paths {
         Some(Self {
             config_dir: dirs.config_dir().to_owned(),
             cache_dir: dirs.cache_dir().to_owned(),
+            data_dir: dirs.data_dir().to_owned(),
         })
     }
 
@@ -857,6 +861,16 @@ impl Paths {
     /// Where query results larger than memory are spilled.
     pub fn spill_dir(&self) -> PathBuf {
         self.cache_dir.join("spill")
+    }
+
+    /// The statements that ran, one JSON object per line.
+    pub fn history_file(&self) -> PathBuf {
+        self.data_dir.join("history.jsonl")
+    }
+
+    /// Saved queries.
+    pub fn snippets_file(&self) -> PathBuf {
+        self.config_dir.join("snippets.json")
     }
 
     /// Every theme file in the themes folder, by file stem. Unreadable files are skipped

@@ -3,9 +3,11 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod demo;
+mod history_file;
 mod lang;
 mod net;
 mod safety;
+mod snippets;
 mod state;
 mod theme;
 mod ui;
@@ -163,6 +165,7 @@ pub fn rebind_keys(settings: &Settings, cx: &mut App) {
                 ));
                 KeyBinding::new(keys, ui::table::FocusFilter, ctx)
             }
+            "save-query" => KeyBinding::new(keys, ui::query::SaveQuery, Some("QueryPanel")),
             _ => continue,
         };
         bindings.push(binding);
