@@ -11,6 +11,8 @@
 //! - `db.getCollection("odd.name")`, `db["odd.name"]`, `db.getSiblingDB("other")`,
 //!   `db.getCollectionNames()`, `db.runCommand({...})`, `db.adminCommand({...})`
 //! - a bare command document, such as `{"ping": 1}`
+//! - `.explain(verbosity)` after `find`, `aggregate`, `count` or `distinct`, or before them
+//!   as `db.orders.explain().find(...)`
 //!
 //! Values are relaxed JSON: unquoted keys, single quotes, trailing commas, comments,
 //! `ObjectId("...")`, `ISODate("...")`, `new Date(...)`, `NumberLong`, `NumberInt`,
@@ -43,6 +45,14 @@ pub enum Command {
         database: Option<String>,
         collection: String,
         operation: Operation,
+    },
+    /// The plan of a read: `find`, `aggregate`, `count` or `distinct`.
+    Explain {
+        database: Option<String>,
+        collection: String,
+        operation: Operation,
+        /// `queryPlanner`, `executionStats` or `allPlansExecution`.
+        verbosity: String,
     },
 }
 
@@ -342,6 +352,8 @@ impl<'a> Parser<'a> {
         database: Option<String>,
         mut collection: String,
     ) -> Parsed<Command> {
+        // `db.orders.explain("executionStats").find(...)`.
+        let mut explain: Option<(String, usize)> = None;
         loop {
             self.skip_space();
             if !self.eat(b'.') {
@@ -360,12 +372,41 @@ impl<'a> Parser<'a> {
                 continue;
             }
             let args = self.arguments()?;
+            if name == "explain" && explain.is_none() {
+                explain = Some((verbosity(args, at)?, at));
+                continue;
+            }
             let operation = self.operation(&name, args, at)?;
-            return Ok(Command::Collection {
-                database,
-                collection,
-                operation,
-            });
+            if let Some(trailing) = self.trailing_explain()? {
+                explain = Some(trailing);
+            }
+            return match explain {
+                Some((verbosity, at)) => {
+                    if !matches!(
+                        operation,
+                        Operation::Find(_)
+                            | Operation::Aggregate { .. }
+                            | Operation::Count { .. }
+                            | Operation::Distinct { .. }
+                    ) {
+                        return Err(at_error(
+                            at,
+                            "explain() works with find, aggregate, count and distinct",
+                        ));
+                    }
+                    Ok(Command::Explain {
+                        database,
+                        collection,
+                        operation,
+                        verbosity,
+                    })
+                }
+                None => Ok(Command::Collection {
+                    database,
+                    collection,
+                    operation,
+                }),
+            };
         }
     }
 
@@ -464,6 +505,23 @@ impl<'a> Parser<'a> {
         Ok(operation)
     }
 
+    /// `.explain(verbosity)` at the end of a statement.
+    fn trailing_explain(&mut self) -> Parsed<Option<(String, usize)>> {
+        self.skip_space();
+        let start = self.pos;
+        if !self.eat(b'.') {
+            return Ok(None);
+        }
+        self.skip_space();
+        let at = self.pos;
+        if !self.keyword("explain") {
+            self.pos = start;
+            return Ok(None);
+        }
+        let args = self.arguments()?;
+        Ok(Some((verbosity(args, at)?, at)))
+    }
+
     /// `.sort()`, `.limit()` and the other cursor methods after `find`.
     fn modifiers(&mut self, find: &mut Find) -> Parsed<()> {
         loop {
@@ -478,6 +536,11 @@ impl<'a> Parser<'a> {
                 self.pos = start;
                 return Ok(());
             };
+            if name == "explain" {
+                // Read by the caller, as for any other operation.
+                self.pos = start;
+                return Ok(());
+            }
             let mut args = self.arguments()?;
             match name {
                 "sort" => find.sort = take_document(&mut args, 0, at)?,
@@ -810,6 +873,26 @@ impl<'a> Parser<'a> {
         let next = self.peek();
         self.pos = saved;
         next
+    }
+}
+
+/// The verbosity argument of `explain()`: a name, or `true` for every plan.
+fn verbosity(args: Vec<Bson>, at: usize) -> Parsed<String> {
+    match args.into_iter().next() {
+        None | Some(Bson::Boolean(false)) => Ok("queryPlanner".to_string()),
+        Some(Bson::Boolean(true)) => Ok("allPlansExecution".to_string()),
+        Some(Bson::String(v))
+            if matches!(
+                v.as_str(),
+                "queryPlanner" | "executionStats" | "allPlansExecution"
+            ) =>
+        {
+            Ok(v)
+        }
+        Some(_) => Err(at_error(
+            at,
+            "explain() takes queryPlanner, executionStats or allPlansExecution",
+        )),
     }
 }
 
@@ -1232,6 +1315,41 @@ mod tests {
         assert!(parse_date("2024-01-31 12:00:00").is_some());
         assert!(parse_date("2024-01-31T12:00:00.123+02:00").is_some());
         assert!(parse_date("yesterday").is_none());
+    }
+
+    #[test]
+    fn parses_explain_both_ways() {
+        let explained = |input: &str| match parse(input) {
+            Ok(Command::Explain {
+                collection,
+                operation,
+                verbosity,
+                ..
+            }) => (collection, operation, verbosity),
+            other => panic!("{input}: {other:?}"),
+        };
+        let (collection, operation, verbosity) =
+            explained("db.orders.find({a: 1}).sort({b: -1}).limit(5).explain('executionStats')");
+        assert_eq!(collection, "orders");
+        assert_eq!(verbosity, "executionStats");
+        match operation {
+            Operation::Find(find) => {
+                assert_eq!(find.limit, Some(5));
+                assert!(find.sort.is_some());
+            }
+            other => panic!("{other:?}"),
+        }
+        let (_, operation, verbosity) = explained("db.orders.explain().aggregate([{$match: {}}])");
+        assert_eq!(verbosity, "queryPlanner");
+        assert!(matches!(operation, Operation::Aggregate { .. }));
+        let (_, _, verbosity) = explained("db.orders.countDocuments({}).explain(true)");
+        assert_eq!(verbosity, "allPlansExecution");
+        assert!(parse("db.orders.insertOne({}).explain()").is_err());
+        // The query tab adds `.explain()` on a line of its own, past a trailing comment.
+        let (_, _, verbosity) = explained("db.orders.find({}) // all\n.explain('executionStats')");
+        assert_eq!(verbosity, "executionStats");
+        assert!(parse("db.orders.deleteMany({}) // all\n.explain()").is_err());
+        assert!(parse("db.orders.find().explain('loud')").is_err());
     }
 
     #[test]

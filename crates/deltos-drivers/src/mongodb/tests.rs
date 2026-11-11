@@ -241,6 +241,14 @@ async fn runs_shell_statements() {
         ))
         .await;
     assert_eq!(affected, Some(2));
+    let (names, rows, _) = fx
+        .run(&format!(
+            "db.getCollection('{name}').find({{a: 'x'}}).explain('executionStats')"
+        ))
+        .await;
+    assert_eq!(rows.len(), 1);
+    assert!(names.contains(&"queryPlanner".to_string()), "{names:?}");
+    assert!(names.contains(&"executionStats".to_string()), "{names:?}");
     let (_, rows, _) = fx.run("{buildInfo: 1}").await;
     assert_eq!(rows.len(), 1);
     let error = fx

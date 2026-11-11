@@ -645,32 +645,35 @@ pub fn assess_mongo(text: &str) -> Assessment {
     match command {
         Command::ListCollections { .. } => Assessment::read(),
         Command::Run { command, .. } => mongo_command(&command),
-        Command::Collection { operation, .. } => match operation {
-            Operation::Find(_)
-            | Operation::Count { .. }
-            | Operation::EstimatedCount
-            | Operation::Distinct { .. } => Assessment::read(),
-            Operation::Aggregate { pipeline, .. } => {
-                if pipeline.iter().any(writes_output) {
-                    Assessment::new(Risk::Write, "aggregate with $out or $merge")
-                } else {
-                    Assessment::read()
+        // `explain()` with `executionStats` runs the operation, so it is judged the same.
+        Command::Collection { operation, .. } | Command::Explain { operation, .. } => {
+            match operation {
+                Operation::Find(_)
+                | Operation::Count { .. }
+                | Operation::EstimatedCount
+                | Operation::Distinct { .. } => Assessment::read(),
+                Operation::Aggregate { pipeline, .. } => {
+                    if pipeline.iter().any(writes_output) {
+                        Assessment::new(Risk::Write, "aggregate with $out or $merge")
+                    } else {
+                        Assessment::read()
+                    }
                 }
+                Operation::InsertOne(_) | Operation::InsertMany(_) => {
+                    Assessment::new(Risk::Write, "insert")
+                }
+                Operation::Update { filter, many, .. } if many && filter.is_empty() => {
+                    Assessment::new(Risk::Unbounded, "updateMany with an empty filter")
+                }
+                Operation::Update { .. } => Assessment::new(Risk::Write, "update"),
+                Operation::Replace { .. } => Assessment::new(Risk::Write, "replaceOne"),
+                Operation::Delete { filter, many } if many && filter.is_empty() => {
+                    Assessment::new(Risk::Unbounded, "deleteMany with an empty filter")
+                }
+                Operation::Delete { .. } => Assessment::new(Risk::Write, "delete"),
+                Operation::Drop => Assessment::new(Risk::Remove, "drop"),
             }
-            Operation::InsertOne(_) | Operation::InsertMany(_) => {
-                Assessment::new(Risk::Write, "insert")
-            }
-            Operation::Update { filter, many, .. } if many && filter.is_empty() => {
-                Assessment::new(Risk::Unbounded, "updateMany with an empty filter")
-            }
-            Operation::Update { .. } => Assessment::new(Risk::Write, "update"),
-            Operation::Replace { .. } => Assessment::new(Risk::Write, "replaceOne"),
-            Operation::Delete { filter, many } if many && filter.is_empty() => {
-                Assessment::new(Risk::Unbounded, "deleteMany with an empty filter")
-            }
-            Operation::Delete { .. } => Assessment::new(Risk::Write, "delete"),
-            Operation::Drop => Assessment::new(Risk::Remove, "drop"),
-        },
+        }
     }
 }
 
@@ -1163,6 +1166,14 @@ mod tests {
         );
         assert_eq!(
             m("db.runCommand({explain: {delete: 'o', deletes: [{q: {}, limit: 0}]}})"),
+            Risk::Write
+        );
+        assert_eq!(
+            m("db.orders.find({}).explain('executionStats')"),
+            Risk::Read
+        );
+        assert_eq!(
+            m("db.orders.explain('executionStats').aggregate([{$out: 'copy'}])"),
             Risk::Write
         );
         assert_eq!(

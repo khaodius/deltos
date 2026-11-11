@@ -3,6 +3,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod demo;
+mod lang;
 mod net;
 mod safety;
 mod state;
@@ -149,6 +150,10 @@ pub fn rebind_keys(settings: &Settings, cx: &mut App) {
                 bindings.push(KeyBinding::new(keys, ui::grid::PreviousCell, editor));
                 KeyBinding::new(keys, ui::grid::PreviousCell, Some("Grid"))
             }
+            "run-all" => KeyBinding::new(keys, ui::query::RunAll, Some("QueryPanel")),
+            "explain-query" => KeyBinding::new(keys, ui::query::ExplainQuery, Some("QueryPanel")),
+            "format-sql" => KeyBinding::new(keys, ui::query::FormatSql, Some("QueryPanel")),
+            "autocomplete" => KeyBinding::new(keys, ui::editor::ShowCompletions, Some("Editor")),
             _ => continue,
         };
         bindings.push(binding);

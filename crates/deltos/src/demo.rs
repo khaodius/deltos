@@ -902,6 +902,26 @@ impl Connection for DemoConnection {
         options: &'a ExecuteOptions,
     ) -> BoxFuture<'a, Result<RowStream>> {
         Box::pin(async move {
+            let statement = past_comments(statement);
+            // A measured plan, as the query tab asks PostgreSQL for one.
+            if let Some(inner) = crate::lang::plan::measured_explain(statement) {
+                let plan = explain(inner)?
+                    .ok_or_else(|| Error::Query("syntax error at or near \"DO\"".into()))?;
+                let mut result = RowStream::affected(None);
+                result.messages = vec![crate::lang::plan::plan_notice(&plan)];
+                return Ok(result);
+            }
+            if let Some(plan) = explain(statement)? {
+                let columns: Arc<[Column]> =
+                    vec![col("QUERY PLAN", "json", ValueKind::Json, false)].into();
+                let row: Row = vec![Value::Json(plan.into())].into();
+                return Ok(RowStream {
+                    columns,
+                    batches: Box::pin(futures::stream::iter([Ok(RowBatch { rows: vec![row] })])),
+                    affected: None,
+                    messages: Vec::new(),
+                });
+            }
             let query = parse_select(statement)?;
             let table = TABLES
                 .into_iter()
@@ -946,10 +966,91 @@ impl Connection for DemoConnection {
     }
 }
 
+/// `EXPLAIN [(options)] <select>`: a plan in PostgreSQL's JSON form for what the demo
+/// runs, with made-up but steady timings when `ANALYZE` is among the options.
+fn explain(statement: &str) -> Result<Option<String>> {
+    let text = statement.trim();
+    let Some(rest) = text
+        .get(..7)
+        .filter(|w| w.eq_ignore_ascii_case("explain"))
+        .map(|_| text[7..].trim_start())
+    else {
+        return Ok(None);
+    };
+    let (options, inner) = match rest.strip_prefix('(') {
+        Some(r) => match r.find(')') {
+            Some(end) => (r[..end].to_ascii_lowercase(), r[end + 1..].trim_start()),
+            None => return Err(Error::Query("syntax error in EXPLAIN options".into())),
+        },
+        None => (String::new(), rest),
+    };
+    let analyze = options.contains("analyze");
+    let query = parse_select(inner)?;
+    let table = TABLES
+        .into_iter()
+        .find(|t| {
+            t.name() == query.table || format!("{}.{}", t.namespace(), t.name()) == query.table
+        })
+        .ok_or_else(|| Error::Query(format!("relation \"{}\" does not exist", query.table)))?;
+    let rows = table.rows() as f64;
+    let scan_cost = (rows / 100.0).ceil() + rows * 0.01;
+    let actual = |time: f64, rows: f64| {
+        if analyze {
+            format!(
+                r#", "Actual Startup Time": 0.010, "Actual Total Time": {time:.3}, "Actual Rows": {rows}, "Actual Loops": 1"#
+            )
+        } else {
+            String::new()
+        }
+    };
+    let scan = |limit: Option<f64>| {
+        let produced = limit.unwrap_or(rows).min(rows);
+        format!(
+            r#"{{"Node Type": "Seq Scan", "Parent Relationship": "Outer", "Relation Name": "{name}", "Schema": "{ns}", "Alias": "{name}", "Startup Cost": 0.00, "Total Cost": {scan_cost:.2}, "Plan Rows": {rows}, "Plan Width": 64{actual}}}"#,
+            name = table.name(),
+            ns = table.namespace(),
+            actual = actual(produced * 0.00012, produced),
+        )
+    };
+    let plan = if query.count {
+        format!(
+            r#"{{"Node Type": "Aggregate", "Strategy": "Plain", "Startup Cost": {c:.2}, "Total Cost": {c:.2}, "Plan Rows": 1, "Plan Width": 8{a}, "Plans": [{scan}]}}"#,
+            c = scan_cost + rows * 0.0025,
+            a = actual(rows * 0.00015, 1.0),
+            scan = scan(None),
+        )
+    } else if let Some(limit) = query.limit {
+        let limit = limit as f64;
+        format!(
+            r#"{{"Node Type": "Limit", "Startup Cost": 0.00, "Total Cost": {c:.2}, "Plan Rows": {limit}, "Plan Width": 64{a}, "Plans": [{scan}]}}"#,
+            c = scan_cost * (limit / rows).min(1.0),
+            a = actual(limit.min(rows) * 0.00013, limit.min(rows)),
+            scan = scan(Some(limit)),
+        )
+    } else {
+        scan(None)
+    };
+    let timing = if analyze {
+        r#", "Planning Time": 0.084, "Execution Time": 0.912"#
+    } else {
+        ""
+    };
+    Ok(Some(format!(r#"[{{"Plan": {plan}{timing}}}]"#)))
+}
+
 struct Select {
     table: String,
     count: bool,
     limit: Option<u64>,
+}
+
+/// The statement after the `--` comment lines above it.
+fn past_comments(statement: &str) -> &str {
+    let mut rest = statement.trim_start();
+    while rest.starts_with("--") {
+        rest = rest.split_once('\n').map_or("", |(_, r)| r).trim_start();
+    }
+    rest
 }
 
 /// Understands `SELECT * FROM t [LIMIT n]` and `SELECT COUNT(*) FROM t`, which is what
@@ -1000,6 +1101,39 @@ mod tests {
             name: name.into(),
             kind: ObjectKind::Table,
         }
+    }
+
+    #[test]
+    fn answers_a_measured_plan_as_postgres_does() {
+        use crate::lang::plan::{self, PlanSource};
+        let sql =
+            plan::explain_statement(PlanSource::Postgres, "select * from orders limit 10", true)
+                .unwrap();
+        let demo = DemoConnection::new();
+        let stream =
+            futures::executor::block_on(demo.execute(&sql, &ExecuteOptions::default())).unwrap();
+        assert!(stream.columns.is_empty());
+        let rows = plan::measured_plan(&stream.messages).unwrap();
+        assert!(
+            plan::parse(PlanSource::Postgres, &[], &rows)
+                .unwrap()
+                .analyzed
+        );
+    }
+
+    #[test]
+    fn explains_in_postgres_json() {
+        let plan = explain("EXPLAIN (ANALYZE, FORMAT JSON) SELECT * FROM orders LIMIT 10")
+            .unwrap()
+            .unwrap();
+        let rows = vec![vec![Value::Json(plan.into())]];
+        let plan =
+            crate::lang::plan::parse(crate::lang::plan::PlanSource::Postgres, &[], &rows).unwrap();
+        assert!(plan.analyzed);
+        let titles: Vec<&str> = plan.lines().iter().map(|l| l.node.title.as_str()).collect();
+        assert_eq!(titles, vec!["Limit", "Seq Scan on orders"]);
+        assert!(explain("select 1").unwrap().is_none());
+        assert!(explain("explain select * from nowhere").is_err());
     }
 
     #[test]

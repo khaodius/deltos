@@ -1321,6 +1321,20 @@ impl SettingsPanel {
                 pick(|s| s.editor.highlight = !s.editor.highlight),
                 t,
             ))
+            .child(toggle_row(
+                "Suggest while typing",
+                Some("The Show completions shortcut works either way"),
+                ("autocomplete", e.autocomplete),
+                pick(|s| s.editor.autocomplete = !s.editor.autocomplete),
+                t,
+            ))
+            .child(toggle_row(
+                "Uppercase keywords when formatting",
+                None,
+                ("format-uppercase", e.format_uppercase),
+                pick(|s| s.editor.format_uppercase = !s.editor.format_uppercase),
+                t,
+            ))
     }
 
     fn updates(&mut self, t: &Theme, cx: &mut Context<Self>) -> Div {

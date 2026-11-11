@@ -1,6 +1,7 @@
 //! Views, and the small components they share.
 
 pub mod color_picker;
+pub mod completion;
 pub mod connections;
 pub mod dock;
 pub mod edit;
@@ -14,6 +15,7 @@ pub mod motion;
 pub mod palette;
 pub mod panel_window;
 pub mod pending;
+pub mod plan_view;
 pub mod query;
 pub mod screen_color;
 pub mod settings;

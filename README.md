@@ -79,6 +79,14 @@ with a key, the ssh-agent or a password. Deltos opens the tunnel on a free local
 the host key against `~/.ssh/known_hosts`, reconnects when the link drops and closes it on
 disconnect. No OpenSSH client is needed, and a test says whether SSH or the database failed.
 
+## Query editor
+
+The editor suggests tables, columns, keywords and functions as you type, aliases included.
+Ctrl+Enter runs the statement at the cursor or the selection, and Ctrl+Shift+Enter runs them
+all, with a result tab for each statement that returns rows and a summary of the rest. Pin a
+tab to keep it through the next run. Ctrl+E draws the query plan as a tree with the costly
+step marked, and Ctrl+Shift+F formats the query without touching its strings or comments.
+
 ## Safety
 
 Tag a connection Local, Development, Testing, Staging or Production and its color follows it:
@@ -163,7 +171,7 @@ publisher the first time.
 
 | Action                      | Keys               |
 | --------------------------- | ------------------ |
-| Run the statement           | `Ctrl+Enter`       |
+| Run the statement at the cursor, or the selection | `Ctrl+Enter` |
 | New query tab               | `Ctrl+T`           |
 | Close tab                   | `Ctrl+W`           |
 | Next / previous tab         | `Ctrl+Tab` / `Ctrl+Shift+Tab` |
@@ -185,6 +193,10 @@ publisher the first time.
 | Copy / with headers / paste cells | `Ctrl+C` / `Ctrl+Shift+C` / `Ctrl+V` |
 | First or last row / column  | `Ctrl+↑` `Ctrl+↓` / `Ctrl+←` `Ctrl+→` |
 | First / last cell           | `Ctrl+Home` / `Ctrl+End` |
+| Run every statement         | `Ctrl+Shift+Enter` |
+| Show suggestions            | `Ctrl+Space`       |
+| Explain the statement       | `Ctrl+E`           |
+| Format SQL                  | `Ctrl+Shift+F`     |
 
 Every binding can be changed in Settings → Keyboard.
 
