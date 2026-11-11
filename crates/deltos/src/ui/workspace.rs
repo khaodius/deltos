@@ -999,7 +999,7 @@ impl Workspace {
             self.changed(cx);
             return;
         }
-        self.open_window(id, keep_moving, cx);
+        self.open_window(id, keep_moving.then_some(grab), cx);
         self.generation += 1;
         self.window_move = Some(WindowMove {
             window: id,
@@ -1064,8 +1064,13 @@ impl Workspace {
     /// window as it opens, and drawing reads this workspace, so the window opens just
     /// after the current update. If it cannot open, its panels go back to the main
     /// window. With `keep_moving`, the press that tore the panel off goes on
-    /// moving the new window.
-    fn open_window(&mut self, id: WindowId, keep_moving: bool, cx: &mut Context<Self>) {
+    /// moving the new window, with the pointer at that point of it.
+    fn open_window(
+        &mut self,
+        id: WindowId,
+        keep_moving: Option<Point<Pixels>>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(saved) = self.layout.dock.window(id).map(|w| w.bounds) else {
             return;
         };
@@ -1104,19 +1109,29 @@ impl Workspace {
                 Ok(handle) => {
                     tracing::debug!("panel window {} opened", id.0);
                     this.floating.insert(id, handle);
-                    if keep_moving {
+                    if let Some(grab) = keep_moving {
                         // Once the window is shown, the press still down moves it, so
                         // tearing off and placing is one motion: the window stays under
                         // the pointer as it leaves.
                         cx.spawn(async move |_, cx| {
-                            cx.background_executor()
-                                .timer(Duration::from_millis(16))
-                                .await;
-                            handle
-                                .update(cx, |_, window, _| {
-                                    crate::ui::motion::follow_pointer(window)
-                                })
-                                .ok();
+                            // The window may take a few frames to be mapped and listed.
+                            for attempt in 0..12 {
+                                cx.background_executor()
+                                    .timer(Duration::from_millis(16))
+                                    .await;
+                                let started = handle
+                                    .update(cx, |_, window, _| {
+                                        crate::ui::motion::follow_pointer(
+                                            window,
+                                            grab,
+                                            attempt == 11,
+                                        )
+                                    })
+                                    .unwrap_or(true);
+                                if started {
+                                    break;
+                                }
+                            }
                         })
                         .detach();
                     }
@@ -1142,7 +1157,7 @@ impl Workspace {
         let ids: Vec<WindowId> = self.layout.dock.floating.iter().map(|f| f.id).collect();
         for id in ids {
             if !self.floating.contains_key(&id) {
-                self.open_window(id, false, cx);
+                self.open_window(id, None, cx);
             }
         }
     }

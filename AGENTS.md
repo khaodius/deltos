@@ -90,8 +90,8 @@ All are in `.github/workflows/`.
 
 | Workflow | Runs on | Does |
 | --- | --- | --- |
-| `ci.yml` | push to `main`, every PR, manual | Linux and Windows: fmt, clippy `-D warnings`, tests. A separate job checks Rust 1.88. A `drivers` job runs `cargo test -p deltos-drivers` against PostgreSQL 16, MySQL 8.4, MariaDB 11 and MongoDB 7 service containers. Then it builds release binaries and uploads them as artifacts. Pull requests run only the Linux check and the driver tests, to save Actions minutes; Windows, Rust 1.88 and the builds run on `main` |
-| `release.yml` | push to `main` that touches `Cargo.toml` or the workflow, a `v*` tag, manual | Publishes a release when the workspace version has no tag yet (details below) |
+| `ci.yml` | push to `main`, every PR, manual | Linux and Windows: fmt, clippy `-D warnings`, tests. A separate job checks Rust 1.88. A `drivers` job runs `cargo test -p deltos-drivers` against PostgreSQL 16, MySQL 8.4, MariaDB 11 and MongoDB 7 service containers. Then it builds release binaries and uploads them as artifacts. Pull requests run only the Linux check, plus the driver tests when `deltos-data`, `deltos-drivers` or `Cargo.lock` changed; Windows, Rust 1.88 and the builds run on `main`. Changes to Markdown and `docs/` alone run nothing. Compiled dependencies and apt packages are cached, and only `main` saves caches |
+| `release.yml` | push to `main` that touches `Cargo.toml` or the workflow, a `v*` tag, manual | Publishes a release when the workspace version has no tag yet (details below). Restores the dependency cache CI's release build saved on `main`, so it compiles only Deltos' own crates |
 | `install-scripts.yml` | changes to `scripts/` or the AppImage script | ShellCheck and PSScriptAnalyzer, then installs the latest release on Linux (user install, `.deb`, `.rpm` on Fedora) and Windows |
 
 CI cancels an older run on the same branch when a newer push arrives. A cancelled run shows

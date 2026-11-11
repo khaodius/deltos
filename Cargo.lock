@@ -1474,7 +1474,7 @@ checksum = "ac6b926516df9c60bfa16e107b21086399f8285a44ca9711344b9e553c5146e2"
 
 [[package]]
 name = "deltos"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "deltos-data",
@@ -1495,11 +1495,12 @@ dependencies = [
  "unicode-segmentation",
  "windows 0.61.3",
  "winresource",
+ "x11rb",
 ]
 
 [[package]]
 name = "deltos-data"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "futures",
  "serde",
@@ -1508,7 +1509,7 @@ dependencies = [
 
 [[package]]
 name = "deltos-dock"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -1516,7 +1517,7 @@ dependencies = [
 
 [[package]]
 name = "deltos-drivers"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bson",
  "bytes",
@@ -1538,7 +1539,7 @@ dependencies = [
 
 [[package]]
 name = "deltos-grid"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "deltos-data",
  "futures",
@@ -1547,7 +1548,7 @@ dependencies = [
 
 [[package]]
 name = "deltos-settings"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "deltos-data",
  "deltos-dock",
@@ -1561,7 +1562,7 @@ dependencies = [
 
 [[package]]
 name = "deltos-updater"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek",

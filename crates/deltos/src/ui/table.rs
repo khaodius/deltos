@@ -4,8 +4,12 @@
 
 use std::sync::Arc;
 
+use std::rc::Rc;
+use std::time::Duration;
+
 use deltos_data::{
-    Filter, FilterOp, ObjectInfo, ObjectKind, ObjectRef, Sort, SortDirection, Value,
+    DriverKind, Filter, FilterOp, ObjectInfo, ObjectKind, ObjectRef, RowEdit, Sort, SortDirection,
+    Value,
 };
 use deltos_dock::PanelId;
 use deltos_grid::{
@@ -19,7 +23,8 @@ use gpui::{
 use crate::net::Net;
 use crate::state::{AppState, Inspected, StateEvent};
 use crate::theme::{Theme, theme};
-use crate::ui::grid::{GridEvent, GridView};
+use crate::ui::edit;
+use crate::ui::grid::{CellInput, GridEvent, GridView, MenuTarget};
 use crate::ui::icons::{Icon, icon};
 use crate::ui::text_input::{InputEvent, TextInput};
 use crate::ui::{
@@ -74,6 +79,13 @@ pub struct TablePanel {
     filters: Vec<FilterRow>,
     filters_open: bool,
     menu: Option<OpenMenu>,
+    /// The database behind the table, once connected.
+    driver: Option<DriverKind>,
+    /// The last edit's outcome, shown in the status bar: the text and whether it failed.
+    notice: Option<(SharedString, bool)>,
+    notice_generation: u64,
+    /// Rows waiting for the person to confirm they should be deleted.
+    confirm_delete: Option<Vec<u64>>,
     _subs: Vec<Subscription>,
 }
 
@@ -87,26 +99,11 @@ impl TablePanel {
     ) -> Self {
         let grid = cx.new(GridView::new);
         let subs = vec![
-            cx.subscribe(&grid, |this, grid, event, cx| match event {
+            cx.subscribe(&grid, |this, _, event, cx| match event {
                 GridEvent::Sort(c) => this.cycle_sort(*c, cx),
-                GridEvent::Selected(row) => {
-                    let g = grid.read(cx);
-                    let columns = g.columns().clone();
-                    if let Some(values) = g.row_values(*row) {
-                        let title = this.object.name.clone();
-                        let row = *row;
-                        this.state.update(cx, |s, cx| {
-                            s.inspect(
-                                Some(Inspected {
-                                    title,
-                                    row,
-                                    columns,
-                                    values,
-                                }),
-                                cx,
-                            )
-                        });
-                    }
+                GridEvent::Selected(row) => this.inspect_row(*row, cx),
+                GridEvent::Edit { row, col, input } => {
+                    this.save_cell(*row, *col, input.clone(), cx)
                 }
             }),
             cx.subscribe(&state, |this, _, event, cx| {
@@ -130,8 +127,20 @@ impl TablePanel {
             filters: Vec::new(),
             filters_open: false,
             menu: None,
+            driver: None,
+            notice: None,
+            notice_generation: 0,
+            confirm_delete: None,
             _subs: subs,
         };
+        let weak = cx.entity().downgrade();
+        this.grid.update(cx, |g, _| {
+            g.set_menu_provider(Rc::new(move |target, grid, cx| {
+                weak.upgrade()
+                    .map(|t| t.read(cx).menu_items(target, grid, &t, cx))
+                    .unwrap_or_default()
+            }))
+        });
         this.attach(cx);
         this
     }
@@ -165,6 +174,10 @@ impl TablePanel {
             return;
         };
         let data = self.state.read(cx).settings.data.clone();
+        self.driver = Some(conn.kind());
+        let editable = conn.capabilities().edit_rows
+            && matches!(self.object.kind, ObjectKind::Table | ObjectKind::Collection);
+        self.grid.update(cx, |g, _| g.editable = editable);
         let loader = Arc::new(BrowseLoader::new(
             conn.clone(),
             self.object.clone(),
@@ -268,6 +281,450 @@ impl TablePanel {
             g.refreshed(cx);
         });
         cx.notify();
+    }
+
+    /// Shows `row` in the inspector.
+    fn inspect_row(&mut self, row: u64, cx: &mut Context<Self>) {
+        let g = self.grid.read(cx);
+        let columns = g.columns().clone();
+        if let Some(values) = g.row_values(row) {
+            let title = self.object.name.clone();
+            self.state.update(cx, |s, cx| {
+                s.inspect(
+                    Some(Inspected {
+                        title,
+                        row,
+                        columns,
+                        values,
+                    }),
+                    cx,
+                )
+            });
+        }
+    }
+
+    /// Shows a message in the status bar for a few seconds, an error for longer.
+    fn notify_user(&mut self, text: impl Into<SharedString>, error: bool, cx: &mut Context<Self>) {
+        self.notice = Some((text.into(), error));
+        self.notice_generation += 1;
+        let generation = self.notice_generation;
+        {
+            let wait = Duration::from_secs(if error { 10 } else { 4 });
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(wait).await;
+                this.update(cx, |this, cx| {
+                    if this.notice_generation == generation {
+                        this.notice = None;
+                        cx.notify();
+                    }
+                })
+                .ok();
+            })
+            .detach();
+        }
+        cx.notify();
+    }
+
+    fn connection(&self, cx: &App) -> Option<Arc<dyn deltos_data::Connection>> {
+        self.state
+            .read(cx)
+            .session(&self.connection)
+            .map(|s| s.conn.clone())
+    }
+
+    /// Runs `edits` and then `done` with the outcome, back on the UI thread.
+    fn apply(
+        &mut self,
+        edits: Vec<RowEdit>,
+        cx: &mut Context<Self>,
+        done: impl FnOnce(&mut Self, Result<u64, String>, &mut Context<Self>) + 'static,
+    ) {
+        let Some(conn) = self.connection(cx) else {
+            self.notify_user("Not connected", true, cx);
+            return;
+        };
+        let object = self.object.clone();
+        let job = cx.global::<Net>().run(async move {
+            conn.apply_edits(&object, &edits)
+                .await
+                .map_err(|e| e.to_string())
+        });
+        cx.spawn(async move |this, cx| {
+            let result = job.await.unwrap_or_else(|| Err("cancelled".into()));
+            this.update(cx, |this, cx| done(this, result, cx)).ok();
+        })
+        .detach();
+    }
+
+    /// Saves one edited cell. The grid shows the new value at once and goes back to the
+    /// old one if the database refuses it.
+    fn save_cell(&mut self, row: u64, col: usize, input: CellInput, cx: &mut Context<Self>) {
+        let grid = self.grid.read(cx);
+        let columns = grid.columns().clone();
+        let (Some(column), Some(values)) = (columns.get(col), grid.row_values(row)) else {
+            return;
+        };
+        let Some(key) = edit::key_of(&columns, &values) else {
+            self.notify_user(
+                "This table has no primary key, so its rows can't be edited here",
+                true,
+                cx,
+            );
+            return;
+        };
+        let value = match edit::parse_input(column, &input) {
+            Ok(v) => v,
+            Err(e) => {
+                self.notify_user(e, true, cx);
+                return;
+            }
+        };
+        let old = values.get(col).cloned().unwrap_or_default();
+        if old == value {
+            return;
+        }
+        let name = column.name.clone();
+        self.grid
+            .update(cx, |g, cx| g.set_value(row, col, value.clone(), cx));
+        self.notify_user("Saving…", false, cx);
+        let edits = vec![RowEdit::Update {
+            key,
+            changes: vec![(name.clone(), value)],
+        }];
+        self.apply(edits, cx, move |this, result, cx| match result {
+            Ok(_) => {
+                this.notify_user(format!("Saved {name}"), false, cx);
+                this.inspect_row(row, cx);
+            }
+            Err(e) => {
+                this.grid.update(cx, |g, cx| g.set_value(row, col, old, cx));
+                this.notify_user(format!("Not saved: {e}"), true, cx);
+            }
+        });
+    }
+
+    /// The loaded rows among `rows`, with their keys.
+    fn keys_of(&self, rows: &[u64], cx: &App) -> Option<Vec<Vec<(String, Value)>>> {
+        let grid = self.grid.read(cx);
+        let columns = grid.columns().clone();
+        rows.iter()
+            .map(|r| grid.row_values(*r).and_then(|v| edit::key_of(&columns, &v)))
+            .collect()
+    }
+
+    fn delete_rows(&mut self, rows: Vec<u64>, cx: &mut Context<Self>) {
+        self.confirm_delete = None;
+        let Some(keys) = self.keys_of(&rows, cx) else {
+            self.notify_user(
+                "Only loaded rows of a table with a key can be deleted",
+                true,
+                cx,
+            );
+            return;
+        };
+        let edits = keys
+            .into_iter()
+            .map(|key| RowEdit::Delete { key })
+            .collect();
+        self.apply(edits, cx, |this, result, cx| match result {
+            Ok(n) => {
+                this.notify_user(
+                    format!(
+                        "Deleted {} {}",
+                        thousands(n),
+                        if n == 1 { "row" } else { "rows" }
+                    ),
+                    false,
+                    cx,
+                );
+                this.requery(cx);
+            }
+            Err(e) => this.notify_user(format!("Not deleted: {e}"), true, cx),
+        });
+    }
+
+    /// Inserts copies of `rows` without their key, so the database gives them new ones.
+    fn duplicate_rows(&mut self, rows: Vec<u64>, cx: &mut Context<Self>) {
+        let grid = self.grid.read(cx);
+        let columns = grid.columns().clone();
+        let mut edits = Vec::new();
+        for row in rows {
+            let Some(values) = grid.row_values(row) else {
+                continue;
+            };
+            let values = columns
+                .iter()
+                .zip(values)
+                .filter(|(c, _)| c.primary_key.is_none())
+                .map(|(c, v)| (c.name.clone(), v))
+                .collect();
+            edits.push(RowEdit::Insert { values });
+        }
+        if edits.is_empty() {
+            return;
+        }
+        self.apply(edits, cx, |this, result, cx| match result {
+            Ok(n) => {
+                this.notify_user(
+                    format!(
+                        "Added {} {}",
+                        thousands(n),
+                        if n == 1 { "row" } else { "rows" }
+                    ),
+                    false,
+                    cx,
+                );
+                this.requery(cx);
+            }
+            Err(e) => this.notify_user(format!("Not added: {e}"), true, cx),
+        });
+    }
+
+    /// Adds a filter on `column` and runs it.
+    fn filter_by(&mut self, column: usize, op: FilterOp, text: String, cx: &mut Context<Self>) {
+        self.add_filter(cx);
+        if let Some(f) = self.filters.last_mut() {
+            f.column = column;
+            f.op = op;
+            f.value.update(cx, |i, cx| i.set_text(text, cx));
+        }
+        self.requery(cx);
+    }
+
+    fn sort_by(&mut self, column: usize, direction: Option<SortDirection>, cx: &mut Context<Self>) {
+        let Some(name) = self
+            .grid
+            .read(cx)
+            .columns()
+            .get(column)
+            .map(|c| c.name.clone())
+        else {
+            return;
+        };
+        self.sort = direction
+            .map(|direction| {
+                vec![Sort {
+                    column: name,
+                    direction,
+                }]
+            })
+            .unwrap_or_default();
+        self.requery(cx);
+    }
+
+    /// The table's items for the grid's right-click menu.
+    fn menu_items(
+        &self,
+        target: MenuTarget,
+        grid: &GridView,
+        this: &Entity<Self>,
+        _cx: &App,
+    ) -> Vec<crate::ui::MenuItem> {
+        use crate::ui::MenuItem;
+        let weak = this.downgrade();
+        let run = |f: Box<dyn Fn(&mut Self, &mut Context<Self>)>| {
+            let w = weak.clone();
+            move |_: &mut Window, cx: &mut App| {
+                w.update(cx, |t, cx| f(t, cx)).ok();
+            }
+        };
+        let columns = grid.columns().clone();
+        let mut items = Vec::new();
+        let col = match target {
+            MenuTarget::Cell(_, c) | MenuTarget::Header(c) => c,
+        };
+        let Some(column) = columns.get(col) else {
+            return items;
+        };
+        let name = column.name.clone();
+        let short = |s: &str| {
+            let mut out: String = s.chars().take(24).collect();
+            if s.chars().count() > 24 {
+                out.push('…');
+            }
+            out
+        };
+        match target {
+            MenuTarget::Cell(row, _) => {
+                let value = grid.value(row, col);
+                match &value {
+                    Some(Value::Null) => {
+                        items.push(MenuItem::new(
+                            format!("Show rows where {name} is NULL"),
+                            run(Box::new(move |t, cx| {
+                                t.filter_by(col, FilterOp::IsNull, String::new(), cx)
+                            })),
+                        ));
+                        items.push(MenuItem::new(
+                            format!("Show rows where {name} is not NULL"),
+                            run(Box::new(move |t, cx| {
+                                t.filter_by(col, FilterOp::IsNotNull, String::new(), cx)
+                            })),
+                        ));
+                    }
+                    Some(v) => {
+                        let text = v.to_string();
+                        let shown = short(&text);
+                        let (a, b) = (text.clone(), text);
+                        items.push(MenuItem::new(
+                            format!("Show rows where {name} = {shown}"),
+                            run(Box::new(move |t, cx| {
+                                t.filter_by(col, FilterOp::Eq, a.clone(), cx)
+                            })),
+                        ));
+                        items.push(MenuItem::new(
+                            format!("Hide rows where {name} = {shown}"),
+                            run(Box::new(move |t, cx| {
+                                t.filter_by(col, FilterOp::NotEq, b.clone(), cx)
+                            })),
+                        ));
+                    }
+                    None => {}
+                }
+                if !self.filters.is_empty() {
+                    items.push(MenuItem::new(
+                        "Clear filters",
+                        run(Box::new(|t, cx| {
+                            t.filters.clear();
+                            t.filters_open = false;
+                            t.requery(cx);
+                        })),
+                    ));
+                }
+                items.push(MenuItem::separator());
+                items.push(MenuItem::new(
+                    format!("Sort by {name}, ascending"),
+                    run(Box::new(move |t, cx| {
+                        t.sort_by(col, Some(SortDirection::Ascending), cx)
+                    })),
+                ));
+                items.push(MenuItem::new(
+                    format!("Sort by {name}, descending"),
+                    run(Box::new(move |t, cx| {
+                        t.sort_by(col, Some(SortDirection::Descending), cx)
+                    })),
+                ));
+                let rows: Vec<u64> = grid
+                    .selected_ranges()
+                    .map(|(r, _)| r.take(10_000).collect())
+                    .unwrap_or_else(|| vec![row]);
+                if let Some(kind) = self.driver.filter(|k| edit::speaks_sql(*k)) {
+                    items.push(MenuItem::separator());
+                    let object = self.object.clone();
+                    let names: Vec<String> = columns.iter().map(|c| c.name.clone()).collect();
+                    let values: Vec<Vec<Value>> =
+                        rows.iter().filter_map(|r| grid.row_values(*r)).collect();
+                    let n = values.len();
+                    items.push(
+                        MenuItem::new(
+                            if n == 1 {
+                                "Copy row as INSERT".to_owned()
+                            } else {
+                                format!("Copy {n} rows as INSERT")
+                            },
+                            move |_, cx| {
+                                let names: Vec<&str> = names.iter().map(String::as_str).collect();
+                                let sql = edit::insert_statements(kind, &object, &names, &values);
+                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(sql));
+                            },
+                        )
+                        .enabled(n > 0),
+                    );
+                    if let Some(key) = grid
+                        .row_values(row)
+                        .and_then(|v| edit::key_of(&columns, &v))
+                    {
+                        items.push(MenuItem::new("Copy row's WHERE clause", move |_, cx| {
+                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                edit::where_clause(kind, &key),
+                            ))
+                        }));
+                    }
+                }
+                if grid.editable {
+                    items.push(MenuItem::separator());
+                    let n = rows.len();
+                    let plural = |n: usize| if n == 1 { "row" } else { "rows" };
+                    let dup = rows.clone();
+                    items.push(MenuItem::new(
+                        format!(
+                            "Duplicate {}",
+                            if n == 1 {
+                                "row".into()
+                            } else {
+                                format!("{n} rows")
+                            }
+                        ),
+                        run(Box::new(move |t, cx| t.duplicate_rows(dup.clone(), cx))),
+                    ));
+                    let del = rows;
+                    items.push(
+                        MenuItem::new(
+                            format!("Delete {} {}…", thousands(n as u64), plural(n)),
+                            run(Box::new(move |t, cx| {
+                                t.confirm_delete = Some(del.clone());
+                                cx.notify();
+                            })),
+                        )
+                        .danger(),
+                    );
+                }
+                items.push(MenuItem::separator());
+                items.push(
+                    MenuItem::new("Reload", run(Box::new(|t, cx| t.refresh(cx)))).detail("Ctrl+R"),
+                );
+            }
+            MenuTarget::Header(_) => {
+                let current = self
+                    .sort
+                    .first()
+                    .filter(|s| s.column == name)
+                    .map(|s| s.direction);
+                items.push(
+                    MenuItem::new(
+                        "Sort ascending",
+                        run(Box::new(move |t, cx| {
+                            t.sort_by(col, Some(SortDirection::Ascending), cx)
+                        })),
+                    )
+                    .checked(current == Some(SortDirection::Ascending)),
+                );
+                items.push(
+                    MenuItem::new(
+                        "Sort descending",
+                        run(Box::new(move |t, cx| {
+                            t.sort_by(col, Some(SortDirection::Descending), cx)
+                        })),
+                    )
+                    .checked(current == Some(SortDirection::Descending)),
+                );
+                items.push(
+                    MenuItem::new(
+                        "Don't sort",
+                        run(Box::new(move |t, cx| t.sort_by(col, None, cx))),
+                    )
+                    .enabled(!self.sort.is_empty()),
+                );
+                items.push(MenuItem::separator());
+                items.push(MenuItem::new(
+                    format!("Filter by {name}…"),
+                    run(Box::new(move |t, cx| {
+                        t.add_filter(cx);
+                        if let Some(f) = t.filters.last_mut() {
+                            f.column = col;
+                        }
+                        cx.notify();
+                    })),
+                ));
+                items.push(MenuItem::new(
+                    format!("Show rows where {name} is NULL"),
+                    run(Box::new(move |t, cx| {
+                        t.filter_by(col, FilterOp::IsNull, String::new(), cx)
+                    })),
+                ));
+            }
+        }
+        items
     }
 
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
@@ -561,6 +1018,17 @@ impl TablePanel {
                     })),
             )
             .child(div().flex_1())
+            .when_some(self.notice.clone(), |el, (text, error)| {
+                el.child(
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_color(if error { t.danger } else { t.success })
+                        .child(text),
+                )
+            })
             .when_some(selected, |el, n| el.child(format!("Row {}", thousands(n))))
             .child(
                 div()
@@ -823,11 +1291,45 @@ impl Render for TablePanel {
         };
         let filters =
             (self.filters_open && self.mode == Mode::Data).then(|| self.filter_bar(&t, window, cx));
+        let confirm = self.confirm_delete.clone().map(|rows| {
+            let n = rows.len();
+            div()
+                .flex_none()
+                .px(px(10.))
+                .py(px(6.))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .bg(t.base)
+                .border_b_1()
+                .border_color(t.danger)
+                .text_size(t.ui_size)
+                .child(div().flex_1().text_color(t.text).child(format!(
+                    "Delete {} {} from {}? This can't be undone.",
+                    thousands(n as u64),
+                    if n == 1 { "row" } else { "rows" },
+                    self.object.name
+                )))
+                .child(
+                    button("delete-cancel", "Cancel", ButtonStyle::Secondary, &t).on_click(
+                        cx.listener(|this, _, _, cx| {
+                            this.confirm_delete = None;
+                            cx.notify();
+                        }),
+                    ),
+                )
+                .child(
+                    button("delete-confirm", "Delete", ButtonStyle::Danger, &t).on_click(
+                        cx.listener(move |this, _, _, cx| this.delete_rows(rows.clone(), cx)),
+                    ),
+                )
+        });
         div()
             .size_full()
             .flex()
             .flex_col()
             .bg(t.surface)
+            .children(confirm)
             .children(filters)
             .child(div().flex_1().min_h_0().child(body))
             .child(self.status_bar(&t, cx))
