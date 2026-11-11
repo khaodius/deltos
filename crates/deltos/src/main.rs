@@ -124,6 +124,31 @@ pub fn rebind_keys(settings: &Settings, cx: &mut App) {
                 KeyBinding::new(keys, ui::table::DiscardChanges, Some("TablePanel"))
             }
             "add-row" => KeyBinding::new(keys, ui::table::AddRow, Some("TablePanel")),
+            // The grid's keys work on the grid itself, not in the filter fields beside it.
+            "duplicate-rows" => KeyBinding::new(keys, ui::table::DuplicateRows, Some("Grid")),
+            "paste-cells" => KeyBinding::new(keys, ui::grid::PasteCells, Some("Grid")),
+            "jump-up" => KeyBinding::new(keys, ui::grid::JumpUp, Some("Grid")),
+            "jump-down" => KeyBinding::new(keys, ui::grid::JumpDown, Some("Grid")),
+            "jump-left" => KeyBinding::new(keys, ui::grid::JumpLeft, Some("Grid")),
+            "jump-right" => KeyBinding::new(keys, ui::grid::JumpRight, Some("Grid")),
+            // Each of several keys clears, as the Keyboard settings describe.
+            "clear-cells" => {
+                for key in keys.split_whitespace() {
+                    bindings.push(KeyBinding::new(key, ui::grid::ClearCells, Some("Grid")));
+                }
+                continue;
+            }
+            // Tab also saves an open cell edit and moves on.
+            "next-cell" => {
+                let editor = Some(ui::grid::EDITOR_CONTEXT);
+                bindings.push(KeyBinding::new(keys, ui::grid::NextCell, editor));
+                KeyBinding::new(keys, ui::grid::NextCell, Some("Grid"))
+            }
+            "previous-cell" => {
+                let editor = Some(ui::grid::EDITOR_CONTEXT);
+                bindings.push(KeyBinding::new(keys, ui::grid::PreviousCell, editor));
+                KeyBinding::new(keys, ui::grid::PreviousCell, Some("Grid"))
+            }
             _ => continue,
         };
         bindings.push(binding);

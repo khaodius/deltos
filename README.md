@@ -174,10 +174,17 @@ publisher the first time.
 | Zoom in / out / reset       | `Ctrl+=` / `Ctrl+-` / `Ctrl+0` |
 | Reset the panel layout      | `Ctrl+Shift+0`     |
 | Edit the selected cell      | `Enter` or `F2`, or double-click |
-| Save / cancel an edit       | `Enter` or click elsewhere / `Esc` |
+| Save / cancel an edit       | `Enter`, `Tab` or click elsewhere / `Esc` |
 | Commit / review / discard staged changes | `Ctrl+S` / `Ctrl+Shift+S` / `Ctrl+Shift+Z` |
 | Add a row                   | `Ctrl+Shift+N`     |
 | Command palette             | `Ctrl+K` or `Ctrl+Shift+P` |
+| Duplicate rows              | `Ctrl+D`           |
+| Start editing with what you type | any character on a selected cell |
+| Save and move down / across | `Enter` / `Tab`, `Shift+Tab` |
+| Set cells to NULL or empty  | `Delete` or `Backspace` |
+| Copy / with headers / paste cells | `Ctrl+C` / `Ctrl+Shift+C` / `Ctrl+V` |
+| First or last row / column  | `Ctrl+↑` `Ctrl+↓` / `Ctrl+←` `Ctrl+→` |
+| First / last cell           | `Ctrl+Home` / `Ctrl+End` |
 
 Every binding can be changed in Settings → Keyboard.
 

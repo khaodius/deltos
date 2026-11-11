@@ -530,6 +530,23 @@ pub const KEYBIND_ACTIONS: &[(&str, &str, &str)] = &[
         "ctrl-shift-p",
         "Command palette (second shortcut)",
     ),
+    ("duplicate-rows", "ctrl-d", "Duplicate the selected rows"),
+    (
+        "clear-cells",
+        "delete backspace",
+        "Set the selected cells to NULL or empty",
+    ),
+    ("paste-cells", "ctrl-v", "Paste cells into the grid"),
+    ("next-cell", "tab", "Save and go to the next cell"),
+    (
+        "previous-cell",
+        "shift-tab",
+        "Save and go to the previous cell",
+    ),
+    ("jump-up", "ctrl-up", "Go to the first row"),
+    ("jump-down", "ctrl-down", "Go to the last row"),
+    ("jump-left", "ctrl-left", "Go to the first column"),
+    ("jump-right", "ctrl-right", "Go to the last column"),
 ];
 
 impl Default for Keybinds {
@@ -974,6 +991,7 @@ mod tests {
         assert!(!s.connections[0].read_only);
         assert!(!s.data.confirm_destructive);
         assert!(s.data.confirm_production_writes);
+        assert_eq!(s.keybinds.get("clear-cells"), Some("delete backspace"));
     }
 
     #[test]

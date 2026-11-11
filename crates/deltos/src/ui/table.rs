@@ -32,7 +32,7 @@ use crate::net::Net;
 use crate::state::{AppState, Inspected, RowSource, StateEvent};
 use crate::theme::{Theme, theme};
 use crate::ui::edit;
-use crate::ui::grid::{CellInput, GridEvent, GridView, MenuTarget, RowRef};
+use crate::ui::grid::{Batch, CellInput, GridEvent, GridView, MenuTarget, RowRef};
 use crate::ui::icons::{Icon, icon};
 use crate::ui::pending::RowMark;
 use crate::ui::text_input::{InputEvent, TextInput};
@@ -43,7 +43,13 @@ use crate::ui::{
 
 actions!(
     table,
-    [CommitChanges, ReviewChanges, DiscardChanges, AddRow]
+    [
+        CommitChanges,
+        ReviewChanges,
+        DiscardChanges,
+        AddRow,
+        DuplicateRows
+    ]
 );
 
 /// What the inspector asks of the table its row came from.
@@ -66,6 +72,40 @@ pub enum Request {
 /// Most rows one delete, duplicate or restore takes, so a select-all over a huge table
 /// stays a request the person can review.
 const ROW_ACTION_LIMIT: usize = 10_000;
+
+/// How a batch of cell changes went, for the status bar.
+#[derive(Default)]
+struct Tally {
+    done: usize,
+    nulls: usize,
+    empties: usize,
+    unloaded: usize,
+    refused: usize,
+    first_refusal: Option<String>,
+}
+
+impl Tally {
+    fn refuse(&mut self, why: impl Into<String>) {
+        self.refused += 1;
+        self.first_refusal.get_or_insert_with(|| why.into());
+    }
+}
+
+/// A row a batch of cell changes goes to, shared by the row's cells.
+#[derive(Clone)]
+enum Target {
+    New(usize),
+    Table(Rc<[Value]>),
+}
+
+/// "1 cell", "12 cells".
+fn cells_text(n: usize) -> String {
+    if n == 1 {
+        "1 cell".to_owned()
+    } else {
+        format!("{} cells", thousands(n as u64))
+    }
+}
 
 /// The commit review: the statements a commit runs, as they were when it opened.
 struct Review {
@@ -161,6 +201,12 @@ impl TablePanel {
                     input,
                     target,
                 } => this.save_cell(*row, *col, input.clone(), target.clone(), cx),
+                GridEvent::Edits {
+                    cells,
+                    batch,
+                    outside,
+                    limited,
+                } => this.save_cells(cells, *batch, *outside, *limited, cx),
             }),
             cx.subscribe(&state, |this, _, event, cx| {
                 if let StateEvent::TableRequest { owner, request } = event {
@@ -717,6 +763,180 @@ impl TablePanel {
             );
         }
         self.staged(cx);
+    }
+
+    /// Saves many cells at once, a paste or a cleared selection: stages them, or with
+    /// "Commit edits immediately" writes them in one go. Cells that don't fit their
+    /// column are left as they are, and the status bar says how many and why.
+    fn save_cells(
+        &mut self,
+        cells: &[(u64, usize, CellInput)],
+        batch: Batch,
+        outside: usize,
+        limited: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if cells.is_empty() || !self.can_stage(cx) {
+            return;
+        }
+        let immediate = self.immediate(cx);
+        let document = self.driver.is_some_and(DriverKind::is_document);
+        let grid = self.grid.read(cx);
+        let columns = grid.columns().clone();
+        let has_key = grid.pending.has_key();
+        let mut tally = Tally::default();
+        // Parsed first, so the buffer changes in one go below.
+        let mut news: Vec<(usize, usize, Value)> = Vec::new();
+        let mut olds: Vec<(Rc<[Value]>, usize, Value)> = Vec::new();
+        // Cells come row by row: each row is read once, not once per cell.
+        let mut current: Option<(u64, Option<Target>, RowMark)> = None;
+        for (row, col, input) in cells {
+            let Some(column) = columns.get(*col) else {
+                continue;
+            };
+            if current.as_ref().is_none_or(|(r, _, _)| r != row) {
+                let target = grid.row_ref(*row).map(|t| match t {
+                    RowRef::New(i) => Target::New(i),
+                    RowRef::Table(values) => Target::Table(values.into()),
+                });
+                current = Some((*row, target, grid.row_mark(*row)));
+            }
+            let Some((_, target, mark)) = &current else {
+                continue;
+            };
+            let Some(target) = target.clone() else {
+                tally.unloaded += 1;
+                continue;
+            };
+            if *mark == RowMark::Deleted {
+                tally.refuse("Rows staged for deletion can't be changed");
+                continue;
+            }
+            let value = match edit::parse_input(column, input) {
+                Ok(v) => v,
+                Err(e) => {
+                    tally.refuse(e);
+                    continue;
+                }
+            };
+            match target {
+                Target::New(i) => news.push((i, *col, value)),
+                Target::Table(_) if !has_key => {
+                    tally.refuse("This table has no primary key, so its rows can't be edited here");
+                    continue;
+                }
+                Target::Table(_) if document && column.name == "_id" => {
+                    tally.refuse("The _id of a document cannot be changed");
+                    continue;
+                }
+                Target::Table(values) => olds.push((values, *col, value)),
+            }
+            tally.done += 1;
+            match input {
+                CellInput::Null => tally.nulls += 1,
+                CellInput::Text(t) if t.is_empty() => tally.empties += 1,
+                CellInput::Text(_) => {}
+            }
+        }
+        let mut writes = Vec::new();
+        self.grid.update(cx, |g, cx| {
+            for (i, col, value) in news {
+                g.pending.set_insert(i, col, Some(value));
+            }
+            if immediate {
+                writes = olds;
+            } else {
+                for (values, col, value) in olds {
+                    g.pending.stage(&values, col, value);
+                }
+            }
+            cx.notify();
+        });
+        let mut message = match batch {
+            _ if tally.done == 0 => "Nothing changed".to_owned(),
+            Batch::Paste => format!("Pasted {}", cells_text(tally.done)),
+            Batch::Clear => match (tally.nulls, tally.empties) {
+                (n, 0) => format!("Set {} to NULL", cells_text(n)),
+                (0, e) => format!("Set {} to empty text", cells_text(e)),
+                (n, e) => format!("Set {} to NULL and {e} to empty text", cells_text(n)),
+            },
+        };
+        if let Some(why) = &tally.first_refusal {
+            message.push_str(&format!(
+                "; {} left as they were: {why}",
+                cells_text(tally.refused)
+            ));
+        }
+        if tally.unloaded > 0 {
+            message.push_str(&format!(
+                "; {} skipped, their rows aren't loaded",
+                cells_text(tally.unloaded)
+            ));
+        }
+        if outside > 0 {
+            message.push_str(&format!("; {} fell outside the table", cells_text(outside)));
+        }
+        if limited {
+            message.push_str(&format!(
+                "; only the first {} rows",
+                thousands(crate::ui::grid::EDIT_ROWS as u64)
+            ));
+        }
+        let failed = tally.done == 0;
+        if !writes.is_empty() {
+            self.write_cells(writes, message, cx);
+        } else {
+            self.notify_user(message, failed, cx);
+        }
+        self.staged(cx);
+    }
+
+    /// Writes many cells now, one update per row, in one call to the driver.
+    fn write_cells(
+        &mut self,
+        cells: Vec<(Rc<[Value]>, usize, Value)>,
+        message: String,
+        cx: &mut Context<Self>,
+    ) {
+        let columns = self.grid.read(cx).columns().clone();
+        let mut edits: Vec<RowEdit> = Vec::new();
+        let mut last: Option<&Rc<[Value]>> = None;
+        for (values, col, value) in &cells {
+            let (Some(column), Some(key)) = (columns.get(*col), edit::key_of(&columns, values))
+            else {
+                continue;
+            };
+            if values.get(*col) == Some(value) {
+                continue;
+            }
+            let change = (column.name.clone(), value.clone());
+            match edits.last_mut() {
+                // Cells come row by row, so a row's cells are next to each other.
+                Some(RowEdit::Update { changes, .. })
+                    if last.is_some_and(|l| Rc::ptr_eq(l, values)) =>
+                {
+                    changes.push(change)
+                }
+                _ => edits.push(RowEdit::Update {
+                    key,
+                    changes: vec![change],
+                }),
+            }
+            last = Some(values);
+        }
+        if edits.is_empty() {
+            self.notify_user(message, false, cx);
+            return;
+        }
+        self.notify_user("Saving…", false, cx);
+        self.apply(edits, cx, move |this, result, cx| {
+            match result {
+                Ok(_) => this.notify_user(message, false, cx),
+                Err(e) => this.notify_user(format!("Not saved: {e}"), true, cx),
+            }
+            this.reload(cx);
+            this.refresh_inspector(cx);
+        });
     }
 
     /// Writes one cell now. The grid shows the new value at once, at `row` when the
@@ -1887,13 +2107,17 @@ impl TablePanel {
             })
             .child(div().flex_1())
             .when_some(self.notice.clone(), |el, (text, error)| {
+                // A long message is cut short here; the tooltip has all of it.
+                let full = text.clone();
                 el.child(
                     div()
+                        .id("notice")
                         .min_w_0()
                         .overflow_hidden()
                         .whitespace_nowrap()
                         .text_ellipsis()
                         .text_color(if error { t.danger } else { t.success })
+                        .tooltip(move |_, cx| Tooltip::view(full.clone(), cx))
                         .child(text),
                 )
             })
@@ -2526,6 +2750,18 @@ impl Render for TablePanel {
                 }
             }))
             .on_action(cx.listener(|this, _: &AddRow, window, cx| this.add_row(window, cx)))
+            .on_action(cx.listener(|this, _: &DuplicateRows, window, cx| {
+                this.flush_edit(window, cx);
+                let grid = this.grid.read(cx);
+                if !grid.editable {
+                    return;
+                }
+                let Some((rows, _)) = grid.selected_ranges() else {
+                    return;
+                };
+                let rows: Vec<u64> = rows.take(ROW_ACTION_LIMIT).collect();
+                this.duplicate_rows(rows, cx);
+            }))
             .children(confirm)
             .children(discard)
             .children(filters)
