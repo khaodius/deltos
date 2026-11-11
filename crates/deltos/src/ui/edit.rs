@@ -71,7 +71,8 @@ pub fn speaks_sql(kind: DriverKind) -> bool {
     )
 }
 
-fn quote_ident(kind: DriverKind, name: &str) -> String {
+/// `name` as a quoted identifier for `kind`.
+pub fn quote_ident(kind: DriverKind, name: &str) -> String {
     match kind {
         DriverKind::Mysql | DriverKind::Clickhouse => format!("`{}`", name.replace('`', "``")),
         DriverKind::Mssql => format!("[{}]", name.replace(']', "]]")),
@@ -79,7 +80,11 @@ fn quote_ident(kind: DriverKind, name: &str) -> String {
     }
 }
 
-fn literal(kind: DriverKind, v: &Value) -> String {
+/// `v` as a SQL literal for `kind`. A PostgreSQL string with a backslash in it is
+/// written as an escape string (`E'a\\b'`), which reads the same whether or not the
+/// server has `standard_conforming_strings` on; a plain `'a\b'` would lose the
+/// backslash on a server that has it off.
+pub fn literal(kind: DriverKind, v: &Value) -> String {
     match v {
         Value::Null => "NULL".into(),
         Value::Bool(b) => match kind {
@@ -88,10 +93,23 @@ fn literal(kind: DriverKind, v: &Value) -> String {
         },
         Value::Int(i) => i.to_string(),
         Value::Float(f) if f.is_finite() => f.to_string(),
+        // SQLite reads an out-of-range number as infinity and has no NaN (it stores
+        // NULL); the others take the words PostgreSQL uses, in quotes.
+        Value::Float(f) => match kind {
+            DriverKind::Sqlite if f.is_nan() => "NULL".into(),
+            DriverKind::Sqlite => (if *f > 0.0 { "9e999" } else { "-9e999" }).into(),
+            _ if f.is_nan() => "'NaN'".into(),
+            _ => (if *f > 0.0 {
+                "'Infinity'"
+            } else {
+                "'-Infinity'"
+            })
+            .into(),
+        },
         Value::Bytes(b) => {
             let hex: String = b.iter().map(|x| format!("{x:02x}")).collect();
             match kind {
-                DriverKind::Postgres => format!("'\\x{hex}'"),
+                DriverKind::Postgres => format!("E'\\\\x{hex}'"),
                 _ => format!("X'{hex}'"),
             }
         }
@@ -99,6 +117,9 @@ fn literal(kind: DriverKind, v: &Value) -> String {
             let s = other.to_string().replace('\'', "''");
             match kind {
                 DriverKind::Mysql => format!("'{}'", s.replace('\\', "\\\\")),
+                DriverKind::Postgres if s.contains('\\') => {
+                    format!("E'{}'", s.replace('\\', "\\\\"))
+                }
                 _ => format!("'{s}'"),
             }
         }
@@ -138,23 +159,12 @@ pub fn insert_statements(
     names: &[&str],
     rows: &[Vec<Value>],
 ) -> String {
-    let table = table_name(kind, object);
-    let columns = names
+    let columns: Vec<Column> = names
         .iter()
-        .map(|n| quote_ident(kind, n))
-        .collect::<Vec<_>>()
-        .join(", ");
-    rows.iter()
-        .map(|row| {
-            let values = row
-                .iter()
-                .map(|v| literal(kind, v))
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("INSERT INTO {table} ({columns}) VALUES ({values});")
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+        .map(|n| Column::new(*n, "", ValueKind::Other))
+        .collect();
+    let mut writer = crate::ui::transfer::sql::InsertWriter::new(kind, object, 1);
+    deltos_grid::write_rows(&mut writer, &columns, rows)
 }
 
 /// A `WHERE` clause that picks out one row by its key.
@@ -353,6 +363,22 @@ mod tests {
             ])
         );
         assert_eq!(key_of(&[c], &values[2..]), None);
+    }
+
+    #[test]
+    fn literals_read_back_whatever_the_server_settings() {
+        let pg = |v: &Value| literal(DriverKind::Postgres, v);
+        assert_eq!(pg(&Value::text("a\\b'c")), "E'a\\\\b''c'");
+        assert_eq!(pg(&Value::text("plain")), "'plain'");
+        assert_eq!(pg(&Value::Bytes(vec![0, 255].into())), "E'\\\\x00ff'");
+        assert_eq!(pg(&Value::Float(f64::NAN)), "'NaN'");
+        assert_eq!(pg(&Value::Float(f64::NEG_INFINITY)), "'-Infinity'");
+        assert_eq!(
+            literal(DriverKind::Sqlite, &Value::Float(f64::INFINITY)),
+            "9e999"
+        );
+        assert_eq!(literal(DriverKind::Sqlite, &Value::Float(f64::NAN)), "NULL");
+        assert_eq!(literal(DriverKind::Mysql, &Value::text("a\\b")), "'a\\\\b'");
     }
 
     #[test]

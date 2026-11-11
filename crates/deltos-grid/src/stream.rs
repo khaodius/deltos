@@ -112,6 +112,11 @@ impl StreamLoader {
         self.inner.columns.clone()
     }
 
+    /// Rows per page on disk. Pages are requested at this size.
+    pub fn page_rows(&self) -> u32 {
+        self.inner.config.page_rows
+    }
+
     pub fn affected(&self) -> Option<u64> {
         self.inner.affected
     }

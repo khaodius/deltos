@@ -72,6 +72,12 @@ join them with All or Any, or switch to SQL and type the WHERE yourself. The WHE
 is always shown under the bar. The status bar shows where you are in the table and its total,
 counts exactly when you ask, and jumps to any page or row.
 
+## Import and export
+
+Export a table, a filtered view or a query result to CSV, JSON, SQL or Markdown. The rows
+stream to disk, so the size of the table does not matter. Import CSV or JSON into a table,
+matching columns by name, or run a `.sql` file.
+
 ## Connecting
 
 Paste a connection URL such as `mysql://user:pass@db.example.com:3306/shop` anywhere in the

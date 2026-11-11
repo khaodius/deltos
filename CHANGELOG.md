@@ -4,6 +4,25 @@ Packages for every version are attached to its
 [release](https://github.com/khaodius/deltos/releases), with SHA-256 checksums and a signed
 update manifest.
 
+## 0.1.10 - 2026-11-11
+
+- **Export to files.** Export a table, its filtered view or a query result to CSV, JSON
+  (an array or lines), SQL INSERT statements or Markdown from the table's status bar, the
+  sidebar menu or the result bar. Rows stream to the file in the background with a running
+  count and Cancel, so a 50 million row table exports without filling memory, and the file
+  only appears once it is complete.
+- **Import CSV and JSON.** Import a file into a table with a preview, columns matched by name,
+  and options for the header, delimiter, NULL text and emptying the table first. Rows go in
+  in batches with progress and Cancel; a bad value stops the import at its line, or bad rows
+  can be skipped and listed.
+- **Run a SQL file.** Run a `.sql` file statement by statement from the sidebar, with
+  progress, stopping at the first error.
+- **Copy as TSV.** The copy menu adds TSV, and every copy format uses the same writers as
+  export.
+- **Careful on production.** Import and Run a SQL file are off on read-only connections. On
+  staging and production they ask once more, naming the connection, before emptying a table,
+  running a file or, with "Confirm every write on production" on, importing rows.
+
 ## 0.1.9 - 2026-11-11
 
 - **History that lasts.** The last 5,000 statements you ran are kept between sessions, with

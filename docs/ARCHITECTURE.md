@@ -9,7 +9,7 @@ Wayland) and Windows. This page describes how the pieces fit together, and why.
 | --- | --- |
 | `deltos-data` | The contract between the UI and the drivers: `Driver`, `Connection`, `Value`, `Column`, browse and execute requests. |
 | `deltos-drivers` | PostgreSQL, MySQL/MariaDB, SQLite and MongoDB behind that contract. `available()` lists the ones a build includes. |
-| `deltos-grid` | The bounded row cache behind every grid: `GridCache`, `BrowseLoader` for tables, `StreamLoader` for query results, CSV export. |
+| `deltos-grid` | The bounded row cache behind every grid: `GridCache`, `BrowseLoader` for tables, `StreamLoader` for query results, and the streaming export with its CSV, JSON and Markdown writers. |
 | `deltos-dock` | The panel layout as plain data: split trees for the main window and each torn-off window, with every move as a method. No UI code. |
 | `deltos-settings` | `settings.toml` (with defaults, sanitizing and atomic saves), the saved layout, theme files and the keychain. |
 | `deltos-updater` | Checking, verifying and installing signed releases. |

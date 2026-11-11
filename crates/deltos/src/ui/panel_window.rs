@@ -186,5 +186,6 @@ impl Render for PanelWindow {
                     )),
             )
             .when(own_bar, |el| el.child(title_bar::resize_grips(window)))
+            .child(crate::ui::transfer::overlay(cx))
     }
 }

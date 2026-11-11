@@ -226,11 +226,17 @@ impl TablePanel {
         .into();
         let at_end = count.is_exact() && page >= last_page;
 
-        let mut out = div()
-            .flex()
-            .items_center()
-            .gap(px(6.))
-            .child(div().text_color(t.text).child(range));
+        // In a narrow panel the range gives way first, cut short, so the page control and
+        // the reload button stay in the status bar.
+        let mut out = div().min_w_0().flex().items_center().gap(px(6.)).child(
+            div()
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .text_color(t.text)
+                .child(range),
+        );
         if counting {
             out = out
                 .child(div().text_color(t.text_faint).child("Counting…"))
