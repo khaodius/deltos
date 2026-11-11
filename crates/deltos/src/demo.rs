@@ -564,9 +564,16 @@ fn matches(value: &Value, filter: &Filter) -> bool {
     let ord = || compare(value, &filter.value);
     let text = || value.to_string().to_lowercase();
     let needle = || filter.value.to_string().to_lowercase();
+    let equal = |other: &Value| {
+        compare(value, other) == Ordering::Equal
+            || value.to_string().eq_ignore_ascii_case(&other.to_string())
+    };
     match filter.op {
         FilterOp::IsNull => value.is_null(),
         FilterOp::IsNotNull => !value.is_null(),
+        FilterOp::IsEmpty => value.is_null() || value.to_string().is_empty(),
+        FilterOp::IsNotEmpty => !value.is_null() && !value.to_string().is_empty(),
+        FilterOp::In if value.is_null() => filter.values.iter().any(Value::is_null),
         _ if value.is_null() => false,
         FilterOp::Eq => ord() == Ordering::Equal || text() == needle(),
         FilterOp::NotEq => !(ord() == Ordering::Equal || text() == needle()),
@@ -575,8 +582,74 @@ fn matches(value: &Value, filter: &Filter) -> bool {
         FilterOp::Gt => ord() == Ordering::Greater,
         FilterOp::GtEq => ord() != Ordering::Less,
         FilterOp::Contains => text().contains(&needle()),
+        FilterOp::NotContains => !text().contains(&needle()),
         FilterOp::StartsWith => text().starts_with(&needle()),
+        FilterOp::EndsWith => text().ends_with(&needle()),
+        FilterOp::In => filter.values.iter().any(equal),
+        FilterOp::NotIn => !filter.values.iter().any(equal),
+        FilterOp::Between => match filter.values.as_slice() {
+            [low, high] => {
+                compare(value, low) != Ordering::Less && compare(value, high) != Ordering::Greater
+            }
+            _ => false,
+        },
+        FilterOp::Like => like(&value.to_string(), &filter.value.to_string()),
     }
+}
+
+/// SQL `LIKE`, as PostgreSQL has it: `%` any run, `_` one character, `\` escapes, and
+/// case counts. Matches in time proportional to the text times the pattern, whatever
+/// the pattern, by going back only to the last `%` on a mismatch.
+fn like(text: &str, pattern: &str) -> bool {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Part {
+        Any,
+        One,
+        Char(char),
+    }
+    let mut parts: Vec<Part> = Vec::with_capacity(pattern.len());
+    let mut chars = pattern.chars();
+    while let Some(c) = chars.next() {
+        let part = match c {
+            '%' => Part::Any,
+            '_' => Part::One,
+            // A trailing backslash stands for itself.
+            '\\' => Part::Char(chars.next().unwrap_or('\\')),
+            c => Part::Char(c),
+        };
+        if !(part == Part::Any && parts.last() == Some(&Part::Any)) {
+            parts.push(part);
+        }
+    }
+    let text: Vec<char> = text.chars().collect();
+    let (mut t, mut p) = (0, 0);
+    // Where to go back to: the part after the last `%`, and the text it starts at.
+    let mut back: Option<(usize, usize)> = None;
+    while t < text.len() {
+        match parts.get(p) {
+            Some(Part::Any) => {
+                p += 1;
+                back = Some((p, t));
+            }
+            Some(Part::One) => {
+                t += 1;
+                p += 1;
+            }
+            Some(Part::Char(c)) if *c == text[t] => {
+                t += 1;
+                p += 1;
+            }
+            _ => match back {
+                Some((after, from)) => {
+                    p = after;
+                    t = from + 1;
+                    back = Some((after, from + 1));
+                }
+                None => return false,
+            },
+        }
+    }
+    parts.iter().skip(p).all(|part| *part == Part::Any)
 }
 
 /// A browse request reduced to what decides row order and membership.
@@ -584,8 +657,9 @@ fn matches(value: &Value, filter: &Filter) -> bool {
 struct Shape {
     table: Table,
     sort: Vec<(usize, bool)>,
-    /// Column, operator (by name: `FilterOp` is not `Hash`) and value.
-    filters: Vec<(usize, String, String)>,
+    /// Column, operator and values, as text.
+    filters: Vec<(usize, FilterOp, String, Vec<String>)>,
+    match_any: bool,
 }
 
 /// How a request maps positions to row ids.
@@ -636,8 +710,9 @@ impl DemoConnection {
         for f in &request.filters {
             filters.push((
                 index(&f.column)?,
-                format!("{:?}", f.op),
+                f.op,
                 f.value.to_string(),
+                f.values.iter().map(Value::to_string).collect(),
             ));
         }
         let by_key = filters.is_empty()
@@ -657,17 +732,23 @@ impl DemoConnection {
             table,
             sort: sort.clone(),
             filters: filters.clone(),
+            match_any: request.match_any,
         };
         if let Some(list) = self.orders.lock().get(&shape) {
             return Ok(Order::List(list.clone()));
         }
         let mut ids: Vec<u64> = (1..=table.rows())
             .filter(|id| {
-                request
+                let mut each = request
                     .filters
                     .iter()
                     .zip(&filters)
-                    .all(|(f, (c, _, _))| matches(&table.value(*id, *c), f))
+                    .map(|(f, (c, ..))| matches(&table.value(*id, *c), f));
+                if request.match_any {
+                    each.any(|m| m)
+                } else {
+                    each.all(|m| m)
+                }
             })
             .collect();
         if !sort.is_empty() {
@@ -1189,6 +1270,7 @@ mod tests {
                 column: "country".into(),
                 op: FilterOp::Eq,
                 value: Value::text("DE"),
+                values: Vec::new(),
             }],
             ..Default::default()
         };
@@ -1203,6 +1285,71 @@ mod tests {
         );
         let n = futures::executor::block_on(demo.count(&users, &request, true)).unwrap();
         assert!(n < 12_480);
+    }
+
+    #[test]
+    fn filter_operators_and_any() {
+        let demo = DemoConnection::new();
+        let users = object("public", "users");
+        let count = |filters: Vec<Filter>, match_any: bool| {
+            let request = BrowseRequest {
+                filters,
+                match_any,
+                ..Default::default()
+            };
+            futures::executor::block_on(demo.count(&users, &request, true)).unwrap()
+        };
+        let de = Filter::new("country", FilterOp::Eq, Value::text("DE"));
+        let fr = Filter::new("country", FilterOp::Eq, Value::text("FR"));
+        let (n_de, n_fr) = (
+            count(vec![de.clone()], false),
+            count(vec![fr.clone()], false),
+        );
+        assert!(n_de > 0 && n_fr > 0);
+        assert_eq!(count(vec![de.clone(), fr.clone()], true), n_de + n_fr);
+        assert_eq!(count(vec![de, fr], false), 0);
+        let list = Filter::list(
+            "country",
+            FilterOp::In,
+            vec![Value::text("de"), Value::text("FR")],
+        );
+        assert_eq!(count(vec![list], false), n_de + n_fr);
+        let range = Filter::list(
+            "id",
+            FilterOp::Between,
+            vec![Value::Int(10), Value::Int(19)],
+        );
+        assert_eq!(count(vec![range], false), 10);
+        assert_eq!(
+            count(
+                vec![Filter::new("id", FilterOp::Like, Value::text("1_"))],
+                false
+            ),
+            10
+        );
+        assert_eq!(
+            count(
+                vec![Filter::new("score", FilterOp::IsEmpty, Value::Null)],
+                false
+            ) + count(
+                vec![Filter::new("score", FilterOp::IsNotEmpty, Value::Null)],
+                false
+            ),
+            12_480
+        );
+        assert!(like("50% off", "50\\% %"));
+        assert!(!like("Ada", "ad%"));
+        assert!(like("adam", "%a%a%"));
+        assert!(like("a_b", "a\\_b"));
+        assert!(!like("axb", "a\\_b"));
+        assert!(like("ends\\", "ends\\"));
+        assert!(like("", "%"));
+        assert!(!like("", "_"));
+        assert!(like("abcabd", "%ab_"));
+        // A pattern that would take exponential time to backtrack through answers at once.
+        let long = "a".repeat(400);
+        let pattern = format!("{}b", "%a".repeat(60));
+        assert!(!like(&long, &pattern));
     }
 
     #[test]

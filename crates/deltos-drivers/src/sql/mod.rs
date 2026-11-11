@@ -34,8 +34,10 @@ use deltos_data::{
     BrowseRequest, Error, Filter, FilterOp, Result, RowEdit, Sort, SortDirection, Value,
 };
 
+mod condition;
 mod split;
 
+pub use condition::check_condition;
 pub use split::split_statements;
 
 /// The SQL flavour a statement is written for.
@@ -100,6 +102,60 @@ impl Dialect {
         out.push('\'');
     }
 
+    /// Appends `value` as a literal of this dialect, escaped. Only for SQL the person reads
+    /// or copies, such as the filter bar's preview; statements that run bind values.
+    pub fn push_literal(self, out: &mut String, value: &Value) {
+        match value {
+            Value::Null => out.push_str("NULL"),
+            Value::Bool(b) => out.push_str(match (self, b) {
+                (Dialect::Postgres, true) => "TRUE",
+                (Dialect::Postgres, false) => "FALSE",
+                (_, true) => "1",
+                (_, false) => "0",
+            }),
+            Value::Int(i) => out.push_str(&i.to_string()),
+            Value::Float(f) if f.is_finite() => out.push_str(&f.to_string()),
+            Value::Bytes(bytes) => {
+                out.push_str(if self == Dialect::Postgres {
+                    "'\\x"
+                } else {
+                    "X'"
+                });
+                push_hex(out, bytes);
+                out.push('\'');
+            }
+            other => self.push_text_literal(out, &other.to_string()),
+        }
+    }
+
+    /// Appends `text` as a literal that reads the same whatever the server's settings.
+    /// A backslash means itself in a plain PostgreSQL string only with
+    /// `standard_conforming_strings` on, and in a MySQL string only with
+    /// `NO_BACKSLASH_ESCAPES`; text with one is written as an `E'...'` string for
+    /// PostgreSQL and in hex for MySQL, which no setting changes.
+    fn push_text_literal(self, out: &mut String, text: &str) {
+        match self {
+            Dialect::Postgres if text.contains('\\') => {
+                out.push_str("E'");
+                for c in text.chars() {
+                    match c {
+                        '\0' => {}
+                        '\'' => out.push_str("''"),
+                        '\\' => out.push_str("\\\\"),
+                        c => out.push(c),
+                    }
+                }
+                out.push('\'');
+            }
+            Dialect::Mysql if text.contains(['\\', '\0']) => {
+                out.push_str("_utf8mb4 X'");
+                push_hex(out, text.as_bytes());
+                out.push('\'');
+            }
+            _ => self.push_string_literal(out, text),
+        }
+    }
+
     /// Whether NULL sorts after every value in an ascending order.
     fn nulls_high(self) -> bool {
         self == Dialect::Postgres
@@ -144,6 +200,16 @@ impl Dialect {
     }
 }
 
+/// Appends `bytes` as lowercase hex digits.
+fn push_hex(out: &mut String, bytes: &[u8]) {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    out.reserve(bytes.len() * 2);
+    for byte in bytes {
+        out.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        out.push(char::from(DIGITS[usize::from(byte & 0xf)]));
+    }
+}
+
 /// Escapes `%`, `_` and the escape character itself for a `LIKE ... ESCAPE '!'` pattern.
 /// `!` works the same on every server, whatever their backslash settings.
 pub fn escape_like(out: &mut String, text: &str) {
@@ -161,6 +227,9 @@ pub struct SqlBuilder {
     dialect: Dialect,
     sql: String,
     params: Vec<Value>,
+    /// Writes values as escaped literals instead of placeholders, for text shown to the
+    /// person and copied by them. Statements that run never use it.
+    inline: bool,
 }
 
 impl SqlBuilder {
@@ -169,6 +238,15 @@ impl SqlBuilder {
             dialect,
             sql: String::with_capacity(256),
             params: Vec::new(),
+            inline: false,
+        }
+    }
+
+    /// A builder that writes values as literals, for display and copying.
+    pub fn inline(dialect: Dialect) -> Self {
+        Self {
+            inline: true,
+            ..Self::new(dialect)
         }
     }
 
@@ -183,6 +261,10 @@ impl SqlBuilder {
     }
 
     pub fn param(&mut self, value: Value) -> &mut Self {
+        if self.inline {
+            self.dialect.push_literal(&mut self.sql, &value);
+            return self;
+        }
         self.params.push(value);
         self.dialect.placeholder(&mut self.sql, self.params.len());
         self
@@ -273,7 +355,13 @@ impl BrowseSql<'_> {
             .filter(|_| self.total)
             .and_then(|after| seek_values(self.order, after));
         let mut first = true;
-        push_conditions(&mut b, &mut first, &request.filters, &request.raw_where)?;
+        push_conditions(
+            &mut b,
+            &mut first,
+            &request.filters,
+            request.match_any,
+            &request.raw_where,
+        )?;
         if let Some(values) = &seek {
             b.push(if first { " WHERE " } else { " AND " });
             push_seek(&mut b, self.order, values);
@@ -302,28 +390,49 @@ pub fn count_sql(
     let mut b = SqlBuilder::new(dialect);
     b.push("SELECT COUNT(*) FROM ").push(from);
     let mut first = true;
-    push_conditions(&mut b, &mut first, &request.filters, &request.raw_where)?;
+    push_conditions(
+        &mut b,
+        &mut first,
+        &request.filters,
+        request.match_any,
+        &request.raw_where,
+    )?;
     Ok(b.finish())
 }
 
 /// Appends ` WHERE ...` (or ` AND ...` when `first` is false) for the filters and the raw
-/// condition.
+/// condition. With `match_any` the filters are one group joined with OR. A raw condition
+/// that could end the statement or leave its parentheses is refused (see
+/// [`check_condition`]).
 pub fn push_conditions(
     b: &mut SqlBuilder,
     first: &mut bool,
     filters: &[Filter],
+    match_any: bool,
     raw_where: &Option<String>,
 ) -> Result<()> {
-    for filter in filters {
-        b.push(if *first { " WHERE " } else { " AND " });
-        *first = false;
+    let grouped = match_any && filters.len() > 1;
+    for (i, filter) in filters.iter().enumerate() {
+        if i == 0 || !grouped {
+            b.push(if *first { " WHERE " } else { " AND " });
+            *first = false;
+            if grouped {
+                b.push("(");
+            }
+        } else {
+            b.push(" OR ");
+        }
         push_filter(b, filter)?;
+    }
+    if grouped {
+        b.push(")");
     }
     if let Some(raw) = raw_where
         .as_deref()
         .map(str::trim)
         .filter(|r| !r.is_empty())
     {
+        check_condition(b.dialect, raw)?;
         b.push(if *first { " WHERE " } else { " AND " });
         *first = false;
         // On their own lines, so a trailing `--` comment in the condition cannot swallow
@@ -331,6 +440,64 @@ pub fn push_conditions(
         b.push("(\n").push(raw).push("\n)");
     }
     Ok(())
+}
+
+/// Appends `column LIKE pattern ESCAPE '!'` on the column's text, the pattern built from
+/// the value with `%` before and after as asked.
+fn push_match(b: &mut SqlBuilder, filter: &Filter, before: bool, after: bool, negate: bool) {
+    let text = match &filter.value {
+        Value::Null => String::new(),
+        other => other.to_string(),
+    };
+    let mut pattern = String::with_capacity(text.len() + 2);
+    if before {
+        pattern.push('%');
+    }
+    escape_like(&mut pattern, &text);
+    if after {
+        pattern.push('%');
+    }
+    let dialect = b.dialect;
+    dialect.push_as_text(&mut b.sql, &filter.column);
+    if negate {
+        b.push(" NOT");
+    }
+    b.push(dialect.like())
+        .param(Value::Text(pattern.into()))
+        .push(" ESCAPE '!'");
+}
+
+/// Appends `column IN (...)`, or `NOT IN`. NULLs in the list are matched with `IS NULL`,
+/// since `IN` never matches them.
+fn push_in(b: &mut SqlBuilder, filter: &Filter, negate: bool) {
+    let has_null = filter.values.iter().any(Value::is_null);
+    let values: Vec<&Value> = filter.values.iter().filter(|v| !v.is_null()).collect();
+    if values.is_empty() {
+        match (has_null, negate) {
+            (false, false) => b.push("1 = 0"),
+            (false, true) => b.push("1 = 1"),
+            (true, false) => b.ident(&filter.column).push(" IS NULL"),
+            (true, true) => b.ident(&filter.column).push(" IS NOT NULL"),
+        };
+        return;
+    }
+    if has_null {
+        b.push("(");
+    }
+    b.ident(&filter.column)
+        .push(if negate { " NOT IN (" } else { " IN (" });
+    for (i, value) in values.into_iter().enumerate() {
+        if i > 0 {
+            b.push(", ");
+        }
+        b.param(value.clone());
+    }
+    b.push(")");
+    if has_null {
+        b.push(if negate { " AND " } else { " OR " })
+            .ident(&filter.column)
+            .push(if negate { " IS NOT NULL)" } else { " IS NULL)" });
+    }
 }
 
 fn push_filter(b: &mut SqlBuilder, filter: &Filter) -> Result<()> {
@@ -346,19 +513,66 @@ fn push_filter(b: &mut SqlBuilder, filter: &Filter) -> Result<()> {
             b.ident(&filter.column).push(" IS NOT NULL");
             return Ok(());
         }
-        (FilterOp::Contains | FilterOp::StartsWith, _) => {
-            let text = filter.value.to_string();
-            let mut pattern = String::with_capacity(text.len() + 2);
-            if filter.op == FilterOp::Contains {
-                pattern.push('%');
-            }
-            escape_like(&mut pattern, &text);
-            pattern.push('%');
+        (FilterOp::Contains, _) => {
+            push_match(b, filter, true, true, false);
+            return Ok(());
+        }
+        (FilterOp::NotContains, _) => {
+            push_match(b, filter, true, true, true);
+            return Ok(());
+        }
+        (FilterOp::StartsWith, _) => {
+            push_match(b, filter, false, true, false);
+            return Ok(());
+        }
+        (FilterOp::EndsWith, _) => {
+            push_match(b, filter, true, false, false);
+            return Ok(());
+        }
+        (FilterOp::In, _) => {
+            push_in(b, filter, false);
+            return Ok(());
+        }
+        (FilterOp::NotIn, _) => {
+            push_in(b, filter, true);
+            return Ok(());
+        }
+        (FilterOp::Between, _) => {
+            let [low, high] = filter.values.as_slice() else {
+                return Err(Error::Query(format!(
+                    "BETWEEN on {} needs two values, the low and the high end.",
+                    filter.column
+                )));
+            };
+            b.ident(&filter.column)
+                .push(" BETWEEN ")
+                .param(low.clone())
+                .push(" AND ")
+                .param(high.clone());
+            return Ok(());
+        }
+        (FilterOp::Like, _) => {
+            let pattern = match &filter.value {
+                Value::Null => String::new(),
+                other => other.to_string(),
+            };
             let dialect = b.dialect;
             dialect.push_as_text(&mut b.sql, &filter.column);
-            b.push(dialect.like())
-                .param(Value::Text(pattern.into()))
-                .push(" ESCAPE '!'");
+            b.push(" LIKE ").param(Value::Text(pattern.into()));
+            return Ok(());
+        }
+        (FilterOp::IsEmpty, _) => {
+            let dialect = b.dialect;
+            b.push("(").ident(&filter.column).push(" IS NULL OR ");
+            dialect.push_as_text(&mut b.sql, &filter.column);
+            b.push(" = '')");
+            return Ok(());
+        }
+        (FilterOp::IsNotEmpty, _) => {
+            let dialect = b.dialect;
+            b.push("(").ident(&filter.column).push(" IS NOT NULL AND ");
+            dialect.push_as_text(&mut b.sql, &filter.column);
+            b.push(" <> '')");
             return Ok(());
         }
         (FilterOp::Eq, false) => " = ",
@@ -370,6 +584,41 @@ fn push_filter(b: &mut SqlBuilder, filter: &Filter) -> Result<()> {
     };
     b.ident(&filter.column).push(op).param(filter.value.clone());
     Ok(())
+}
+
+/// The request's conditions as the `WHERE` clause a browse would run, with values
+/// written as literals, for the person to read and copy. Empty when nothing filters.
+pub fn where_preview(dialect: Dialect, request: &BrowseRequest) -> Result<String> {
+    let mut b = SqlBuilder::inline(dialect);
+    let mut first = true;
+    push_conditions(
+        &mut b,
+        &mut first,
+        &request.filters,
+        request.match_any,
+        &request.raw_where,
+    )?;
+    let (sql, _) = b.finish();
+    Ok(sql.trim_start().to_string())
+}
+
+/// `SELECT * FROM from WHERE ... ORDER BY ...` for the request's filters and sort, with
+/// values written as literals, for "copy as SQL".
+pub fn select_preview(dialect: Dialect, from: &str, request: &BrowseRequest) -> Result<String> {
+    let mut b = SqlBuilder::inline(dialect);
+    b.push("SELECT * FROM ").push(from);
+    let mut first = true;
+    push_conditions(
+        &mut b,
+        &mut first,
+        &request.filters,
+        request.match_any,
+        &request.raw_where,
+    )?;
+    let order = order_keys(&request.sort, &[], |_| true);
+    push_order_by(&mut b, &order);
+    b.push(";");
+    Ok(b.finish().0)
 }
 
 /// The seek values in order-key order, when `after` names every order column.
@@ -795,21 +1044,25 @@ mod tests {
                     column: "name".into(),
                     op: FilterOp::Contains,
                     value: Value::text("50%"),
+                    values: Vec::new(),
                 },
                 Filter {
                     column: "age".into(),
                     op: FilterOp::GtEq,
                     value: Value::Int(18),
+                    values: Vec::new(),
                 },
                 Filter {
                     column: "deleted".into(),
                     op: FilterOp::Eq,
                     value: Value::Null,
+                    values: Vec::new(),
                 },
                 Filter {
                     column: "x".into(),
                     op: FilterOp::StartsWith,
                     value: Value::text("a_"),
+                    values: Vec::new(),
                 },
             ],
             raw_where: Some("score > 3 -- comment".into()),
@@ -826,6 +1079,214 @@ mod tests {
         );
         let (sql, _) = count_sql(Dialect::Mysql, "`t`", &request).expect("builds");
         assert!(sql.contains("CAST(`name` AS CHAR) LIKE ? ESCAPE '!'"));
+    }
+
+    fn one(column: &str, op: FilterOp, value: Value) -> Filter {
+        Filter::new(column, op, value)
+    }
+
+    #[test]
+    fn every_operator_binds_its_values() {
+        let request = BrowseRequest {
+            filters: vec![
+                one("name", FilterOp::NotContains, Value::text("a%")),
+                one("name", FilterOp::EndsWith, Value::text("_z")),
+                Filter::list(
+                    "id",
+                    FilterOp::In,
+                    vec![Value::Int(1), Value::Int(2), Value::Int(3)],
+                ),
+                Filter::list("id", FilterOp::NotIn, vec![Value::Int(4)]),
+                Filter::list(
+                    "total",
+                    FilterOp::Between,
+                    vec![Value::Int(10), Value::Int(20)],
+                ),
+                one("code", FilterOp::Like, Value::text("A_%")),
+                one("note", FilterOp::IsEmpty, Value::Null),
+                one("note", FilterOp::IsNotEmpty, Value::Null),
+            ],
+            ..Default::default()
+        };
+        let (sql, params) = count_sql(Dialect::Postgres, "\"t\"", &request).expect("builds");
+        assert_eq!(
+            sql,
+            "SELECT COUNT(*) FROM \"t\" WHERE CAST(\"name\" AS text) NOT ILIKE $1 ESCAPE '!' \
+             AND CAST(\"name\" AS text) ILIKE $2 ESCAPE '!' AND \"id\" IN ($3, $4, $5) \
+             AND \"id\" NOT IN ($6) AND \"total\" BETWEEN $7 AND $8 \
+             AND CAST(\"code\" AS text) LIKE $9 \
+             AND (\"note\" IS NULL OR CAST(\"note\" AS text) = '') \
+             AND (\"note\" IS NOT NULL AND CAST(\"note\" AS text) <> '')"
+        );
+        assert_eq!(
+            params,
+            vec![
+                Value::text("%a!%%"),
+                Value::text("%!_z"),
+                Value::Int(1),
+                Value::Int(2),
+                Value::Int(3),
+                Value::Int(4),
+                Value::Int(10),
+                Value::Int(20),
+                Value::text("A_%"),
+            ]
+        );
+        let (sql, params) = count_sql(Dialect::Mysql, "`t`", &request).expect("builds");
+        assert!(
+            sql.contains("CAST(`name` AS CHAR) NOT LIKE ? ESCAPE '!'"),
+            "{sql}"
+        );
+        assert!(sql.contains("`id` IN (?, ?, ?)"), "{sql}");
+        assert_eq!(params.len(), 9);
+        let (sql, _) = count_sql(Dialect::Sqlite, "\"t\"", &request).expect("builds");
+        assert!(sql.contains("(\"note\" IS NULL OR \"note\" = '')"), "{sql}");
+    }
+
+    #[test]
+    fn lists_handle_nulls_and_empties() {
+        let build = |op, values| {
+            let request = BrowseRequest {
+                filters: vec![Filter::list("a", op, values)],
+                ..Default::default()
+            };
+            count_sql(Dialect::Sqlite, "t", &request).expect("builds")
+        };
+        assert_eq!(
+            build(FilterOp::In, vec![]).0,
+            "SELECT COUNT(*) FROM t WHERE 1 = 0"
+        );
+        assert_eq!(
+            build(FilterOp::NotIn, vec![]).0,
+            "SELECT COUNT(*) FROM t WHERE 1 = 1"
+        );
+        let (sql, params) = build(FilterOp::In, vec![Value::Int(1), Value::Null]);
+        assert_eq!(
+            sql,
+            "SELECT COUNT(*) FROM t WHERE (\"a\" IN (?) OR \"a\" IS NULL)"
+        );
+        assert_eq!(params, vec![Value::Int(1)]);
+        let (sql, _) = build(FilterOp::NotIn, vec![Value::Null, Value::Int(2)]);
+        assert_eq!(
+            sql,
+            "SELECT COUNT(*) FROM t WHERE (\"a\" NOT IN (?) AND \"a\" IS NOT NULL)"
+        );
+        assert_eq!(
+            build(FilterOp::In, vec![Value::Null]).0,
+            "SELECT COUNT(*) FROM t WHERE \"a\" IS NULL"
+        );
+        let request = BrowseRequest {
+            filters: vec![Filter::list("a", FilterOp::Between, vec![Value::Int(1)])],
+            ..Default::default()
+        };
+        let err = count_sql(Dialect::Sqlite, "t", &request).expect_err("one end");
+        assert!(err.to_string().contains("two values"), "{err}");
+    }
+
+    #[test]
+    fn any_joins_filters_with_or() {
+        let order = [key("id", false, false)];
+        let request = BrowseRequest {
+            limit: 10,
+            filters: vec![
+                one("a", FilterOp::Eq, Value::Int(1)),
+                one("b", FilterOp::Gt, Value::Int(2)),
+            ],
+            match_any: true,
+            raw_where: Some("c < 3".into()),
+            seek_after: Some(vec![("id".into(), Value::Int(9))]),
+            ..Default::default()
+        };
+        let built = build(Dialect::Postgres, &order, &request);
+        assert_eq!(
+            built.sql,
+            "SELECT * FROM \"t\" WHERE (\"a\" = $1 OR \"b\" > $2) AND (\nc < 3\n) AND \"id\" > $3 ORDER BY \"id\" ASC LIMIT 11"
+        );
+        // One condition needs no group.
+        let single = BrowseRequest {
+            filters: vec![one("a", FilterOp::Eq, Value::Int(1))],
+            match_any: true,
+            ..Default::default()
+        };
+        let (sql, _) = count_sql(Dialect::Sqlite, "t", &single).expect("builds");
+        assert_eq!(sql, "SELECT COUNT(*) FROM t WHERE \"a\" = ?");
+    }
+
+    #[test]
+    fn previews_write_escaped_literals() {
+        let request = BrowseRequest {
+            filters: vec![
+                one("name", FilterOp::Eq, Value::text("O'Brien \\ co")),
+                one("ok", FilterOp::Eq, Value::Bool(true)),
+                one("raw", FilterOp::Eq, Value::Bytes(vec![1, 255].into())),
+                Filter::list(
+                    "n",
+                    FilterOp::Between,
+                    vec![Value::Int(1), Value::Float(2.5)],
+                ),
+            ],
+            sort: vec![Sort {
+                column: "name".into(),
+                direction: SortDirection::Descending,
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            where_preview(Dialect::Postgres, &request).expect("builds"),
+            "WHERE \"name\" = E'O''Brien \\\\ co' AND \"ok\" = TRUE AND \"raw\" = '\\x01ff' AND \"n\" BETWEEN 1 AND 2.5"
+        );
+        assert_eq!(
+            where_preview(Dialect::Mysql, &request).expect("builds"),
+            "WHERE `name` = _utf8mb4 X'4f27427269656e205c20636f' AND `ok` = 1 AND `raw` = X'01ff' AND `n` BETWEEN 1 AND 2.5"
+        );
+        assert_eq!(
+            select_preview(Dialect::Sqlite, "\"t\"", &request).expect("builds"),
+            "SELECT * FROM \"t\" WHERE \"name\" = 'O''Brien \\ co' AND \"ok\" = 1 AND \"raw\" = X'01ff' AND \"n\" BETWEEN 1 AND 2.5 ORDER BY \"name\" DESC;"
+        );
+        assert_eq!(
+            where_preview(Dialect::Sqlite, &BrowseRequest::default()).expect("builds"),
+            ""
+        );
+        // Text without a backslash reads the same under any setting and stays plain.
+        let plain = BrowseRequest {
+            filters: vec![one("name", FilterOp::Contains, Value::text("it's"))],
+            ..Default::default()
+        };
+        assert_eq!(
+            where_preview(Dialect::Mysql, &plain).expect("builds"),
+            "WHERE CAST(`name` AS CHAR) LIKE '%it''s%' ESCAPE '!'"
+        );
+        assert_eq!(
+            where_preview(Dialect::Postgres, &plain).expect("builds"),
+            "WHERE CAST(\"name\" AS text) ILIKE '%it''s%' ESCAPE '!'"
+        );
+    }
+
+    #[test]
+    fn raw_conditions_stay_one_condition() {
+        let request = |raw: &str| BrowseRequest {
+            limit: 10,
+            filters: vec![one("a", FilterOp::Eq, Value::Int(1))],
+            raw_where: Some(raw.into()),
+            seek_after: Some(vec![("id".into(), Value::Int(9))]),
+            ..Default::default()
+        };
+        let order = [key("id", false, false)];
+        for dialect in [Dialect::Postgres, Dialect::Mysql, Dialect::Sqlite] {
+            for raw in ["1 = 1; DROP TABLE t", "b = 2) OR (c = 3"] {
+                let sql = BrowseSql {
+                    dialect,
+                    select_list: "*",
+                    from: "t",
+                    order: &order,
+                    total: true,
+                };
+                assert!(sql.build(&request(raw)).is_err(), "{dialect:?} {raw}");
+                assert!(count_sql(dialect, "t", &request(raw)).is_err());
+                assert!(where_preview(dialect, &request(raw)).is_err());
+            }
+            assert!(count_sql(dialect, "t", &request("b = 'x;y' AND (c > 2)")).is_ok());
+        }
     }
 
     #[test]
@@ -914,18 +1375,7 @@ mod tests {
 
     #[test]
     fn builders_never_panic() {
-        const OPS: [FilterOp; 10] = [
-            FilterOp::Eq,
-            FilterOp::NotEq,
-            FilterOp::Lt,
-            FilterOp::LtEq,
-            FilterOp::Gt,
-            FilterOp::GtEq,
-            FilterOp::Contains,
-            FilterOp::StartsWith,
-            FilterOp::IsNull,
-            FilterOp::IsNotNull,
-        ];
+        const OPS: [FilterOp; 18] = FilterOp::ALL;
         let mut rng = Lcg(7);
         for round in 0..3000 {
             let dialect = [Dialect::Postgres, Dialect::Mysql, Dialect::Sqlite][round % 3];
@@ -943,6 +1393,7 @@ mod tests {
                     column: rng.text(),
                     op: OPS[(rng.next() as usize) % OPS.len()],
                     value: rng.value(),
+                    values: (0..rng.next() % 4).map(|_| rng.value()).collect(),
                 })
                 .collect();
             let seek_after = rng.next().is_multiple_of(2).then(|| {
@@ -956,6 +1407,7 @@ mod tests {
                 limit: rng.next() as u32,
                 sort: Vec::new(),
                 filters,
+                match_any: rng.next().is_multiple_of(2),
                 raw_where: rng.next().is_multiple_of(3).then(|| rng.text()),
                 seek_after,
             };
@@ -977,6 +1429,8 @@ mod tests {
                 assert_eq!(placeholders, built.params.len());
             }
             let _ = count_sql(dialect, "t", &request);
+            let _ = where_preview(dialect, &request);
+            let _ = select_preview(dialect, "t", &request);
         }
     }
 }

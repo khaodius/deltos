@@ -164,6 +164,7 @@ async fn paging_with_and_without_seek_matches() {
                 column: "a".into(),
                 op: FilterOp::GtEq,
                 value: Value::Int(50),
+                values: Vec::new(),
             }],
         ),
     ];
@@ -417,6 +418,7 @@ async fn counts_and_describes() {
             column: "a".into(),
             op: FilterOp::IsNull,
             value: Value::Null,
+            values: Vec::new(),
         }],
         ..Default::default()
     };
@@ -483,6 +485,104 @@ async fn counts_and_describes() {
     assert!(page.last_key.is_none(), "a view has no key to seek by");
 
     assert!(conn.describe(&table("missing")).await.is_err());
+}
+
+/// Every filter bar operator, checked against the rows it should keep.
+#[tokio::test]
+async fn filter_operators_keep_the_right_rows() {
+    let db = TempDb::new("operators");
+    {
+        let conn = rusqlite::Connection::open(&db.0).expect("open");
+        conn.execute_batch(
+            "CREATE TABLE f (id INTEGER PRIMARY KEY, name TEXT, n INTEGER);
+             INSERT INTO f VALUES
+               (1, 'Ada', 10), (2, 'grace', 20), (3, '50% off', 30), (4, '', 40),
+               (5, NULL, NULL), (6, 'Linus_t', 50), (7, 'adam', 60);",
+        )
+        .expect("schema");
+    }
+    let conn = SqliteConnection::open(&db.config()).await.expect("open");
+    let f = table("f");
+    let ids = |request: BrowseRequest| {
+        let conn = &conn;
+        let f = &f;
+        async move {
+            let request = BrowseRequest {
+                limit: 100,
+                ..request
+            };
+            let page = conn.browse(f, &request).await.expect("browse");
+            let n = conn.count(f, &request, true).await.expect("count");
+            let ids: Vec<i64> = page
+                .rows
+                .iter()
+                .map(|r| match r[0] {
+                    Value::Int(i) => i,
+                    _ => -1,
+                })
+                .collect();
+            assert_eq!(n, ids.len() as u64);
+            ids
+        }
+    };
+    let one = |op, value| BrowseRequest {
+        filters: vec![Filter::new("name", op, value)],
+        ..Default::default()
+    };
+    let list = |column: &str, op, values| BrowseRequest {
+        filters: vec![Filter::list(column, op, values)],
+        ..Default::default()
+    };
+    assert_eq!(
+        ids(one(FilterOp::NotContains, Value::text("ad"))).await,
+        [2, 3, 4, 6]
+    );
+    assert_eq!(ids(one(FilterOp::EndsWith, Value::text("_T"))).await, [6]);
+    assert_eq!(ids(one(FilterOp::Contains, Value::text("%"))).await, [3]);
+    assert_eq!(ids(one(FilterOp::Like, Value::text("ad%"))).await, [1, 7]);
+    assert_eq!(ids(one(FilterOp::Like, Value::text("_race"))).await, [2]);
+    assert_eq!(ids(one(FilterOp::IsEmpty, Value::Null)).await, [4, 5]);
+    assert_eq!(
+        ids(one(FilterOp::IsNotEmpty, Value::Null)).await,
+        [1, 2, 3, 6, 7]
+    );
+    assert_eq!(
+        ids(list(
+            "n",
+            FilterOp::In,
+            vec![Value::Int(20), Value::Int(60), Value::Null]
+        ))
+        .await,
+        [2, 5, 7]
+    );
+    assert_eq!(
+        ids(list(
+            "n",
+            FilterOp::NotIn,
+            vec![Value::Int(10), Value::Int(20)]
+        ))
+        .await,
+        [3, 4, 6, 7]
+    );
+    assert_eq!(
+        ids(list(
+            "n",
+            FilterOp::Between,
+            vec![Value::Int(20), Value::Int(40)]
+        ))
+        .await,
+        [2, 3, 4]
+    );
+    let any = BrowseRequest {
+        filters: vec![
+            Filter::new("n", FilterOp::Lt, Value::Int(15)),
+            Filter::new("name", FilterOp::StartsWith, Value::text("lin")),
+        ],
+        match_any: true,
+        raw_where: Some("id > 1".into()),
+        ..Default::default()
+    };
+    assert_eq!(ids(any).await, [6]);
 }
 
 #[tokio::test]

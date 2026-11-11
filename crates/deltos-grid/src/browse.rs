@@ -46,6 +46,8 @@ impl Default for BrowseConfig {
 pub struct BrowseQuery {
     pub sort: Vec<Sort>,
     pub filters: Vec<Filter>,
+    /// The filters are joined with OR instead of AND.
+    pub match_any: bool,
     pub raw_where: Option<String>,
 }
 
@@ -61,6 +63,7 @@ impl BrowseQuery {
             limit,
             sort: self.sort.clone(),
             filters: self.filters.clone(),
+            match_any: self.match_any,
             raw_where: self.raw_where.clone(),
             seek_after,
         }
@@ -76,6 +79,10 @@ pub struct BrowseStats {
 
 struct State {
     query: BrowseQuery,
+    /// Bumped whenever a count in flight stops being about the rows shown: a new query,
+    /// an invalidation, or [`BrowseLoader::stop_counting`]. A count that finishes under
+    /// an older number is not reported.
+    epoch: u64,
     /// Order-column values of the last row of each page read, by page number.
     keys: HashMap<u64, Vec<(String, Value)>>,
     reporter: Option<Reporter>,
@@ -116,6 +123,7 @@ impl BrowseLoader {
                 config,
                 state: Mutex::new(State {
                     query,
+                    epoch: 0,
                     keys: HashMap::new(),
                     reporter: None,
                     stats: BrowseStats::default(),
@@ -143,6 +151,47 @@ impl BrowseLoader {
         let mut state = self.inner.state.lock();
         state.query = query;
         state.keys.clear();
+        state.epoch += 1;
+    }
+
+    /// The request a count of the current query sends, for showing what runs.
+    pub fn count_request(&self) -> BrowseRequest {
+        self.inner.state.lock().query.request(0, 0, None)
+    }
+
+    /// Counts the rows of the current query exactly, whatever their number, and reports
+    /// the count to the cache when it lands, unless the query changed or
+    /// [`BrowseLoader::stop_counting`] was called in the meantime. The table view runs this
+    /// when the person asks, for a filtered view whose count is only an estimate.
+    pub fn count_exact(&self) -> BoxFuture<'static, Result<u64>> {
+        let inner = self.inner.clone();
+        let (request, epoch, reporter) = {
+            let state = inner.state.lock();
+            (
+                state.query.request(0, 0, None),
+                state.epoch,
+                state.reporter.clone(),
+            )
+        };
+        Box::pin(async move {
+            let n = inner
+                .connection
+                .count(&inner.object, &request, true)
+                .await?;
+            if inner.state.lock().epoch != epoch {
+                return Err(Error::Cancelled);
+            }
+            if let Some(reporter) = reporter {
+                reporter.report(LoaderEvent::RowCount(RowCount::Exact(n)));
+            }
+            Ok(n)
+        })
+    }
+
+    /// Drops the result of every count in flight. The database may still finish the
+    /// statement; its answer is thrown away.
+    pub fn stop_counting(&self) {
+        self.inner.state.lock().epoch += 1;
     }
 
     pub fn stats(&self) -> BrowseStats {
@@ -196,9 +245,13 @@ impl PageLoader for BrowseLoader {
 
     fn count(&self) -> BoxFuture<'static, Result<RowCount>> {
         let inner = self.inner.clone();
-        let (request, reporter) = {
+        let (request, reporter, epoch) = {
             let state = inner.state.lock();
-            (state.query.request(0, 0, None), state.reporter.clone())
+            (
+                state.query.request(0, 0, None),
+                state.reporter.clone(),
+                state.epoch,
+            )
         };
         Box::pin(async move {
             let estimate = inner.connection.count(&inner.object, &request, false).await;
@@ -221,7 +274,10 @@ impl PageLoader for BrowseLoader {
                 reporter.spawn(Box::pin(async move {
                     // A failed exact count leaves the estimate standing; the person
                     // already has a usable number and an error here would only alarm.
-                    if let Ok(exact) = inner.connection.count(&inner.object, &request, true).await {
+                    // A count for a query that has since changed is dropped.
+                    if let Ok(exact) = inner.connection.count(&inner.object, &request, true).await
+                        && inner.state.lock().epoch == epoch
+                    {
                         events.report(LoaderEvent::RowCount(RowCount::Exact(exact)));
                     }
                 }));
@@ -235,7 +291,9 @@ impl PageLoader for BrowseLoader {
     }
 
     fn invalidate(&self) {
-        self.inner.state.lock().keys.clear();
+        let mut state = self.inner.state.lock();
+        state.keys.clear();
+        state.epoch += 1;
     }
 }
 
@@ -357,5 +415,40 @@ mod tests {
         assert_eq!(cache.row_count(), RowCount::Estimated(8_500_000));
         let stats = connection.stats();
         assert_eq!((stats.estimate_counts, stats.exact_counts), (1, 0));
+    }
+
+    #[test]
+    fn exact_count_on_demand_reaches_the_cache_unless_stopped() {
+        let exec = TestExecutor::new();
+        let connection = Arc::new(FakeConnection::new(9_000_000).with_estimate(8_500_000));
+        let loader = loader(&connection, 5_000_000);
+        let cache = GridCache::new(loader.clone(), config(), exec.hooks());
+        exec.run();
+        assert_eq!(cache.row_count(), RowCount::Estimated(8_500_000));
+
+        let n = futures::executor::block_on(loader.count_exact()).expect("count");
+        assert_eq!(n, 9_000_000);
+        exec.run();
+        assert_eq!(cache.row_count(), RowCount::Exact(9_000_000));
+
+        // A count started before the query changed is dropped.
+        cache.invalidate();
+        exec.run();
+        let stale = loader.count_exact();
+        loader.set_query(BrowseQuery {
+            match_any: true,
+            ..BrowseQuery::default()
+        });
+        assert!(matches!(
+            futures::executor::block_on(stale),
+            Err(Error::Cancelled)
+        ));
+        let stopped = loader.count_exact();
+        loader.stop_counting();
+        assert!(futures::executor::block_on(stopped).is_err());
+        exec.run();
+        // Only the fresh estimate stands.
+        assert_eq!(cache.row_count(), RowCount::Estimated(8_500_000));
+        assert!(loader.count_request().match_any);
     }
 }

@@ -211,6 +211,7 @@ async fn pages_identically_with_and_without_seek() {
             column: "a".into(),
             op: FilterOp::IsNull,
             value: Value::Null,
+            values: Vec::new(),
         }],
         ..Default::default()
     };
@@ -443,4 +444,70 @@ async fn describes_and_edits() {
     );
     let ddl = run(conn.as_ref(), &format!("CREATE TABLE {db}.later (x INT)")).await;
     assert_eq!(ddl.affected, None);
+}
+
+/// Every filter bar operator against a live server.
+#[tokio::test]
+async fn filter_operators_keep_the_right_rows() {
+    let Some(conn) = connect().await else { return };
+    let db = database(conn.as_ref(), "operators").await;
+    run(
+        conn.as_ref(),
+        &format!(
+            "CREATE TABLE {db}.f (id int PRIMARY KEY, name varchar(40), n int);
+             INSERT INTO {db}.f VALUES
+               (1, 'Ada', 10), (2, 'grace', 20), (3, '50% off', 30), (4, '', 40),
+               (5, NULL, NULL), (6, 'Linus_t', 50), (7, 'adam', 60);"
+        ),
+    )
+    .await;
+    let f = ObjectRef {
+        namespace: vec![db.clone()],
+        name: "f".into(),
+        kind: ObjectKind::Table,
+    };
+    let ids = async |filters: Vec<Filter>, match_any: bool| -> Vec<Value> {
+        let request = BrowseRequest {
+            limit: 100,
+            filters,
+            match_any,
+            ..Default::default()
+        };
+        let page = conn.browse(&f, &request).await.expect("browse");
+        let n = conn.count(&f, &request, true).await.expect("count");
+        assert_eq!(n, page.rows.len() as u64);
+        page.rows.iter().map(|r| r[0].clone()).collect()
+    };
+    let int = |ids: &[i64]| ids.iter().map(|i| Value::Int(*i)).collect::<Vec<_>>();
+    let name = |op, text: &str| vec![Filter::new("name", op, Value::text(text))];
+    assert_eq!(
+        ids(name(FilterOp::NotContains, "ad"), false).await,
+        int(&[2, 3, 4, 6])
+    );
+    assert_eq!(ids(name(FilterOp::EndsWith, "_T"), false).await, int(&[6]));
+    assert_eq!(ids(name(FilterOp::Contains, "%"), false).await, int(&[3]));
+    // The default collation ignores case, and LIKE follows it.
+    assert_eq!(ids(name(FilterOp::Like, "ad%"), false).await, int(&[1, 7]));
+    assert_eq!(ids(name(FilterOp::IsEmpty, ""), false).await, int(&[4, 5]));
+    let n = |op, values: &[i64]| {
+        vec![Filter::list(
+            "n",
+            op,
+            values.iter().map(|v| Value::Int(*v)).collect(),
+        )]
+    };
+    assert_eq!(ids(n(FilterOp::In, &[20, 60]), false).await, int(&[2, 7]));
+    assert_eq!(
+        ids(n(FilterOp::NotIn, &[10, 20]), false).await,
+        int(&[3, 4, 6, 7])
+    );
+    assert_eq!(
+        ids(n(FilterOp::Between, &[20, 40]), false).await,
+        int(&[2, 3, 4])
+    );
+    let any = vec![
+        Filter::new("n", FilterOp::Lt, Value::Int(15)),
+        Filter::new("name", FilterOp::StartsWith, Value::text("lin")),
+    ];
+    assert_eq!(ids(any, true).await, int(&[1, 6]));
 }

@@ -337,7 +337,7 @@ pub struct Sort {
     pub direction: SortDirection,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum FilterOp {
     Eq,
     NotEq,
@@ -345,23 +345,105 @@ pub enum FilterOp {
     LtEq,
     Gt,
     GtEq,
+    /// The value's text appears in the column's text, ignoring case.
     Contains,
     StartsWith,
     IsNull,
     IsNotNull,
+    /// The value's text does not appear in the column's text, ignoring case.
+    NotContains,
+    EndsWith,
+    /// The column equals one of [`Filter::values`].
+    In,
+    /// The column equals none of [`Filter::values`].
+    NotIn,
+    /// The column lies between `values[0]` and `values[1]`, both included.
+    Between,
+    /// The column's text matches a `LIKE` pattern as typed: `%` for any run of
+    /// characters, `_` for one. Case follows the database's own `LIKE`.
+    Like,
+    /// NULL or empty text.
+    IsEmpty,
+    /// Neither NULL nor empty text.
+    IsNotEmpty,
 }
 
-/// One condition of the table view's filter bar. Conditions are joined with AND.
+impl FilterOp {
+    pub const ALL: [FilterOp; 18] = [
+        FilterOp::Eq,
+        FilterOp::NotEq,
+        FilterOp::Lt,
+        FilterOp::LtEq,
+        FilterOp::Gt,
+        FilterOp::GtEq,
+        FilterOp::Contains,
+        FilterOp::NotContains,
+        FilterOp::StartsWith,
+        FilterOp::EndsWith,
+        FilterOp::In,
+        FilterOp::NotIn,
+        FilterOp::Between,
+        FilterOp::Like,
+        FilterOp::IsNull,
+        FilterOp::IsNotNull,
+        FilterOp::IsEmpty,
+        FilterOp::IsNotEmpty,
+    ];
+
+    /// Whether the condition compares with something the person types.
+    pub fn takes_value(self) -> bool {
+        !matches!(
+            self,
+            FilterOp::IsNull | FilterOp::IsNotNull | FilterOp::IsEmpty | FilterOp::IsNotEmpty
+        )
+    }
+
+    /// Whether the condition reads [`Filter::values`] instead of [`Filter::value`].
+    pub fn takes_list(self) -> bool {
+        matches!(self, FilterOp::In | FilterOp::NotIn | FilterOp::Between)
+    }
+}
+
+/// One condition of the table view's filter bar. Conditions are joined with AND, or with
+/// OR when [`BrowseRequest::match_any`] is set.
+///
+/// `value` is what the column is compared with. [`FilterOp::In`], [`FilterOp::NotIn`] and
+/// [`FilterOp::Between`] read `values` instead: the list, or the low and high ends.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Filter {
     pub column: String,
     pub op: FilterOp,
     pub value: Value,
+    pub values: Vec<Value>,
+}
+
+impl Filter {
+    /// A condition that compares with one value.
+    pub fn new(column: impl Into<String>, op: FilterOp, value: Value) -> Self {
+        Self {
+            column: column.into(),
+            op,
+            value,
+            values: Vec::new(),
+        }
+    }
+
+    /// A condition over a list of values: [`FilterOp::In`], [`FilterOp::NotIn`] or
+    /// [`FilterOp::Between`].
+    pub fn list(column: impl Into<String>, op: FilterOp, values: Vec<Value>) -> Self {
+        Self {
+            column: column.into(),
+            op,
+            value: Value::Null,
+            values,
+        }
+    }
 }
 
 /// Which rows of an object to read: `limit` rows starting at row `offset` of the object
 /// as sorted and filtered. `raw_where` is a condition in the database's own language,
-/// typed by the person, and is used as given.
+/// typed by the person, and is used as given. `match_any` joins the `filters` with OR
+/// instead of AND; `raw_where` and the seek condition always apply on top.
 ///
 /// Rows come back in a total order: the `sort` columns, then the primary key (or the
 /// database's row identity, such as `ctid`, `rowid` or `_id`) as a tie break, so pages
@@ -379,6 +461,7 @@ pub struct BrowseRequest {
     pub limit: u32,
     pub sort: Vec<Sort>,
     pub filters: Vec<Filter>,
+    pub match_any: bool,
     pub raw_where: Option<String>,
     pub seek_after: Option<Vec<(String, Value)>>,
 }

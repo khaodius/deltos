@@ -14,13 +14,10 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use deltos_data::{
-    DriverKind, Filter, FilterOp, ObjectInfo, ObjectKind, ObjectRef, RowEdit, Sort, SortDirection,
-    Value,
+    DriverKind, FilterOp, ObjectInfo, ObjectKind, ObjectRef, RowEdit, Sort, SortDirection, Value,
 };
 use deltos_dock::PanelId;
-use deltos_grid::{
-    BrowseConfig, BrowseLoader, BrowseQuery, CacheConfig, GridCache, RowCount, Status,
-};
+use deltos_grid::{BrowseConfig, BrowseLoader, BrowseQuery, CacheConfig, GridCache, Status};
 use deltos_settings::PanelKind;
 use gpui::{
     AnyElement, App, AppContext, ClipboardItem, Context, Entity, FocusHandle, FontWeight,
@@ -35,11 +32,11 @@ use crate::ui::edit;
 use crate::ui::grid::{Batch, CellInput, GridEvent, GridView, MenuTarget, RowRef};
 use crate::ui::icons::{Icon, icon};
 use crate::ui::pending::RowMark;
-use crate::ui::text_input::{InputEvent, TextInput};
-use crate::ui::{
-    ButtonStyle, MenuItem, Tooltip, button, empty_state, field, icon_button, menu, segmented,
-    thousands,
-};
+use crate::ui::{ButtonStyle, Tooltip, button, empty_state, icon_button, segmented, thousands};
+
+mod filters;
+mod memory;
+mod pager;
 
 actions!(
     table,
@@ -48,7 +45,9 @@ actions!(
         ReviewChanges,
         DiscardChanges,
         AddRow,
-        DuplicateRows
+        DuplicateRows,
+        /// Shows the filter bar and puts the cursor in it.
+        FocusFilter,
     ]
 );
 
@@ -119,35 +118,6 @@ enum Mode {
     Structure,
 }
 
-const OPS: [(FilterOp, &str); 10] = [
-    (FilterOp::Eq, "="),
-    (FilterOp::NotEq, "≠"),
-    (FilterOp::Lt, "<"),
-    (FilterOp::LtEq, "≤"),
-    (FilterOp::Gt, ">"),
-    (FilterOp::GtEq, "≥"),
-    (FilterOp::Contains, "contains"),
-    (FilterOp::StartsWith, "starts with"),
-    (FilterOp::IsNull, "is NULL"),
-    (FilterOp::IsNotNull, "is not NULL"),
-];
-
-fn op_label(op: FilterOp) -> &'static str {
-    OPS.iter().find(|(o, _)| *o == op).map_or("=", |(_, l)| l)
-}
-
-struct FilterRow {
-    column: usize,
-    op: FilterOp,
-    value: Entity<TextInput>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OpenMenu {
-    Column(usize),
-    Op(usize),
-}
-
 pub struct TablePanel {
     state: Entity<AppState>,
     connection: String,
@@ -157,9 +127,8 @@ pub struct TablePanel {
     mode: Mode,
     info: Option<Result<ObjectInfo, String>>,
     sort: Vec<Sort>,
-    filters: Vec<FilterRow>,
-    filters_open: bool,
-    menu: Option<OpenMenu>,
+    filters: filters::Filters,
+    pager: pager::Pager,
     /// The database behind the table, once connected.
     driver: Option<DriverKind>,
     /// The last edit's outcome, shown in the status bar: the text and whether it failed.
@@ -251,6 +220,8 @@ impl TablePanel {
                 }
             }),
         ];
+        let filters = filters::Filters::new(cx);
+        let pager = pager::Pager::new(cx);
         let mut this = Self {
             state,
             connection,
@@ -260,9 +231,8 @@ impl TablePanel {
             mode: Mode::Data,
             info: None,
             sort: Vec::new(),
-            filters: Vec::new(),
-            filters_open: false,
-            menu: None,
+            filters,
+            pager,
             driver: None,
             notice: None,
             notice_generation: 0,
@@ -284,6 +254,10 @@ impl TablePanel {
                     .unwrap_or_default()
             }))
         });
+        // The sort and filters this table had earlier in the session.
+        if let Some(view) = memory::recall(cx, &this.connection, &this.object) {
+            this.apply_view(view, cx);
+        }
         this.attach(cx);
         this
     }
@@ -366,49 +340,25 @@ impl TablePanel {
     }
 
     fn query(&self, cx: &App) -> BrowseQuery {
-        let columns = self.grid.read(cx).columns().clone();
-        let filters = self
-            .filters
-            .iter()
-            .filter_map(|f| {
-                let column = columns.get(f.column)?;
-                let text = f.value.read(cx).text().to_owned();
-                let value = match f.op {
-                    FilterOp::IsNull | FilterOp::IsNotNull => Value::Null,
-                    _ if column.kind.is_numeric() => text
-                        .trim()
-                        .parse::<i64>()
-                        .map(Value::Int)
-                        .or_else(|_| text.trim().parse::<f64>().map(Value::Float))
-                        .unwrap_or_else(|_| Value::text(text.clone())),
-                    _ if column.kind == deltos_data::ValueKind::Bool => match text.trim() {
-                        "true" | "1" | "t" => Value::Bool(true),
-                        "false" | "0" | "f" => Value::Bool(false),
-                        _ => Value::text(text.clone()),
-                    },
-                    _ => Value::text(text.clone()),
-                };
-                Some(Filter {
-                    column: column.name.clone(),
-                    op: f.op,
-                    value,
-                })
-            })
-            .collect();
+        let (filters, match_any, raw_where) = self.filter_parts(cx);
         BrowseQuery {
             sort: self.sort.clone(),
             filters,
-            raw_where: None,
+            match_any,
+            raw_where,
         }
     }
 
     /// Re-reads with the current sort and filters, keeping the column widths. Staged
     /// changes stay: they are keyed by primary key and find their rows again.
     fn requery(&mut self, cx: &mut Context<Self>) {
+        let view = self.saved_view(cx);
+        memory::remember(cx, &self.connection, &self.object, view);
         let Some(loader) = self.loader.clone() else {
             return;
         };
         loader.set_query(self.query(cx));
+        self.pager.counting = None;
         let columns = self.grid.read(cx).columns().clone();
         let sort: Vec<(usize, SortDirection)> = self
             .sort
@@ -1489,17 +1439,6 @@ impl TablePanel {
         .detach();
     }
 
-    /// Adds a filter on `column` and runs it.
-    fn filter_by(&mut self, column: usize, op: FilterOp, text: String, cx: &mut Context<Self>) {
-        self.add_filter(cx);
-        if let Some(f) = self.filters.last_mut() {
-            f.column = column;
-            f.op = op;
-            f.value.update(cx, |i, cx| i.set_text(text, cx));
-        }
-        self.requery(cx);
-    }
-
     fn sort_by(&mut self, column: usize, direction: Option<SortDirection>, cx: &mut Context<Self>) {
         let Some(name) = self
             .grid
@@ -1590,14 +1529,10 @@ impl TablePanel {
                     }
                     None => {}
                 }
-                if !self.filters.is_empty() {
+                if self.filters.active(cx) {
                     items.push(MenuItem::new(
                         "Clear filters",
-                        run(Box::new(|t, cx| {
-                            t.filters.clear();
-                            t.filters_open = false;
-                            t.requery(cx);
-                        })),
+                        run(Box::new(|t, cx| t.clear_filters(cx))),
                     ));
                 }
                 items.push(MenuItem::separator());
@@ -1776,8 +1711,9 @@ impl TablePanel {
                     format!("Filter by {name}…"),
                     run(Box::new(move |t, cx| {
                         t.add_filter(cx);
-                        if let Some(f) = t.filters.last_mut() {
-                            f.column = col;
+                        let name = t.grid.read(cx).columns().get(col).map(|c| c.name.clone());
+                        if let (Some(f), Some(name)) = (t.filters.rows.last_mut(), name) {
+                            f.column = name;
                         }
                         cx.notify();
                     })),
@@ -1830,214 +1766,11 @@ impl TablePanel {
         self.requery(cx);
     }
 
-    fn add_filter(&mut self, cx: &mut Context<Self>) {
-        let input = cx.new(|cx| TextInput::new("Value", cx));
-        self._subs.push(cx.subscribe(&input, |this, _, e, cx| {
-            if let InputEvent::Submit = e {
-                this.requery(cx);
-            }
-        }));
-        let column = self.grid.read(cx).selection.map_or(0, |s| s.head.1);
-        self.filters.push(FilterRow {
-            column,
-            op: FilterOp::Eq,
-            value: input,
-        });
-        self.filters_open = true;
-        cx.notify();
-    }
-
-    fn filter_bar(&mut self, t: &Theme, window: &Window, cx: &mut Context<Self>) -> AnyElement {
-        let columns = self.grid.read(cx).columns().clone();
-        let mut bar = div()
-            .flex_none()
-            .px(px(8.))
-            .py(px(6.))
-            .flex()
-            .flex_col()
-            .gap(px(6.))
-            .bg(t.sidebar)
-            .border_b_1()
-            .border_color(t.border);
-        for (i, f) in self.filters.iter().enumerate() {
-            let column_name: SharedString = columns
-                .get(f.column)
-                .map_or_else(|| "Column".into(), |c| c.name.clone().into());
-            let open = self.menu;
-            let needs_value = !matches!(f.op, FilterOp::IsNull | FilterOp::IsNotNull);
-            let picker = |id: (&'static str, usize), label: SharedString, width: f32| {
-                div()
-                    .id(id)
-                    .relative()
-                    .w(px(width))
-                    .h(t.s(26.))
-                    .px(px(8.))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .rounded(t.radius_small)
-                    .bg(t.input)
-                    .border_1()
-                    .border_color(t.border_strong)
-                    .cursor_pointer()
-                    .text_size(t.ui_size)
-                    .child(div().overflow_hidden().whitespace_nowrap().child(label))
-                    .child(
-                        icon(Icon::ChevronDown)
-                            .size(px(12.))
-                            .text_color(t.text_faint),
-                    )
-            };
-            let mut col_picker = picker(("filter-col", i), column_name, 180.).on_click(
-                cx.listener(move |this, _, _, cx| {
-                    this.menu = Some(OpenMenu::Column(i));
-                    cx.notify();
-                }),
-            );
-            if open == Some(OpenMenu::Column(i)) {
-                let weak = cx.entity().downgrade();
-                let items = columns
-                    .iter()
-                    .enumerate()
-                    .map(|(c, col)| {
-                        let weak = weak.clone();
-                        MenuItem::new(col.name.clone(), move |_, cx| {
-                            weak.update(cx, |this, cx| {
-                                if let Some(f) = this.filters.get_mut(i) {
-                                    f.column = c;
-                                }
-                                cx.notify();
-                            })
-                            .ok();
-                        })
-                        .detail(col.type_name.clone())
-                        .checked(c == f.column)
-                    })
-                    .collect();
-                let close = weak.clone();
-                col_picker = col_picker.child(menu(
-                    "column-menu",
-                    items,
-                    220.,
-                    move |_, cx| {
-                        close
-                            .update(cx, |this, cx| {
-                                this.menu = None;
-                                cx.notify();
-                            })
-                            .ok();
-                    },
-                    t,
-                ));
-            }
-            let mut op_picker = picker(("filter-op", i), op_label(f.op).into(), 110.).on_click(
-                cx.listener(move |this, _, _, cx| {
-                    this.menu = Some(OpenMenu::Op(i));
-                    cx.notify();
-                }),
-            );
-            if open == Some(OpenMenu::Op(i)) {
-                let weak = cx.entity().downgrade();
-                let items = OPS
-                    .iter()
-                    .map(|(op, label)| {
-                        let (weak, op) = (weak.clone(), *op);
-                        MenuItem::new(*label, move |_, cx| {
-                            weak.update(cx, |this, cx| {
-                                if let Some(f) = this.filters.get_mut(i) {
-                                    f.op = op;
-                                }
-                                cx.notify();
-                            })
-                            .ok();
-                        })
-                        .checked(op == f.op)
-                    })
-                    .collect();
-                let close = weak.clone();
-                op_picker = op_picker.child(menu(
-                    "op-menu",
-                    items,
-                    140.,
-                    move |_, cx| {
-                        close
-                            .update(cx, |this, cx| {
-                                this.menu = None;
-                                cx.notify();
-                            })
-                            .ok();
-                    },
-                    t,
-                ));
-            }
-            bar = bar.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .child(col_picker)
-                    .child(op_picker)
-                    .child(
-                        div()
-                            .flex_1()
-                            .when(needs_value, |el| el.child(field(&f.value, t, window, cx)))
-                            .when(!needs_value, |el| el.h(t.s(26.))),
-                    )
-                    .child(
-                        icon_button(("filter-remove", i), Icon::Close, t)
-                            .tooltip(|_, cx| Tooltip::view("Remove this condition", cx))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if i < this.filters.len() {
-                                    this.filters.remove(i);
-                                }
-                                if this.filters.is_empty() {
-                                    this.filters_open = false;
-                                }
-                                this.requery(cx);
-                            })),
-                    ),
-            );
-        }
-        bar.child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(6.))
-                .child(
-                    button("filter-add", "Add condition", ButtonStyle::Ghost, t)
-                        .on_click(cx.listener(|this, _, _, cx| this.add_filter(cx))),
-                )
-                .child(div().flex_1())
-                .child(
-                    button("filter-clear", "Clear", ButtonStyle::Secondary, t).on_click(
-                        cx.listener(|this, _, _, cx| {
-                            this.filters.clear();
-                            this.filters_open = false;
-                            this.requery(cx);
-                        }),
-                    ),
-                )
-                .child(
-                    button("filter-apply", "Apply", ButtonStyle::Primary, t)
-                        .on_click(cx.listener(|this, _, _, cx| this.requery(cx))),
-                ),
-        )
-        .into_any_element()
-    }
-
-    fn status_bar(&mut self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn status_bar(&mut self, t: &Theme, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let grid = self.grid.read(cx);
-        let (count, status, memory) = match grid.cache() {
-            Some(c) => (c.row_count(), c.status(), c.memory_used()),
-            None => (RowCount::Unknown, Status::Idle, 0),
-        };
-        let rows: SharedString = match count {
-            RowCount::Unknown => "– rows".into(),
-            RowCount::Estimated(n) => format!("≈ {} rows", thousands(n)).into(),
-            RowCount::AtLeast(n) => format!("{}+ rows", thousands(n)).into(),
-            RowCount::Exact(n) => {
-                format!("{} {}", thousands(n), if n == 1 { "row" } else { "rows" }).into()
-            }
+        let (status, memory) = match grid.cache() {
+            Some(c) => (c.status(), c.memory_used()),
+            None => (Status::Idle, 0),
         };
         let inserted = grid.pending.inserts().len() as u64;
         let selected = grid
@@ -2051,12 +1784,13 @@ impl TablePanel {
             inserted as usize,
         );
         let mode = self.mode;
-        let filters = self.filters.len();
+        let filtering = self.filters.active(cx);
         let committing = self.committing;
         let can_add = grid.editable && !grid.columns().is_empty();
         let small =
             |b: gpui::Stateful<gpui::Div>| b.h(t.s(22.)).px(t.s(9.)).text_size(t.small_size);
         let env = crate::safety::Environment::of(self.state.read(cx), &self.connection);
+        let rows = self.pager_bar(t, window, cx);
         div()
             .flex_none()
             .h(t.bar_height)
@@ -2087,13 +1821,13 @@ impl TablePanel {
             ))
             .child(
                 icon_button("toggle-filters", Icon::Filter, t)
-                    .when(filters > 0, |el| el.text_color(t.accent))
+                    .when(filtering, |el| el.text_color(t.accent))
                     .tooltip(|_, cx| Tooltip::view("Filter rows", cx))
                     .on_click(cx.listener(|this, _, _, cx| {
-                        if this.filters.is_empty() {
+                        if this.filters.rows.is_empty() && !this.filters.raw_mode {
                             this.add_filter(cx);
                         } else {
-                            this.filters_open = !this.filters_open;
+                            this.filters.open = !this.filters.open;
                             cx.notify();
                         }
                     })),
@@ -2185,12 +1919,7 @@ impl TablePanel {
                     |el, _| el.child("New row"),
                 )
             })
-            .child(
-                div()
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(t.text)
-                    .child(rows),
-            )
+            .child(rows)
             .child(match status {
                 Status::Loading => div()
                     .text_color(t.text_faint)
@@ -2654,7 +2383,7 @@ impl Render for TablePanel {
             Mode::Structure => self.structure(&t),
         };
         let filters =
-            (self.filters_open && self.mode == Mode::Data).then(|| self.filter_bar(&t, window, cx));
+            (self.filters.open && self.mode == Mode::Data).then(|| self.filter_bar(&t, window, cx));
         let confirm = self.confirm_delete.clone().map(|rows| {
             let n = rows.len();
             div()
@@ -2727,6 +2456,9 @@ impl Render for TablePanel {
             .flex_col()
             .key_context("TablePanel")
             .bg(t.surface)
+            .on_action(
+                cx.listener(|this, _: &FocusFilter, window, cx| this.focus_filter(window, cx)),
+            )
             .on_action(cx.listener(|this, _: &CommitChanges, window, cx| {
                 this.flush_edit(window, cx);
                 this.commit(None, cx);
@@ -2773,7 +2505,7 @@ impl Render for TablePanel {
                     .child(body)
                     .children(review),
             )
-            .child(self.status_bar(&t, cx))
+            .child(self.status_bar(&t, window, cx))
             .into_any_element()
     }
 }

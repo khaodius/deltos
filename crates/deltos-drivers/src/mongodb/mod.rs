@@ -66,6 +66,17 @@ use shell::{Command, Operation};
 /// scrolling. Past this many the memory is cleared and rebuilt as pages are read.
 const MAX_SHAPES: usize = 256;
 
+/// The filter document a browse with `request` sends, as compact relaxed extended JSON,
+/// for the filter bar's preview and "copy". `kind_of` gives a field's grid kind, as the
+/// table view knows it, so typed values read as the browse reads them.
+pub fn filter_preview(
+    request: &BrowseRequest,
+    kind_of: impl Fn(&str) -> Option<deltos_data::ValueKind>,
+) -> Result<String> {
+    let filter = query::all_of(query::filter(request, kind_of)?);
+    Ok(convert::json_text(Bson::Document(filter)))
+}
+
 /// Opens MongoDB connections.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MongoDriver;

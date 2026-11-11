@@ -154,6 +154,15 @@ pub fn rebind_keys(settings: &Settings, cx: &mut App) {
             "explain-query" => KeyBinding::new(keys, ui::query::ExplainQuery, Some("QueryPanel")),
             "format-sql" => KeyBinding::new(keys, ui::query::FormatSql, Some("QueryPanel")),
             "autocomplete" => KeyBinding::new(keys, ui::editor::ShowCompletions, Some("Editor")),
+            "focus-filter" => {
+                // In a table, wherever it is docked; elsewhere, the table in front.
+                bindings.push(KeyBinding::new(
+                    keys,
+                    ui::table::FocusFilter,
+                    Some("TablePanel"),
+                ));
+                KeyBinding::new(keys, ui::table::FocusFilter, ctx)
+            }
             _ => continue,
         };
         bindings.push(binding);
@@ -582,6 +591,15 @@ impl Render for Root {
             .on_action(cx.listener(|this, _: &ZoomReset, _, cx| this.zoom(None, cx)))
             .on_action(cx.listener(|this, _: &ResetLayout, _, cx| {
                 this.workspace.update(cx, |w, cx| w.reset_layout(cx))
+            }))
+            .on_action(cx.listener(|this, _: &ui::table::FocusFilter, window, cx| {
+                this.workspace.update(cx, |w, cx| {
+                    if let Some(ui::workspace::PanelView::Table(t)) =
+                        w.active_document().and_then(|p| w.view(p)).cloned()
+                    {
+                        t.update(cx, |t, cx| t.focus_filter(window, cx));
+                    }
+                })
             }))
             .children(bar)
             .children(strip)

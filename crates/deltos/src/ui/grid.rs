@@ -788,6 +788,22 @@ impl GridView {
         }
     }
 
+    /// The rows on screen, a partly shown last row included.
+    pub fn rows_in_view(&self, cx: &App) -> Range<u64> {
+        let fit = self.body_size().1 as f64 / Self::row_height(theme(cx)) as f64;
+        let first = self.top.floor() as u64;
+        let end = ((self.top + fit).ceil() as u64).min(self.total_rows());
+        first..end.max(first)
+    }
+
+    /// Scrolls so `row` is the first one on screen, or as near as the end allows.
+    pub fn scroll_to_row(&mut self, row: u64, cx: &mut Context<Self>) {
+        self.top = row as f64;
+        let t = theme(cx).clone();
+        self.clamp(&t);
+        cx.notify();
+    }
+
     fn row_height(t: &Theme) -> f32 {
         f32::from(t.row_height)
     }
