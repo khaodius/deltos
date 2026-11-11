@@ -37,7 +37,7 @@ the same everywhere.
 Every part of the window is a panel: connections, the object sidebar, tables, queries,
 results, the inspector, history and settings. Drag a tab to split a pane or join another
 stack. Pull it past the window's edge and it becomes a window of its own, which stays under
-the pointer until you let go. Hold that window over the main one and it docks again. The
+the pointer until you let go. Drop that window on the main one, or hold it there, and it docks again. The
 layout is saved and comes back on the next start.
 
 ## Large tables
@@ -55,6 +55,12 @@ connection form and the fields fill themselves in. Deltos also offers a URL it f
 clipboard. Passwords go to the system keychain, never to the settings file. When a test
 fails, the form says why it most likely failed: wrong credentials, a server that only
 listens on localhost, or a firewall.
+
+A database that only listens on its own server is reached through a built-in SSH tunnel:
+turn on SSH tunnel, give the SSH host (a `Host` alias from `~/.ssh/config` works) and sign in
+with a key, the ssh-agent or a password. Deltos opens the tunnel on a free local port, checks
+the host key against `~/.ssh/known_hosts`, reconnects when the link drops and closes it on
+disconnect. No OpenSSH client is needed, and a test says whether SSH or the database failed.
 
 ## Appearance
 

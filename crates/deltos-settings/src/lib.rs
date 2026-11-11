@@ -39,7 +39,8 @@ pub struct Settings {
     pub layout: SavedLayout,
 }
 
-const REVISION: u32 = 1;
+/// 2: Obsidian replaced Graphite as the default dark palette.
+const REVISION: u32 = 2;
 
 impl Default for Settings {
     fn default() -> Self {
@@ -363,7 +364,7 @@ impl Default for Appearance {
             custom_theme: None,
             accent: 0x2F7CF6,
             light_palette: Palette::Classic,
-            dark_palette: Palette::Graphite,
+            dark_palette: Palette::Obsidian,
             accent_tint: 0.0,
             title_bar_style: TitleBarStyle::Plain,
             tab_style: TabStyle::Card,
@@ -696,6 +697,11 @@ impl Settings {
 
     pub fn from_toml(text: &str) -> Result<Self, Error> {
         let mut s: Self = toml::from_str(text)?;
+        // Files from before Obsidian became the default move off the old default; a
+        // palette picked on purpose stays.
+        if s.revision < 2 && s.appearance.dark_palette == Palette::Graphite {
+            s.appearance.dark_palette = Palette::Obsidian;
+        }
         s.revision = s.revision.max(REVISION);
         s.sanitize();
         Ok(s)
@@ -838,6 +844,50 @@ mod tests {
     #[test]
     fn empty_file_loads_defaults() {
         assert_eq!(Settings::from_toml("").unwrap(), Settings::default());
+    }
+
+    #[test]
+    fn moves_old_files_to_the_new_dark_default() {
+        let old = "revision = 1\n[appearance]\ndark_palette = \"graphite\"\n";
+        let s = Settings::from_toml(old).unwrap();
+        assert_eq!(s.appearance.dark_palette, Palette::Obsidian);
+        assert_eq!(s.revision, REVISION);
+        let kept = "revision = 2\n[appearance]\ndark_palette = \"graphite\"\n";
+        let s = Settings::from_toml(kept).unwrap();
+        assert_eq!(s.appearance.dark_palette, Palette::Graphite);
+        let plum = "revision = 1\n[appearance]\ndark_palette = \"plum\"\n";
+        assert_eq!(
+            Settings::from_toml(plum).unwrap().appearance.dark_palette,
+            Palette::Plum
+        );
+    }
+
+    #[test]
+    fn keeps_the_ssh_tunnel_without_its_secret() {
+        let mut s = Settings::default();
+        s.connections.push(SavedConnection {
+            id: "remote".into(),
+            kind: DriverKind::Mysql,
+            config: deltos_data::ConnectionConfig {
+                ssh: deltos_data::SshTunnel {
+                    enabled: true,
+                    host: "prod-db".into(),
+                    auth: deltos_data::SshAuth::Agent,
+                    secret: Some("hunter2".into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let text = s.to_toml().unwrap();
+        assert!(!text.contains("hunter2"));
+        let back = Settings::from_toml(&text).unwrap();
+        let ssh = &back.connections[0].config.ssh;
+        assert!(ssh.enabled);
+        assert_eq!(ssh.host, "prod-db");
+        assert_eq!(ssh.auth, deltos_data::SshAuth::Agent);
+        assert_eq!(ssh.secret, None);
     }
 
     #[test]

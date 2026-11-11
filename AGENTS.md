@@ -34,6 +34,7 @@ A Cargo workspace. Everything is Rust, and the UI is [GPUI](https://www.gpui.rs)
 | `crates/deltos-drivers` | The drivers: PostgreSQL, MySQL and MariaDB, SQLite and MongoDB. Integration tests run against live servers in CI when the `DELTOS_TEST_*_URL` variables are set, and skip otherwise |
 | `crates/deltos-grid` | The bounded row cache and on-disk spill store behind the table view, which is what keeps memory flat on huge tables |
 | `crates/deltos-dock` | The dock layout model: splits, tabs and floating panel windows, serialized so a layout survives restarts |
+| `crates/deltos-ssh` | SSH tunnels on russh: `~/.ssh/config` lookup, `known_hosts` checks, key, agent and password sign-in, the local forward and its reconnects. Its end-to-end test runs an SSH server in the test process |
 | `crates/deltos-settings` | `Settings` and its TOML file. Serde defaults must keep old files loading |
 | `crates/deltos-updater` | Signed self-updates: the manifest, Ed25519 verification, download and install per package type, and the `deltos-sign` binary the release workflow uses |
 | `third_party/` | Patched xattr (see its README) |
@@ -170,8 +171,8 @@ strands every installed copy, so do it only after a leak. Details in
 - `ListState` and uniform lists keep measured heights. Reset when something that changes row
   height changes, such as a setting, and not on every event.
 - Children are not clipped to rounded corners, so round the element itself.
-- Windows cannot add or remove the system title bar on an open window; reopen the window
-  when that setting changes there.
+- Windows cannot add or remove the system title bar on an open window; the app reopens its
+  windows in place when that setting changes there (`reopen_main_window` in `main.rs`).
 - `remove_window` does not call `on_window_should_close`.
 - Redraw only what changed. A grid that notifies on every fetched page redraws the whole
   window; notify once per visible range instead.

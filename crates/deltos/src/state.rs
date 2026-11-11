@@ -56,6 +56,11 @@ pub struct Session {
     pub kind: DriverKind,
     pub tag: ConnectionTag,
     pub conn: Arc<dyn Connection>,
+    /// The SSH tunnel the connection runs through, if it has one.
+    pub tunnel: Option<Arc<deltos_ssh::Tunnel>>,
+    /// The config the driver connected with (pointing at the tunnel when there is one),
+    /// to open the connection again after the tunnel reconnects.
+    pub config: ConnectionConfig,
     pub version: String,
     pub namespaces: Vec<NamespaceNode>,
     pub loading: bool,
@@ -88,6 +93,8 @@ const HISTORY_LIMIT: usize = 500;
 pub enum ConnectState {
     Connecting,
     Failed(String),
+    /// Open, with something to say, such as an SSH tunnel reconnecting.
+    Notice(String),
 }
 
 pub struct AppState {
@@ -220,6 +227,7 @@ impl AppState {
     /// person chose to keep it.
     pub fn save_connection(&mut self, conn: SavedConnection, cx: &mut Context<Self>) {
         let password = conn.config.password.clone();
+        let ssh_secret = conn.config.ssh.secret.clone();
         let id = conn.id.clone();
         let keep = conn.save_password;
         self.update_settings(cx, |s| {
@@ -228,13 +236,20 @@ impl AppState {
                 None => s.connections.push(conn),
             }
         });
-        let job = cx
-            .global::<Net>()
-            .run_blocking(move || match (keep, password) {
-                (true, Some(p)) if !p.is_empty() => deltos_settings::secrets::set_password(&id, &p),
-                (false, _) => deltos_settings::secrets::delete_password(&id),
+        let job = cx.global::<Net>().run_blocking(move || {
+            use deltos_settings::secrets;
+            let db = match (keep, password) {
+                (true, Some(p)) if !p.is_empty() => secrets::set_password(&id, &p),
+                (false, _) => secrets::delete_password(&id),
                 _ => Ok(()),
-            });
+            };
+            let ssh = match (keep, ssh_secret) {
+                (true, Some(p)) if !p.is_empty() => secrets::set_ssh_secret(&id, &p),
+                (false, _) => secrets::delete_ssh_secret(&id),
+                _ => Ok(()),
+            };
+            db.and(ssh)
+        });
         cx.spawn(async move |_, _| {
             if let Some(Err(e)) = job.await {
                 tracing::warn!("could not keep the password in the keychain: {e}");
@@ -246,9 +261,10 @@ impl AppState {
     pub fn delete_connection(&mut self, id: &str, cx: &mut Context<Self>) {
         let id = id.to_owned();
         self.update_settings(cx, |s| s.connections.retain(|c| c.id != id));
-        let job = cx
-            .global::<Net>()
-            .run_blocking(move || deltos_settings::secrets::delete_password(&id));
+        let job = cx.global::<Net>().run_blocking(move || {
+            deltos_settings::secrets::delete_password(&id)
+                .and(deltos_settings::secrets::delete_ssh_secret(&id))
+        });
         cx.spawn(async move |_, _| {
             if let Some(Err(e)) = job.await {
                 tracing::warn!("could not remove the password from the keychain: {e}");
@@ -274,29 +290,9 @@ impl AppState {
             .insert(saved.id.clone(), ConnectState::Connecting);
         cx.emit(StateEvent::Sessions);
         cx.notify();
-        let net = cx.global::<Net>();
-        let key = saved.id.clone();
-        let keep = saved.save_password;
-        let password = net.run_blocking(move || {
-            if keep {
-                deltos_settings::secrets::password(&key)
-            } else {
-                Ok(None)
-            }
-        });
+        let filled = fill_secrets(saved.clone(), cx);
         cx.spawn(async move |this, cx| {
-            let password = match password.await {
-                Some(Ok(p)) => p,
-                Some(Err(e)) => {
-                    tracing::warn!("could not read the keychain: {e}");
-                    None
-                }
-                None => None,
-            };
-            let mut config = saved.config.clone();
-            if config.password.is_none() {
-                config.password = password;
-            }
+            let config = filled.await;
             this.update(cx, |this, cx| this.connect_with(saved, config, cx))
                 .ok();
         })
@@ -317,16 +313,21 @@ impl AppState {
         cx.spawn(async move |this, cx| {
             let result = attempt.await;
             this.update(cx, |this, cx| match result {
-                Ok(conn) => {
+                Ok(opened) => {
                     this.connecting.remove(&id);
+                    if let Some(tunnel) = &opened.tunnel {
+                        this.watch_tunnel(&id, tunnel.clone(), cx);
+                    }
                     this.add_session(
                         Session {
                             id: id.clone(),
                             name: saved.name.clone(),
                             kind: saved.kind,
                             tag: saved.tag,
-                            version: conn.server_version(),
-                            conn,
+                            version: opened.conn.server_version(),
+                            conn: opened.conn,
+                            tunnel: opened.tunnel,
+                            config: opened.config,
                             namespaces: Vec::new(),
                             loading: false,
                             error: None,
@@ -359,6 +360,8 @@ impl AppState {
                 tag: ConnectionTag::Local,
                 version: conn.server_version(),
                 conn,
+                tunnel: None,
+                config: ConnectionConfig::default(),
                 namespaces: Vec::new(),
                 loading: false,
                 error: None,
@@ -383,11 +386,132 @@ impl AppState {
             return;
         };
         let session = self.sessions.remove(ix);
-        let conn = session.conn.clone();
-        cx.global::<Net>().spawn(async move { conn.close().await });
+        self.connecting.remove(id);
+        let (conn, tunnel) = (session.conn.clone(), session.tunnel.clone());
+        drop(session);
+        cx.global::<Net>().spawn(async move {
+            conn.close().await;
+            drop(conn);
+            // The tunnel goes once the connection through it is closed.
+            if let Some(tunnel) = tunnel.and_then(Arc::into_inner) {
+                tunnel.close().await;
+            }
+        });
         if self.active.as_deref() == Some(id) {
             self.active = self.sessions.first().map(|s| s.id.clone());
             cx.emit(StateEvent::ActiveSession);
+        }
+        cx.emit(StateEvent::Sessions);
+        cx.notify();
+    }
+
+    /// Closes every connection and its tunnel, for quitting.
+    pub fn close_all(&mut self, cx: &mut Context<Self>) {
+        let ids: Vec<String> = self.sessions.iter().map(|s| s.id.clone()).collect();
+        for id in ids {
+            self.disconnect(&id, cx);
+        }
+    }
+
+    /// Follows a connection's SSH tunnel: says when it drops, opens the database
+    /// connection again once the tunnel is back, and gives up with the reason when it
+    /// cannot come back.
+    fn watch_tunnel(&mut self, id: &str, tunnel: Arc<deltos_ssh::Tunnel>, cx: &mut Context<Self>) {
+        let mut status = tunnel.status();
+        let id = id.to_owned();
+        let weak = Arc::downgrade(&tunnel);
+        drop(tunnel);
+        cx.spawn(async move |this, cx| {
+            // tokio's watch channel needs no runtime to be awaited.
+            while status.changed().await.is_ok() {
+                let now = status.borrow_and_update().clone();
+                let Some(tunnel) = weak.upgrade() else {
+                    break;
+                };
+                let alive = this
+                    .update(cx, |this, cx| {
+                        let ours = this
+                            .session(&id)
+                            .and_then(|s| s.tunnel.as_ref())
+                            .is_some_and(|t| Arc::ptr_eq(t, &tunnel));
+                        if ours {
+                            this.tunnel_changed(&id, now, cx);
+                        }
+                        ours
+                    })
+                    .unwrap_or(false);
+                if !alive {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn tunnel_changed(
+        &mut self,
+        id: &str,
+        status: deltos_ssh::TunnelStatus,
+        cx: &mut Context<Self>,
+    ) {
+        use deltos_ssh::TunnelStatus;
+        match status {
+            TunnelStatus::Up => {
+                let Some((kind, config)) = self.session(id).map(|s| (s.kind, s.config.clone()))
+                else {
+                    return;
+                };
+                // The database connection ran through the old session and is gone with
+                // it; open it again through the same local port.
+                self.connecting.insert(
+                    id.to_owned(),
+                    ConnectState::Notice("SSH is back, reconnecting the database…".into()),
+                );
+                let attempt = connect_driver(kind, config, cx);
+                let id = id.to_owned();
+                cx.spawn(async move |this, cx| {
+                    let result = attempt.await;
+                    this.update(cx, |this, cx| {
+                        match result {
+                            Ok(conn) => {
+                                this.connecting.remove(&id);
+                                if let Some(s) = this.session_mut(&id) {
+                                    let old = std::mem::replace(&mut s.conn, conn);
+                                    s.version = s.conn.server_version();
+                                    cx.global::<Net>().spawn(async move { old.close().await });
+                                }
+                            }
+                            Err(e) => {
+                                this.connecting.insert(
+                                    id.clone(),
+                                    ConnectState::Notice(format!("Tunnel OK, database: {e}")),
+                                );
+                            }
+                        }
+                        cx.emit(StateEvent::Sessions);
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+            TunnelStatus::Reconnecting { attempt, error } => {
+                self.connecting.insert(
+                    id.to_owned(),
+                    ConnectState::Notice(format!(
+                        "SSH: {}; reconnecting (try {attempt})…",
+                        error.trim_start_matches("SSH: ")
+                    )),
+                );
+            }
+            TunnelStatus::Failed(error) => {
+                self.disconnect(id, cx);
+                self.connecting.insert(
+                    id.to_owned(),
+                    ConnectState::Failed(format!("{error}. Double-click to connect again.")),
+                );
+            }
+            TunnelStatus::Closed => {}
         }
         cx.emit(StateEvent::Sessions);
         cx.notify();
@@ -518,36 +642,224 @@ impl AppState {
     }
 }
 
-/// Connects on the runtime and returns the connection or an error message.
 /// How long a connection attempt may take before it is given up.
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
+/// A connection that opened, with the tunnel it runs through.
+pub struct Opened {
+    pub conn: Arc<dyn Connection>,
+    pub tunnel: Option<Arc<deltos_ssh::Tunnel>>,
+    /// What the driver connected with: the local end of the tunnel when there is one.
+    pub config: ConnectionConfig,
+}
+
+/// Opens the SSH tunnel when the config has one, then the connection through it, on the
+/// runtime. Errors name the step that failed: `SSH: ...` for the tunnel, and
+/// `Tunnel OK, database: ...` for the database behind a working tunnel.
 pub fn open_connection(
     kind: DriverKind,
     config: ConnectionConfig,
     cx: &App,
-) -> impl std::future::Future<Output = Result<Arc<dyn Connection>, String>> + use<> {
+) -> impl std::future::Future<Output = Result<Opened, String>> + use<> {
+    let ask = cx.global::<HostKeys>().asker();
     let job = cx.global::<Net>().run(async move {
-        let Some(driver) = deltos_drivers::driver(kind) else {
-            return Err(format!(
-                "{} is not supported in this build yet.",
-                kind.label()
-            ));
-        };
-        // Not every driver bounds its own connect: a firewall that drops packets would
-        // otherwise keep the attempt open for minutes.
-        match tokio::time::timeout(CONNECT_TIMEOUT, driver.connect(&config)).await {
-            Ok(result) => result.map_err(|e| e.to_string()),
-            Err(_) => Err(format!(
-                "the server did not answer within {} seconds",
-                CONNECT_TIMEOUT.as_secs()
-            )),
+        let tunneled = config.ssh.enabled && kind != DriverKind::Sqlite;
+        if !tunneled {
+            let conn = connect_on_runtime(kind, &config).await?;
+            return Ok(Opened {
+                conn,
+                tunnel: None,
+                config,
+            });
         }
+        let reason = |e: deltos_data::Error| match e {
+            deltos_data::Error::Connect(m) => m,
+            other => other.to_string(),
+        };
+        let (target_host, target_port) = deltos_drivers::tunnel_target(kind, &config)
+            .map_err(|e| format!("SSH: {}", reason(e)))?;
+        let request = deltos_ssh::TunnelRequest {
+            ssh: config.ssh.clone(),
+            target_host,
+            target_port,
+            host_keys: deltos_ssh::HostKeyFiles::default(),
+        };
+        let tunnel = deltos_ssh::Tunnel::open(request, ask)
+            .await
+            .map_err(|e| e.to_string())?;
+        let through = deltos_drivers::through_tunnel(kind, &config, tunnel.local_port())
+            .map_err(|e| format!("SSH: {}", reason(e)))?;
+        let conn = connect_on_runtime(kind, &through)
+            .await
+            .map_err(|e| format!("Tunnel OK, database: {e}"))?;
+        Ok(Opened {
+            conn,
+            tunnel: Some(Arc::new(tunnel)),
+            config: through,
+        })
     });
     async move {
         job.await
             .unwrap_or_else(|| Err("the connection attempt stopped".into()))
     }
+}
+
+/// Opens a driver connection with `config` as it is, with no tunnel.
+fn connect_driver(
+    kind: DriverKind,
+    config: ConnectionConfig,
+    cx: &App,
+) -> impl std::future::Future<Output = Result<Arc<dyn Connection>, String>> + use<> {
+    let job = cx
+        .global::<Net>()
+        .run(async move { connect_on_runtime(kind, &config).await });
+    async move {
+        job.await
+            .unwrap_or_else(|| Err("the connection attempt stopped".into()))
+    }
+}
+
+async fn connect_on_runtime(
+    kind: DriverKind,
+    config: &ConnectionConfig,
+) -> Result<Arc<dyn Connection>, String> {
+    let Some(driver) = deltos_drivers::driver(kind) else {
+        return Err(format!(
+            "{} is not supported in this build yet.",
+            kind.label()
+        ));
+    };
+    // Not every driver bounds its own connect: a firewall that drops packets would
+    // otherwise keep the attempt open for minutes.
+    match tokio::time::timeout(CONNECT_TIMEOUT, driver.connect(config)).await {
+        Ok(result) => result.map_err(|e| e.to_string()),
+        Err(_) => Err(format!(
+            "the server did not answer within {} seconds",
+            CONNECT_TIMEOUT.as_secs()
+        )),
+    }
+}
+
+/// Fills in the passwords the form left empty from the keychain, when the person keeps
+/// them there.
+pub fn fill_secrets(
+    saved: SavedConnection,
+    cx: &App,
+) -> impl std::future::Future<Output = ConnectionConfig> + use<> {
+    let net = cx.global::<Net>();
+    let key = saved.id.clone();
+    let keep = saved.save_password;
+    let need_ssh = saved.config.ssh.enabled
+        && saved.config.ssh.auth != deltos_data::SshAuth::Agent
+        && saved.config.ssh.secret.is_none();
+    let need_db = saved.config.password.is_none();
+    let read = net.run_blocking(move || {
+        use deltos_settings::secrets;
+        if !keep {
+            return (Ok(None), Ok(None));
+        }
+        let db = if need_db {
+            secrets::password(&key)
+        } else {
+            Ok(None)
+        };
+        let ssh = if need_ssh {
+            secrets::ssh_secret(&key)
+        } else {
+            Ok(None)
+        };
+        (db, ssh)
+    });
+    async move {
+        let mut config = saved.config;
+        let (db, ssh) = read.await.unwrap_or((Ok(None), Ok(None)));
+        for e in [db.as_ref().err(), ssh.as_ref().err()]
+            .into_iter()
+            .flatten()
+        {
+            tracing::warn!("could not read the keychain: {e}");
+        }
+        if config.password.is_none() {
+            config.password = db.ok().flatten();
+        }
+        if config.ssh.secret.is_none() {
+            config.ssh.secret = ssh.ok().flatten();
+        }
+        config
+    }
+}
+
+/// The question a new SSH host key raises, with where to send the answer.
+type HostKeyQuestion = (
+    deltos_ssh::UnknownHost,
+    futures::channel::oneshot::Sender<bool>,
+);
+
+/// Carries trust-on-first-use questions from the SSH tunnels on the runtime to a prompt
+/// in a window.
+pub struct HostKeys(async_channel::Sender<HostKeyQuestion>);
+
+impl gpui::Global for HostKeys {}
+
+impl HostKeys {
+    fn asker(&self) -> deltos_ssh::AskHostKey {
+        let tx = self.0.clone();
+        Arc::new(move |question| {
+            let tx = tx.clone();
+            Box::pin(async move {
+                let (answer, reply) = futures::channel::oneshot::channel();
+                if tx.send((question, answer)).await.is_err() {
+                    return false;
+                }
+                reply.await.unwrap_or(false)
+            })
+        })
+    }
+}
+
+/// Answers host key questions one at a time with a prompt in the active window.
+fn serve_host_keys(cx: &mut App) {
+    let (tx, rx) = async_channel::unbounded::<HostKeyQuestion>();
+    cx.set_global(HostKeys(tx));
+    cx.spawn(async move |cx| {
+        while let Ok((q, answer)) = rx.recv().await {
+            let message = format!("Trust the SSH host {}?", q.host);
+            let port = if q.port == 22 {
+                String::new()
+            } else {
+                format!(" on port {}", q.port)
+            };
+            let detail = format!(
+                "Deltos has not connected to {}{port} before. Its {} key fingerprint is\n\n{}\n\nCompare it with the one the server's administrator gives you (ssh-keygen -lf /etc/ssh/ssh_host_*_key.pub on the server). Trusting adds it to ~/.ssh/known_hosts.",
+                q.host, q.algorithm, q.fingerprint
+            );
+            let prompt = cx
+                .update(|cx| {
+                    let window = cx
+                        .active_window()
+                        .or_else(|| cx.windows().into_iter().next())?;
+                    window
+                        .update(cx, |_, window, cx| {
+                            window.prompt(
+                                gpui::PromptLevel::Warning,
+                                &message,
+                                Some(&detail),
+                                &["Trust and connect", "Cancel"],
+                                cx,
+                            )
+                        })
+                        .ok()
+                })
+                .ok()
+                .flatten();
+            let trusted = match prompt {
+                Some(choice) => choice.await.ok() == Some(0),
+                None => false,
+            };
+            let _ = answer.send(trusted);
+        }
+    })
+    .detach();
 }
 
 pub fn init(
@@ -557,6 +869,7 @@ pub fn init(
     cx: &mut App,
 ) -> Entity<AppState> {
     let themes = paths.as_ref().map(Paths::scan_themes).unwrap_or_default();
+    serve_host_keys(cx);
     cx.new(|cx| {
         let mut state = AppState {
             settings,

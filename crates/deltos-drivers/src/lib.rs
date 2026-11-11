@@ -58,6 +58,7 @@ use deltos_data::{Driver, DriverKind};
 
 mod runtime;
 pub mod sql;
+mod tunnel;
 mod url;
 mod util;
 
@@ -73,6 +74,7 @@ pub mod postgres;
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
 
+pub use tunnel::{through_tunnel, tunnel_target};
 pub use url::{kind_from_url, parse_url};
 
 /// The driver for a kind of database, when this build includes one.

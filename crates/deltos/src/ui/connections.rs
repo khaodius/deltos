@@ -2,14 +2,14 @@
 //! selected one's settings on the right. Passwords go to the system keychain, never to
 //! the settings file.
 
-use deltos_data::{ConnectionConfig, DriverKind, TlsMode};
+use deltos_data::{ConnectionConfig, DriverKind, SshAuth, SshTunnel, TlsMode};
 use deltos_settings::{ConnectionTag, PanelKind, SavedConnection};
 use gpui::{
     AnyElement, App, AppContext, Context, Entity, FontWeight, IntoElement, MouseButton, Render,
     SharedString, Subscription, Window, div, prelude::*, px,
 };
 
-use crate::state::{AppState, ConnectState, DEMO_ID, StateEvent, open_connection};
+use crate::state::{AppState, ConnectState, DEMO_ID, StateEvent, fill_secrets, open_connection};
 use crate::theme::{Theme, color, theme};
 use crate::ui::icons::{Icon, icon};
 use crate::ui::text_input::{InputEvent, TextInput};
@@ -33,8 +33,9 @@ enum OpenMenu {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Test {
     Running,
-    /// The server's version and how long the connection took, in milliseconds.
-    Passed(String, u128),
+    /// The server's version, how long the connection took in milliseconds, and whether
+    /// it went through an SSH tunnel.
+    Passed(String, u128, bool),
     Failed(String),
 }
 
@@ -50,6 +51,13 @@ struct Form {
     user: Entity<TextInput>,
     password: Entity<TextInput>,
     database: Entity<TextInput>,
+    ssh_enabled: bool,
+    ssh_auth: SshAuth,
+    ssh_host: Entity<TextInput>,
+    ssh_port: Entity<TextInput>,
+    ssh_user: Entity<TextInput>,
+    ssh_key: Entity<TextInput>,
+    ssh_secret: Entity<TextInput>,
 }
 
 pub struct ConnectionsPanel {
@@ -61,6 +69,8 @@ pub struct ConnectionsPanel {
     error: Option<String>,
     /// What the form did with a pasted URL, shown under the URL field.
     notice: Option<SharedString>,
+    /// What `~/.ssh/config` says about the SSH host, shown under it.
+    ssh_note: Option<SharedString>,
     /// A database URL found on the clipboard when a new connection was started.
     clipboard_url: Option<String>,
     /// Text the form put into the URL and host fields itself, so their change handlers
@@ -90,6 +100,13 @@ impl ConnectionsPanel {
             user: input("postgres", cx),
             password: cx.new(|cx| TextInput::new("Password", cx).masked()),
             database: input("postgres", cx),
+            ssh_enabled: false,
+            ssh_auth: SshAuth::Key,
+            ssh_host: input("Host alias from ~/.ssh/config, or an address", cx),
+            ssh_port: input("22", cx),
+            ssh_user: input("From ~/.ssh/config, or your login", cx),
+            ssh_key: input("IdentityFile from ~/.ssh/config, or ~/.ssh/id_ed25519", cx),
+            ssh_secret: cx.new(|cx| TextInput::new("Key passphrase, if it has one", cx).masked()),
         };
         let mut subs = vec![cx.subscribe(&state, |_, _, e, cx| {
             if matches!(
@@ -105,6 +122,10 @@ impl ConnectionsPanel {
             &form.user,
             &form.password,
             &form.database,
+            &form.ssh_port,
+            &form.ssh_user,
+            &form.ssh_key,
+            &form.ssh_secret,
         ] {
             subs.push(cx.subscribe(input, |this, _, e, cx| match e {
                 InputEvent::Submit => this.save(true, cx),
@@ -112,6 +133,15 @@ impl ConnectionsPanel {
                 InputEvent::Cancel => {}
             }));
         }
+        // The SSH host may be an alias; say what ~/.ssh/config makes of it.
+        subs.push(cx.subscribe(&form.ssh_host, |this, _, e, cx| match e {
+            InputEvent::Changed => {
+                this.describe_ssh_host(cx);
+                this.edited(cx);
+            }
+            InputEvent::Submit => this.save(true, cx),
+            InputEvent::Cancel => {}
+        }));
         // A URL or `host:port` pasted into the host field is split into the fields.
         subs.push(cx.subscribe(&form.host, |this, input, e, cx| match e {
             InputEvent::Changed => {
@@ -170,6 +200,7 @@ impl ConnectionsPanel {
             test: None,
             error: None,
             notice: None,
+            ssh_note: None,
             clipboard_url: None,
             ignore_url: None,
             ignore_host: None,
@@ -279,6 +310,59 @@ impl ConnectionsPanel {
         cx.notify();
     }
 
+    /// With a tunnel the host is the database's address on the SSH server, which is
+    /// usually the server's own loopback.
+    fn set_ssh_enabled(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.form.ssh_enabled = on;
+        let placeholder = if on { "127.0.0.1" } else { "localhost" };
+        self.form
+            .host
+            .update(cx, |i, cx| i.set_placeholder(placeholder, cx));
+        self.edited(cx);
+    }
+
+    fn set_ssh_auth(&mut self, auth: SshAuth, cx: &mut Context<Self>) {
+        self.form.ssh_auth = auth;
+        let placeholder = match auth {
+            SshAuth::Key => "Key passphrase, if it has one",
+            SshAuth::Password => "SSH password",
+            SshAuth::Agent => "",
+        };
+        self.form
+            .ssh_secret
+            .update(cx, |i, cx| i.set_placeholder(placeholder, cx));
+        cx.notify();
+    }
+
+    /// Notes what `~/.ssh/config` has for the SSH host, so an alias shows where it goes.
+    fn describe_ssh_host(&mut self, cx: &mut Context<Self>) {
+        let alias = self.form.ssh_host.read(cx).text().trim().to_owned();
+        self.ssh_note = None;
+        if alias.is_empty() {
+            return;
+        }
+        let file = deltos_ssh::config::lookup(&alias);
+        if file == deltos_ssh::config::HostConfig::default() {
+            return;
+        }
+        let mut parts = Vec::new();
+        let host = file.hostname.clone().unwrap_or_else(|| alias.clone());
+        let user = file
+            .user
+            .clone()
+            .map(|u| format!("{u}@"))
+            .unwrap_or_default();
+        let port = file.port.map(|p| format!(":{p}")).unwrap_or_default();
+        parts.push(format!("{user}{host}{port}"));
+        if let Some(key) = file.identity_files.first() {
+            parts.push(format!("key {key}"));
+        }
+        if let Some(jump) = &file.proxy_jump {
+            parts.push(format!("ProxyJump {jump} is not supported and is skipped"));
+        }
+        self.ssh_note = Some(format!("From ~/.ssh/config: {}", parts.join(", ")).into());
+    }
+
     /// Fills the form from a saved connection, or empties it for a new one.
     fn select(&mut self, selected: Option<Selected>, cx: &mut Context<Self>) {
         let saved = match &selected {
@@ -302,6 +386,26 @@ impl ConnectionsPanel {
             .password
             .update(cx, |i, cx| i.set_masked(true, cx));
         self.set_field(Field::Database, c.config.database.clone(), cx);
+        let ssh = &c.config.ssh;
+        self.set_ssh_enabled(ssh.enabled, cx);
+        self.form.ssh_auth = ssh.auth;
+        for (input, text) in [
+            (&self.form.ssh_host, ssh.host.clone()),
+            (
+                &self.form.ssh_port,
+                ssh.port.map(|p| p.to_string()).unwrap_or_default(),
+            ),
+            (&self.form.ssh_user, ssh.user.clone()),
+            (&self.form.ssh_key, ssh.key_path.clone()),
+            (&self.form.ssh_secret, String::new()),
+        ] {
+            input.update(cx, |i, cx| i.set_text(text, cx));
+        }
+        self.form
+            .ssh_secret
+            .update(cx, |i, cx| i.set_masked(true, cx));
+        self.set_ssh_auth(ssh.auth, cx);
+        self.describe_ssh_host(cx);
         self.form.tag = c.tag;
         self.form.tls = c.config.tls;
         self.form.save_password = c.save_password;
@@ -336,6 +440,10 @@ impl ConnectionsPanel {
                 .next()
                 .unwrap_or("SQLite")
                 .to_owned(),
+            _ if f.ssh_enabled && !text(&f.ssh_host).is_empty() && !database.is_empty() => {
+                format!("{database} on {}", text(&f.ssh_host))
+            }
+            _ if f.ssh_enabled && !text(&f.ssh_host).is_empty() => text(&f.ssh_host),
             _ if url.is_empty() && !host.is_empty() && !database.is_empty() => {
                 format!("{database} on {host}")
             }
@@ -361,6 +469,18 @@ impl ConnectionsPanel {
         if url.is_none() && f.kind == DriverKind::Sqlite && database.is_empty() {
             return Err("Give the path of the database file.".into());
         }
+        let ssh_port = match text(&f.ssh_port) {
+            p if p.is_empty() => None,
+            p => Some(
+                p.parse::<u16>()
+                    .map_err(|_| format!("“{p}” is not an SSH port number."))?,
+            ),
+        };
+        let tunnel = f.ssh_enabled && f.kind != DriverKind::Sqlite;
+        if tunnel && text(&f.ssh_host).is_empty() {
+            return Err("Give the SSH host, or turn the SSH tunnel off.".into());
+        }
+        let ssh_secret = f.ssh_secret.read(cx).text().to_owned();
         let mut name = text(&f.name);
         if name.is_empty() {
             name = self.auto_name(cx);
@@ -384,6 +504,16 @@ impl ConnectionsPanel {
                 tls: f.tls,
                 url,
                 options: Vec::new(),
+                ssh: SshTunnel {
+                    enabled: tunnel,
+                    host: text(&f.ssh_host),
+                    port: ssh_port,
+                    user: text(&f.ssh_user),
+                    auth: f.ssh_auth,
+                    key_path: text(&f.ssh_key),
+                    secret: (!ssh_secret.is_empty() && f.ssh_auth != SshAuth::Agent)
+                        .then_some(ssh_secret),
+                },
             },
             tag: f.tag,
             save_password: f.save_password,
@@ -400,7 +530,6 @@ impl ConnectionsPanel {
             }
         };
         self.error = None;
-        let config = saved.config.clone();
         let id = saved.id.clone();
         self.state.update(cx, |s, cx| {
             s.save_connection(saved.clone(), cx);
@@ -408,8 +537,9 @@ impl ConnectionsPanel {
                 if s.session(&id).is_some() {
                     s.disconnect(&id, cx);
                 }
-                // The keychain write may still be on its way, so connect with what the form has.
-                s.connect_with(saved, config, cx);
+                // What the form has is used as it is; only what it leaves empty comes
+                // from the keychain, so a keychain write still on its way does not matter.
+                s.connect(&id, cx);
             }
         });
         self.selected = Some(Selected::Saved(id));
@@ -427,18 +557,38 @@ impl ConnectionsPanel {
             }
         };
         self.test = Some(Test::Running);
-        let started = std::time::Instant::now();
-        let attempt = open_connection(saved.kind, saved.config, cx);
+        let kind = saved.kind;
+        // A saved connection tests with its saved passwords when the fields are empty.
+        let filled = matches!(self.selected, Some(Selected::Saved(_)))
+            .then(|| fill_secrets(saved.clone(), cx));
+        let config = saved.config;
         cx.spawn(async move |this, cx| {
+            let config = match filled {
+                Some(f) => f.await,
+                None => config,
+            };
+            let Ok(attempt) = cx.update(|cx| open_connection(kind, config, cx)) else {
+                return;
+            };
+            let started = std::time::Instant::now();
             let result = attempt.await;
             let took = started.elapsed().as_millis();
             this.update(cx, |this, cx| {
                 this.test = Some(match result {
-                    Ok(conn) => {
+                    Ok(opened) => {
+                        let conn = opened.conn;
                         let version = conn.server_version();
+                        let tunnel = opened.tunnel;
+                        let tunneled = tunnel.is_some();
                         let net = cx.global::<crate::net::Net>();
-                        net.spawn(async move { conn.close().await });
-                        Test::Passed(version, took)
+                        net.spawn(async move {
+                            conn.close().await;
+                            drop(conn);
+                            if let Some(t) = tunnel.and_then(std::sync::Arc::into_inner) {
+                                t.close().await;
+                            }
+                        });
+                        Test::Passed(version, took, tunneled)
                     }
                     Err(e) => Test::Failed(e),
                 });
@@ -475,6 +625,15 @@ impl ConnectionsPanel {
                         }
                     ),
                 });
+                // Through a tunnel the host is on the SSH server, so name the server.
+                let target = if c.config.ssh.enabled && c.kind != DriverKind::Sqlite {
+                    match c.config.database.as_str() {
+                        "" => format!("via SSH {}", c.config.ssh.host),
+                        db => format!("{db} via SSH {}", c.config.ssh.host),
+                    }
+                } else {
+                    target
+                };
                 (
                     c.id.clone(),
                     c.name.clone().into(),
@@ -559,6 +718,7 @@ impl ConnectionsPanel {
                                     .text_size(t.small_size)
                                     .text_color(match &status {
                                         Some(ConnectState::Failed(_)) => t.danger,
+                                        Some(ConnectState::Notice(_)) => t.warning,
                                         _ => t.text_faint,
                                     })
                                     .overflow_hidden()
@@ -568,7 +728,9 @@ impl ConnectionsPanel {
                                         Some(ConnectState::Connecting) => {
                                             SharedString::from("Connecting…")
                                         }
-                                        Some(ConnectState::Failed(e)) => e.clone().into(),
+                                        Some(ConnectState::Failed(e) | ConnectState::Notice(e)) => {
+                                            e.clone().into()
+                                        }
                                         None => detail,
                                     }),
                             ),
@@ -659,6 +821,187 @@ impl ConnectionsPanel {
             );
         }
         row.into_any_element()
+    }
+
+    /// The SSH tunnel part of the form: a switch, and when it is on the server, the sign-in
+    /// and a note on what Host and Port now mean.
+    fn ssh_section(&self, t: &Theme, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let f = &self.form;
+        let label = |text: &'static str| {
+            div()
+                .w(px(96.))
+                .flex_none()
+                .text_size(t.ui_size)
+                .text_color(t.text_muted)
+                .flex()
+                .justify_end()
+                .child(text)
+        };
+        let row = |text: &'static str, content: AnyElement| {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(12.))
+                .child(label(text))
+                .child(div().flex_1().min_w_0().child(content))
+        };
+        let note = |text: SharedString, c: gpui::Hsla| {
+            row(
+                "",
+                div()
+                    .text_size(t.small_size)
+                    .text_color(c)
+                    .whitespace_normal()
+                    .child(text)
+                    .into_any_element(),
+            )
+        };
+        let on = f.ssh_enabled;
+        let mut section = div()
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .child(div().h(px(1.)).bg(t.border).my(px(4.)))
+            .child(row(
+                "SSH tunnel",
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(
+                        switch("ssh-on", on, t).on_click(cx.listener(|this, _, _, cx| {
+                            let on = !this.form.ssh_enabled;
+                            this.set_ssh_enabled(on, cx);
+                        })),
+                    )
+                    .child(
+                        div()
+                            .text_size(t.small_size)
+                            .text_color(t.text_muted)
+                            .child(if on {
+                                "Deltos opens the tunnel itself on a free local port."
+                            } else {
+                                "For a database that only listens on its server."
+                            }),
+                    )
+                    .into_any_element(),
+            ));
+        if !on {
+            return section.into_any_element();
+        }
+        let weak = cx.entity().downgrade();
+        let auth = segmented(
+            "ssh-auth",
+            &[
+                ("Key file", SshAuth::Key),
+                ("Agent", SshAuth::Agent),
+                ("Password", SshAuth::Password),
+            ],
+            f.ssh_auth,
+            move |a, _, cx| {
+                weak.update(cx, |this, cx| {
+                    this.set_ssh_auth(a, cx);
+                    this.edited(cx);
+                })
+                .ok();
+            },
+            t,
+        );
+        let masked = f.ssh_secret.read(cx).is_masked();
+        let secret_label = match f.ssh_auth {
+            SshAuth::Password => "SSH password",
+            _ => "Passphrase",
+        };
+        section = section
+            .child(row(
+                "SSH host",
+                div()
+                    .flex()
+                    .gap(px(8.))
+                    .child(div().flex_1().child(field(&f.ssh_host, t, window, cx)))
+                    .child(div().w(px(80.)).child(field(&f.ssh_port, t, window, cx)))
+                    .into_any_element(),
+            ))
+            .children(self.ssh_note.clone().map(|n| note(n, t.text_faint)))
+            .child(row(
+                "SSH user",
+                field(&f.ssh_user, t, window, cx).into_any_element(),
+            ))
+            .child(row("Sign in", div().flex().child(auth).into_any_element()));
+        if f.ssh_auth == SshAuth::Key {
+            section = section.child(row(
+                "Key file",
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(div().flex_1().child(field(&f.ssh_key, t, window, cx)))
+                    .child(
+                        button("ssh-key-browse", "Choose…", ButtonStyle::Ghost, t)
+                            .h(t.s(24.))
+                            .px(px(8.))
+                            .on_click(cx.listener(|this, _, _, cx| this.choose_key(cx))),
+                    )
+                    .into_any_element(),
+            ));
+        }
+        if f.ssh_auth != SshAuth::Agent {
+            section = section.child(row(
+                secret_label,
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(div().flex_1().child(field(&f.ssh_secret, t, window, cx)))
+                    .child(
+                        button(
+                            "ssh-show-secret",
+                            if masked { "Show" } else { "Hide" },
+                            ButtonStyle::Ghost,
+                            t,
+                        )
+                        .h(t.s(24.))
+                        .px(px(8.))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.form
+                                .ssh_secret
+                                .update(cx, |i, cx| i.set_masked(!i.is_masked(), cx));
+                        })),
+                    )
+                    .into_any_element(),
+            ));
+        }
+        section
+            .child(note(
+                "Host and Port above are the database's address as seen from the SSH server, 127.0.0.1 and the default port when left empty. Secrets are kept in the keychain with the database password.".into(),
+                t.text_faint,
+            ))
+            .into_any_element()
+    }
+
+    /// Picks a private key file, starting in ~/.ssh.
+    fn choose_key(&mut self, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Choose".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = paths.await else {
+                return;
+            };
+            let Some(path) = paths.into_iter().next() else {
+                return;
+            };
+            this.update(cx, |this, cx| {
+                let text = path.to_string_lossy().into_owned();
+                this.form.ssh_key.update(cx, |i, cx| i.set_text(text, cx));
+                this.edited(cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn form(&mut self, t: &Theme, window: &Window, cx: &mut Context<Self>) -> AnyElement {
@@ -777,15 +1120,19 @@ impl ConnectionsPanel {
         let test_line = self.test.clone().map(|test| {
             let (c, text, hint): (_, SharedString, Option<&'static str>) = match test {
                 Test::Running => (t.text_faint, "Testing…".into(), None),
-                Test::Passed(v, ms) => (
-                    t.success,
-                    if v.is_empty() {
-                        format!("Connected in {ms} ms").into()
+                Test::Passed(v, ms, tunneled) => {
+                    let via = if tunneled {
+                        "Tunnel OK, connected"
                     } else {
-                        format!("Connected to {v} in {ms} ms").into()
-                    },
-                    None,
-                ),
+                        "Connected"
+                    };
+                    let text = if v.is_empty() {
+                        format!("{via} in {ms} ms")
+                    } else {
+                        format!("{via} to {v} in {ms} ms")
+                    };
+                    (t.success, text.into(), None)
+                }
                 Test::Failed(e) => {
                     let hint = hint_for(kind, &e);
                     (t.danger, e.into(), hint)
@@ -798,6 +1145,9 @@ impl ConnectionsPanel {
                 .child(note(text, c))
                 .children(hint.map(|h| note(h.into(), t.text_muted)))
         });
+        let tunnel = f.ssh_enabled && !sqlite;
+        let ssh_section = self.ssh_section(t, window, cx);
+        let f = &self.form;
         let saved_id = match &selected {
             Selected::Saved(id) => Some(id.clone()),
             Selected::New => None,
@@ -898,7 +1248,7 @@ impl ConnectionsPanel {
                     .children(self.notice.clone().map(|n| row("", note(n, t.text_faint))))
                     .when(!sqlite, |el| {
                         el.child(row(
-                            "Host",
+                            if tunnel { "Host via SSH" } else { "Host" },
                             div()
                                 .flex()
                                 .gap(px(8.))
@@ -956,6 +1306,7 @@ impl ConnectionsPanel {
                     .when(!sqlite, |el| {
                         el.child(row("TLS", div().flex().child(tls).into_any_element()))
                     })
+                    .when(!sqlite, |el| el.child(ssh_section))
                     .when(saved_id.is_some(), |el| {
                         el.child(row(
                             "",
@@ -1096,6 +1447,26 @@ fn describe_url(url: &str) -> String {
 fn hint_for(kind: DriverKind, error: &str) -> Option<&'static str> {
     let e = error.to_ascii_lowercase();
     let mysql = kind == DriverKind::Mysql;
+    if e.starts_with("ssh:") {
+        return Some(if e.contains("host unreachable") {
+            "Check the SSH host and port, and that this computer can reach the server (a VPN or firewall may stand in between)."
+        } else if e.contains("auth failed") {
+            "Check the SSH user and the key, agent or password. The server only accepts a key listed in ~/.ssh/authorized_keys of that user."
+        } else {
+            return None;
+        });
+    }
+    let tunneled = e.starts_with("tunnel ok");
+    if tunneled && e.contains("refused") {
+        return Some(
+            "The tunnel works, but nothing listens on that address on the SSH server. Host and Port are as seen from the server: usually 127.0.0.1 and the default port.",
+        );
+    }
+    if tunneled && e.contains("access denied") && mysql {
+        return Some(
+            "Check the user and password. Through the tunnel the server sees you connect from the server itself, so the user must be allowed from 'localhost' or '127.0.0.1'.",
+        );
+    }
     Some(if e.contains("access denied") && mysql {
         "Check the user and password. A server on another machine must also allow this user from your address, for example a user created as 'name'@'%'."
     } else if e.contains("password authentication failed")

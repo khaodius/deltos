@@ -4,6 +4,43 @@ Packages for every version are attached to its
 [release](https://github.com/khaodius/deltos/releases), with SHA-256 checksums and a signed
 update manifest.
 
+## 0.1.2 - 2026-11-11
+
+- **SSH tunnels built in.** Turn on SSH tunnel in a MySQL, MariaDB, PostgreSQL or MongoDB
+  connection and Deltos reaches a database that only listens on its own server, with no
+  terminal and no `ssh -L`. The SSH host can be a `Host` alias from `~/.ssh/config`, whose
+  HostName, User, Port and IdentityFile are used. Sign in with a key file (ed25519, ECDSA or
+  RSA, OpenSSH format, with an optional passphrase), the ssh-agent (or Pageant on Windows) or
+  a password; the password and passphrase go to the keychain with the database password. No
+  OpenSSH client is needed.
+- **Host and Port mean the server's side.** With a tunnel on, Host and Port are the
+  database's address as seen from the SSH server, 127.0.0.1 and the default port when left
+  empty. The tunnel listens on a free local port the system picks, so it never lands on a
+  local database.
+- **Tunnels look after themselves.** Each open connection has its own tunnel, closed on
+  disconnect and on quit. Keepalives notice a dead link; the tunnel then reconnects on the
+  same port and opens the database connection again, and says so in the connection list.
+- **Host keys are checked.** Keys are checked against `~/.ssh/known_hosts`. A server seen for
+  the first time shows its fingerprint and asks before it is trusted and added; a changed key
+  is refused with the line to remove.
+- **Test says which step failed**: `SSH: host unreachable`, `SSH: auth failed`, a server that
+  cannot reach the database address, or `Tunnel OK, database: ...` with the database's own
+  message. Pasting a connection URL still fills only the database fields.
+- **Clear message for GSSAPI servers.** A MySQL or MariaDB server that asks for Windows/GSSAPI
+  login (`auth_gssapi_client`, common on Windows MariaDB installs) now says it is not supported
+  and to check that you are not reaching a local MariaDB on 3306, instead of showing the raw
+  driver error.
+- **Color picker.** The accent color has a saturation and brightness square, a hue slider and
+  an eyedropper that takes the color of any pixel on the screen (Windows and X11).
+- **Obsidian is the default dark palette.** Settings that still had the old default,
+  Graphite, move to Obsidian; a palette picked on purpose stays.
+- **Title bar switch applies at once on Windows.** Turning Deltos' own title bar on or off
+  reopens the windows in place instead of waiting for a restart.
+- **Panels dock back quickly.** A panel window dropped over the main window docks the moment
+  the button comes up, holding it there docks after a fifth of a second instead of almost half
+  a second, a window torn off can be docked again right away, and the landing animation is
+  shorter.
+
 ## 0.1.1 - 2026-11-11
 
 - **Edit cells in place.** Double-click a cell, or press Enter or F2, to edit it. Enter or a

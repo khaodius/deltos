@@ -33,3 +33,22 @@ pub fn delete_password(connection_id: &str) -> Result<(), String> {
         Err(e) => Err(e.to_string()),
     }
 }
+
+/// The keychain entry for a connection's SSH password or key passphrase.
+fn ssh_key(connection_id: &str) -> String {
+    format!("{connection_id}#ssh")
+}
+
+/// The saved SSH password or key passphrase, or `None` when there is none.
+pub fn ssh_secret(connection_id: &str) -> Result<Option<String>, String> {
+    password(&ssh_key(connection_id))
+}
+
+pub fn set_ssh_secret(connection_id: &str, secret: &str) -> Result<(), String> {
+    set_password(&ssh_key(connection_id), secret)
+}
+
+/// Removes the saved SSH secret. Removing one that is not there is not an error.
+pub fn delete_ssh_secret(connection_id: &str) -> Result<(), String> {
+    delete_password(&ssh_key(connection_id))
+}
