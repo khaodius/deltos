@@ -150,7 +150,7 @@ jobs:
           done
           install -m 644 LICENSE README.md CHANGELOG.md "$root/"
           tar -czf "dist/$root.tar.gz" "$root"
-          packaging/linux/appimage.sh "$VERSION" target/release/deltos dist
+          bash packaging/linux/appimage.sh "$VERSION" target/release/deltos dist
           ls -l dist
 
       - uses: actions/upload-artifact@v4
