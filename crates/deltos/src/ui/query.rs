@@ -16,9 +16,11 @@ use gpui::{
 };
 
 use crate::net::Net;
+use crate::safety::{self, Confirm, Environment};
 use crate::state::{AppState, HistoryEntry, Inspected, StateEvent};
 use crate::theme::{Theme, theme};
 use crate::ui::editor::{Editor, EditorEvent};
+use crate::ui::environment;
 use crate::ui::grid::{GridEvent, GridView};
 use crate::ui::icons::{Icon, icon};
 use crate::ui::{ButtonStyle, MenuItem, Tooltip, button, dot, empty_state, menu, thousands};
@@ -58,8 +60,8 @@ pub struct QueryPanel {
     dragging_split: bool,
     bounds: Bounds<Pixels>,
     picker_open: bool,
-    /// A destructive statement waiting for the person to confirm it.
-    confirm: Option<String>,
+    /// A statement waiting for the person to confirm it.
+    confirm: Option<Confirm>,
     focus: FocusHandle,
     _subs: Vec<Subscription>,
 }
@@ -106,6 +108,8 @@ impl QueryPanel {
                     // A tab opened before any connection follows the first one that opens.
                     if this.connection.is_none() {
                         this.connection = state.read(cx).active.clone();
+                        // The tab and the title bar show the connection's environment.
+                        cx.refresh_windows();
                     }
                     cx.notify();
                 }
@@ -132,6 +136,10 @@ impl QueryPanel {
         "SQL Query".into()
     }
 
+    pub fn connection_id(&self) -> Option<&str> {
+        self.connection.as_deref()
+    }
+
     pub fn text(&self, cx: &App) -> String {
         self.editor.read(cx).text().to_owned()
     }
@@ -150,8 +158,19 @@ impl QueryPanel {
         if statement.is_empty() {
             return;
         }
-        if self.state.read(cx).settings.data.confirm_destructive && is_destructive(&statement) {
-            self.confirm = Some(statement);
+        let s = self.state.read(cx);
+        let environment = self
+            .connection
+            .as_deref()
+            .and_then(|id| Environment::of(s, id));
+        if let Some(reason) =
+            safety::confirmation(&statement, environment.as_ref(), &s.settings.data)
+        {
+            self.confirm = Some(Confirm {
+                statement,
+                reason,
+                environment,
+            });
             cx.notify();
             return;
         }
@@ -383,7 +402,8 @@ impl QueryPanel {
                     MenuItem::new(session.name.clone(), move |_, cx| {
                         w.update(cx, |this, cx| {
                             this.connection = Some(id.clone());
-                            cx.notify();
+                            this.confirm = None;
+                            cx.refresh_windows();
                         })
                         .ok();
                     })
@@ -402,9 +422,10 @@ impl QueryPanel {
                     MenuItem::new(saved.name.clone(), move |_, cx| {
                         w.update(cx, |this, cx| {
                             this.connection = Some(id.clone());
+                            this.confirm = None;
                             let id = id.clone();
                             this.state.update(cx, |s, cx| s.connect(&id, cx));
-                            cx.notify();
+                            cx.refresh_windows();
                         })
                         .ok();
                     })
@@ -482,8 +503,11 @@ impl QueryPanel {
             .into_any_element()
     }
 
-    fn confirm_bar(&mut self, statement: &str, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let statement = statement.to_owned();
+    /// Asks before a statement runs, naming the connection in its environment's color.
+    fn confirm_bar(&mut self, confirm: &Confirm, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let statement = confirm.statement.clone();
+        let env = confirm.environment.as_ref();
+        let tint = env.and_then(|e| environment::tag_color(e.tag));
         div()
             .flex_none()
             .px(px(10.))
@@ -491,16 +515,22 @@ impl QueryPanel {
             .flex()
             .items_center()
             .gap(px(8.))
-            .bg(t.surface_alt)
+            .bg(tint.map_or(t.surface_alt, |c| c.opacity(0.08)))
             .border_b_1()
-            .border_color(t.border)
+            .border_color(tint.map_or(t.border, |c| c.opacity(0.5)))
             .text_size(t.small_size)
-            .child(icon(Icon::Lock).size(px(12.)).text_color(t.warning))
+            .child(
+                icon(Icon::Lock)
+                    .size(px(12.))
+                    .text_color(tint.unwrap_or(t.warning)),
+            )
+            .children(env.map(|e| environment::named(e, t)))
             .child(
                 div()
                     .flex_1()
+                    .min_w_0()
                     .text_color(t.text)
-                    .child("This statement can remove data. Run it anyway?"),
+                    .child(format!("{} Run it anyway?", confirm.reason)),
             )
             .child(
                 button("confirm-cancel", "Cancel", ButtonStyle::Ghost, t).on_click(cx.listener(
@@ -573,6 +603,10 @@ impl QueryPanel {
     fn status_bar(&mut self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let mut left: Vec<AnyElement> = Vec::new();
         let mut fetch_all = None;
+        let env = self
+            .connection
+            .as_deref()
+            .and_then(|id| Environment::of(self.state.read(cx), id));
         if let Some(run) = &self.run {
             match &run.outcome {
                 Outcome::Running => {
@@ -665,8 +699,19 @@ impl QueryPanel {
             .border_color(t.border)
             .text_size(t.small_size)
             .text_color(t.text_muted)
-            .children(left)
-            .child(div().flex_1())
+            // A long message is cut at the edge, so the buttons and the environment
+            // badge stay in view.
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .children(left),
+            )
             .when_some(fetch_all, |el, loader| {
                 let l2 = loader.clone();
                 el.child(
@@ -689,21 +734,8 @@ impl QueryPanel {
                         })),
                 )
             })
+            .children(environment::status(env.as_ref(), t))
             .into_any_element()
-    }
-}
-
-/// Whether a statement removes data or objects: `DROP`, `TRUNCATE`, or a `DELETE` or
-/// `UPDATE` with no `WHERE`. A plain word scan, so it errs towards asking.
-fn is_destructive(statement: &str) -> bool {
-    let lower = statement.to_ascii_lowercase();
-    let mut words = lower
-        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
-        .filter(|w| !w.is_empty());
-    match words.next() {
-        Some("drop" | "truncate") => true,
-        Some("delete" | "update") => !words.any(|w| w == "where"),
-        _ => false,
     }
 }
 
@@ -717,7 +749,7 @@ impl Render for QueryPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx).clone();
         let toolbar = self.toolbar(&t, cx);
-        let confirm = self.confirm.clone().map(|s| self.confirm_bar(&s, &t, cx));
+        let confirm = self.confirm.clone().map(|c| self.confirm_bar(&c, &t, cx));
         let result = self.result(&t);
         let status = self.status_bar(&t, cx);
         let split = self.split;
@@ -798,21 +830,5 @@ impl Render for QueryPanel {
                     .child(div().flex_1().min_h_0().child(result))
                     .child(status),
             )
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn destructive_statements_are_caught() {
-        assert!(is_destructive("DROP TABLE users"));
-        assert!(is_destructive("  truncate orders"));
-        assert!(is_destructive("delete from users"));
-        assert!(!is_destructive("DELETE FROM users WHERE id = 3"));
-        assert!(is_destructive("update users set a = 1"));
-        assert!(!is_destructive("update users set a = 1 where id = 2"));
-        assert!(!is_destructive("select * from dropped"));
     }
 }

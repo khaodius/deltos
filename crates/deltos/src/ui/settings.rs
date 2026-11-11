@@ -1240,6 +1240,13 @@ impl SettingsPanel {
                 pick(|s| s.data.confirm_destructive = !s.data.confirm_destructive),
                 t,
             ))
+            .child(toggle_row(
+                "Confirm every write on production",
+                Some("On connections tagged Staging or Production, ask before any statement that changes data."),
+                ("confirm-prod", d.confirm_production_writes),
+                pick(|s| s.data.confirm_production_writes = !s.data.confirm_production_writes),
+                t,
+            ))
             .child(row(
                 "Statement timeout",
                 Some("Cancel statements that run longer than this."),

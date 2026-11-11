@@ -4,6 +4,22 @@ Packages for every version are attached to its
 [release](https://github.com/khaodius/deltos/releases), with SHA-256 checksums and a signed
 update manifest.
 
+## 0.1.5 - 2026-11-11
+
+- **Production looks like production.** A connection's tag colors the strip under the title
+  bar, its tabs, the status bars and the connection list: a quiet dot for Local and
+  Development, an orange mark for Staging and a red badge for Production.
+- **Read-only connections.** Turn on Read-only in a connection and Deltos runs only reads on
+  it. Edits and every statement that can change data are refused, and the server's own
+  read-only setting is turned on for every session too (PostgreSQL and MySQL; SQLite files
+  open read-only), so a function that writes from inside a SELECT fails as well. A lock marks
+  the connection everywhere.
+- **Asks before risky statements.** `UPDATE` and `DELETE` without `WHERE`, `DROP` and
+  `TRUNCATE` ask first on every connection; a `WHERE` inside a string, a comment or a
+  sub-select no longer counts. On Staging and Production, `ALTER` and every write ask too;
+  Settings → Data → Confirm every write on production turns that part off. The question names
+  the connection, in its environment's color.
+
 ## 0.1.4 - 2026-11-11
 
 - **Command palette.** Ctrl+K, or Ctrl+Shift+P, finds actions, open tabs, connections,

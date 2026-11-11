@@ -503,3 +503,56 @@ async fn describes_and_edits() {
     let batch = stream.batches.next().await.expect("batch").expect("rows");
     assert_eq!(batch.rows[0][0], Value::Int(2));
 }
+
+#[tokio::test]
+async fn read_only_sessions_refuse_writes() {
+    let Some(writer) = connect().await else {
+        return;
+    };
+    let schema = schema(writer.as_ref(), "read_only").await;
+    run(
+        writer.as_ref(),
+        &format!("CREATE TABLE {schema}.t (a int); INSERT INTO {schema}.t VALUES (1)"),
+    )
+    .await;
+    let Some(url) = test_url() else {
+        return;
+    };
+    let config = ConnectionConfig {
+        url: Some(url),
+        tls: TlsMode::Prefer,
+        options: vec![("read_only".into(), "true".into())],
+        ..Default::default()
+    };
+    let reader = PostgresDriver.connect(&config).await.expect("connect");
+    // The query session and the metadata session are each made read-only.
+    let delete = format!("DELETE FROM {schema}.t");
+    let refused = reader
+        .execute(&delete, &ExecuteOptions::default())
+        .await
+        .err()
+        .map(|e| e.to_string())
+        .unwrap_or_default();
+    assert!(refused.contains("read-only"), "{refused}");
+    let object = ObjectRef {
+        namespace: vec![schema.clone()],
+        name: "t".into(),
+        kind: ObjectKind::Table,
+    };
+    let edit = reader
+        .apply_edits(
+            &object,
+            &[RowEdit::Insert {
+                values: vec![("a".into(), Value::Int(2))],
+            }],
+        )
+        .await;
+    assert!(edit.is_err());
+    assert_eq!(
+        rows_of(reader.as_ref(), &format!("SELECT a FROM {schema}.t"))
+            .await
+            .len(),
+        1
+    );
+    reader.close().await;
+}

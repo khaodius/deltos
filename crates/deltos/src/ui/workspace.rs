@@ -103,6 +103,15 @@ impl PanelView {
         }
     }
 
+    /// The connection a table or query tab works on.
+    pub fn connection(&self, cx: &App) -> Option<String> {
+        match self {
+            PanelView::Table(v) => Some(v.read(cx).connection_id().to_owned()),
+            PanelView::Query(v) => v.read(cx).connection_id().map(str::to_owned),
+            _ => None,
+        }
+    }
+
     /// Tool panels draw a quiet header when alone in their stack instead of a tab.
     pub fn is_tool(&self) -> bool {
         matches!(

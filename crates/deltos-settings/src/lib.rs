@@ -471,6 +471,9 @@ pub struct Data {
     pub spill_limit_mb: u32,
     /// Asks before running statements that drop, truncate or delete without a WHERE.
     pub confirm_destructive: bool,
+    /// Asks before every statement that writes on a connection tagged Staging or
+    /// Production.
+    pub confirm_production_writes: bool,
     /// Counts rows exactly instead of using the server's estimate.
     pub exact_counts: bool,
     /// Seconds before a statement is cancelled, 0 for never.
@@ -487,6 +490,7 @@ impl Default for Data {
             cache_memory_mb: 256,
             spill_limit_mb: 8192,
             confirm_destructive: true,
+            confirm_production_writes: true,
             exact_counts: false,
             query_timeout_secs: 0,
             commit_immediately: false,
@@ -621,6 +625,8 @@ pub struct SavedConnection {
     pub tag: ConnectionTag,
     /// Whether the password is kept in the keychain or asked for on each connect.
     pub save_password: bool,
+    /// Refuses every statement that could change data, and row edits.
+    pub read_only: bool,
 }
 
 impl Default for SavedConnection {
@@ -632,6 +638,7 @@ impl Default for SavedConnection {
             config: deltos_data::ConnectionConfig::default(),
             tag: ConnectionTag::None,
             save_password: true,
+            read_only: false,
         }
     }
 }
@@ -921,6 +928,7 @@ mod tests {
             },
             tag: ConnectionTag::Production,
             save_password: true,
+            read_only: true,
         });
         s.layout = SavedLayout::default_for(Some("local"));
         s.layout.panels.push(SavedPanel {
@@ -958,6 +966,14 @@ mod tests {
         // Files from before staged edits keep them staged.
         assert!(!s.data.commit_immediately);
         assert_eq!(s.keybinds.get("commit-changes"), Some("ctrl-s"));
+        // Connections and safety settings from before read-only existed.
+        let s = Settings::from_toml(
+            "[data]\nconfirm_destructive = false\n[[connections]]\nid = \"a\"\nkind = \"postgres\"\ntag = \"production\"\n",
+        )
+        .unwrap();
+        assert!(!s.connections[0].read_only);
+        assert!(!s.data.confirm_destructive);
+        assert!(s.data.confirm_production_writes);
     }
 
     #[test]

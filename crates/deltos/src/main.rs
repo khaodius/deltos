@@ -4,6 +4,7 @@
 
 mod demo;
 mod net;
+mod safety;
 mod state;
 mod theme;
 mod ui;
@@ -250,18 +251,30 @@ impl Root {
         }
     }
 
-    /// The connection name and server version in a pill, as the title bar's middle.
+    /// The environment of the connection the window is about: the front tab's, or the
+    /// active one.
+    fn shown_environment(&self, cx: &App) -> Option<safety::Environment> {
+        let id = ui::environment::shown_connection(self.workspace.read(cx), cx)?;
+        safety::Environment::of(self.state.read(cx), &id)
+    }
+
+    /// The name, server version and environment of the connection the window is about,
+    /// in a pill, as the title bar's middle.
     fn connection_pill(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let t = theme(cx).clone();
+        let id = ui::environment::shown_connection(self.workspace.read(cx), cx);
         let s = self.state.read(cx);
-        let Some(session) = s.active_session() else {
+        let shown = id
+            .as_deref()
+            .and_then(|id| Some((safety::Environment::of(s, id)?, s.session(id)?)));
+        let Some((env, session)) = shown else {
             return div()
                 .text_size(t.small_size)
                 .text_color(t.text_faint)
                 .child("Deltos")
                 .into_any_element();
         };
-        let tag = session.tag.color().map(theme::color);
+        let tag = env.tag.color().map(theme::color);
         div()
             .h(t.s(22.))
             .px(px(10.))
@@ -290,6 +303,8 @@ impl Root {
                         session.version.clone()
                     }),
             )
+            .children(ui::environment::badge(env.tag, &t))
+            .children(ui::environment::lock(&env, &t))
             .into_any_element()
     }
 
@@ -540,6 +555,7 @@ impl Render for Root {
             }))
             .children(bar)
             .children(strip)
+            .children(ui::environment::strip(self.shown_environment(cx).as_ref()))
             // Focus is tracked below the bar, not on the whole window: a focusable element
             // under the title bar takes every press there, and on Windows a taken press
             // never reaches the system, so the window could not be dragged.

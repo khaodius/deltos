@@ -79,6 +79,15 @@ with a key, the ssh-agent or a password. Deltos opens the tunnel on a free local
 the host key against `~/.ssh/known_hosts`, reconnects when the link drops and closes it on
 disconnect. No OpenSSH client is needed, and a test says whether SSH or the database failed.
 
+## Safety
+
+Tag a connection Local, Development, Testing, Staging or Production and its color follows it:
+a strip under the title bar, its tabs, the status bars and the connection list, loudest for
+Production. A connection can be read-only, which refuses edits and every statement that can
+change data, and turns on the server's own read-only mode as well. `UPDATE` or `DELETE`
+without `WHERE`, `DROP` and `TRUNCATE` always ask first, and on Staging and Production every
+write asks.
+
 ## Appearance
 
 Ten palettes, four light and six dark, chosen separately so following the system switches

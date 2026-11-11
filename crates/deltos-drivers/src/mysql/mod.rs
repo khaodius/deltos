@@ -771,11 +771,22 @@ fn mysql_opts(config: &ConnectionConfig) -> Result<(Opts, TlsMode)> {
         .stmt_cache_size(64)
         .tcp_keepalive(Some(Duration::from_secs(60)))
         .prefer_socket(false);
+    let mut init = Vec::new();
     for (key, value) in &config.options {
         match key.as_str() {
-            "init" => builder = builder.init(vec![value.clone()]),
+            "init" => init = vec![value.clone()],
+            // Below, for every session.
+            "read_only" => {}
             other => tracing::debug!("ignoring MySQL option {other}"),
         }
+    }
+    // Every session the connection opens, again after a lost one too, runs these first; a
+    // read-only one that the server will not make read-only does not open.
+    if util::read_only(config) {
+        init.push("SET SESSION TRANSACTION READ ONLY".to_owned());
+    }
+    if !init.is_empty() {
+        builder = builder.init(init);
     }
     if !url_has_tls {
         builder = builder.ssl_opts(ssl_opts(mode));
