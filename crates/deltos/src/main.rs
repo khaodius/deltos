@@ -12,6 +12,7 @@ mod safety;
 mod session;
 mod snippets;
 mod state;
+mod tasks;
 mod theme;
 mod ui;
 mod update;
@@ -35,6 +36,7 @@ use crate::ui::icons::{Assets, Icon, icon};
 use crate::ui::layouts::LayoutMenu;
 use crate::ui::palette::PaletteLayer;
 use crate::ui::palette::providers::Scope;
+use crate::ui::tasks::TasksIndicator;
 use crate::ui::workspace::Workspace;
 use crate::ui::{Tooltip, dot, icon_button};
 use crate::update::{UpdateModel, UpdateStatus};
@@ -71,6 +73,7 @@ actions!(
         ZoomReset,
         ResetLayout,
         CommandPalette,
+        ToggleTasks,
     ]
 );
 
@@ -104,6 +107,7 @@ pub fn rebind_keys(settings: &Settings, cx: &mut App) {
             "zoom-reset" => KeyBinding::new(keys, ZoomReset, ctx),
             "reset-layout" => KeyBinding::new(keys, ResetLayout, ctx),
             "command-palette" | "command-palette-alt" => KeyBinding::new(keys, CommandPalette, ctx),
+            "toggle-tasks" => KeyBinding::new(keys, ToggleTasks, ctx),
             "run-query" => KeyBinding::new(keys, ui::query::RunQuery, Some("QueryPanel")),
             // The inspector passes these on to the table its row came from.
             "commit-changes" => {
@@ -198,6 +202,7 @@ pub struct Root {
     palette: Entity<PaletteLayer>,
     layouts: Entity<LayoutMenu>,
     password: Entity<ui::password::PasswordPrompt>,
+    tasks: Entity<TasksIndicator>,
     /// Whether the window was opened without the system title bar. Windows cannot drop or
     /// restore it on an open window, so the setting applies there from the next start.
     own_bar: bool,
@@ -294,6 +299,7 @@ impl Root {
         let palette =
             cx.new(|_| PaletteLayer::new(state.clone(), workspace.clone(), focus.clone()));
         let layouts = cx.new(|_| LayoutMenu::new(workspace.clone()));
+        let tasks = cx.new(|cx| TasksIndicator::new(workspace.clone(), cx));
         let s = &state.read(cx).settings;
         Self {
             own_bar: s.appearance.custom_title_bar,
@@ -305,6 +311,7 @@ impl Root {
             palette,
             layouts,
             password,
+            tasks,
             focus,
             _subs: subs,
         }
@@ -426,6 +433,7 @@ impl Root {
             .items_center()
             .gap(px(2.))
             .children(pill)
+            .child(self.tasks.clone())
             .child(
                 toggle("toggle-objects", Icon::SidebarLeft, objects, "Objects").on_click(
                     move |_, _, cx| w1.update(cx, |w, cx| w.toggle(PanelKind::Objects, cx)),
@@ -604,6 +612,10 @@ impl Render for Root {
             .on_action(cx.listener(|this, _: &ToggleInspector, _, cx| {
                 this.workspace
                     .update(cx, |w, cx| w.toggle(PanelKind::Inspector, cx))
+            }))
+            .on_action(cx.listener(|this, _: &ToggleTasks, _, cx| {
+                this.workspace
+                    .update(cx, |w, cx| w.toggle(PanelKind::Tasks, cx))
             }))
             .on_action(cx.listener(|this, _: &OpenSettings, _, cx| {
                 this.workspace
@@ -896,6 +908,7 @@ fn main() {
                 .filter(|_| demo.is_none())
                 .map(|p| p.config_dir.join("palette-recent.txt"));
             ui::palette::recent::init(recent, cx);
+            tasks::init(cx);
             let state = state::init(settings, paths, demo.is_some(), cx);
             let updates = UpdateModel::init(state.clone(), cx);
             let workspace = cx.new(|cx| Workspace::new(state.clone(), cx));

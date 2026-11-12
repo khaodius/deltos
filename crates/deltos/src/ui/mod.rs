@@ -27,6 +27,7 @@ pub mod settings;
 pub mod sidebar;
 pub mod structure;
 pub mod table;
+pub mod tasks;
 pub mod text_input;
 pub mod title_bar;
 pub mod transfer;

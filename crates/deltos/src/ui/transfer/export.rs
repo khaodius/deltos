@@ -77,6 +77,8 @@ enum Scope {
 
 pub struct ExportDialog {
     connection: Arc<dyn Connection>,
+    /// The connection's name, for the task list.
+    connection_name: Option<String>,
     kind: DriverKind,
     source: Source,
     /// The name the exported rows go by: the object's, or "query_result".
@@ -107,6 +109,7 @@ pub struct ExportDialog {
 /// Opens the export dialog over `window`.
 pub fn open(
     connection: Arc<dyn Connection>,
+    connection_name: Option<String>,
     source: Source,
     page_rows: u32,
     window: &mut Window,
@@ -116,6 +119,7 @@ pub fn open(
     let view = cx.new(|cx| {
         let mut d = ExportDialog::new(connection, source, page_rows, cx);
         d.window = Some(id);
+        d.connection_name = connection_name;
         d
     });
     // Typing goes to the file field first.
@@ -190,6 +194,7 @@ impl ExportDialog {
         }
         Self {
             connection,
+            connection_name: None,
             kind,
             source,
             name,
@@ -388,6 +393,7 @@ impl ExportDialog {
         let handle = cx.global::<Net>().handle();
         let spec = JobSpec {
             title: format!("Exporting {} to {}", self.name, file_label(&path)),
+            connection: self.connection_name.clone(),
             unit: "rows",
             window: self.window,
             on_done: None,

@@ -4,6 +4,15 @@ Packages for every version are attached to its
 [release](https://github.com/khaodius/deltos/releases), with SHA-256 checksums and a signed
 update manifest.
 
+## 0.1.15 - 2026-11-11
+
+- **Tasks panel.** Long statements, reading a whole result, table loads and counts, saving
+  edits, structure changes, exports, imports and SQL files are listed with their connection,
+  rows so far and a running clock. Statements, reading a result, exact counts, exports,
+  imports and SQL files can be cancelled from there, the same way as from where they started;
+  saving edits and changing a table's structure have no Cancel, so they never stop halfway.
+  The title bar shows how many tasks are running, and Ctrl+Shift+A shows or hides the panel.
+
 ## 0.1.14 - 2026-11-11
 
 - **Import connections.** The connection list's menu imports connections from DBeaver,

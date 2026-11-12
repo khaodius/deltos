@@ -17,6 +17,7 @@ use super::{StructureView, path_of};
 use crate::net::Net;
 use crate::safety::Environment;
 use crate::state::AppState;
+use crate::tasks::{self, TaskOutcome};
 use crate::theme::{Theme, theme};
 use crate::ui::icons::{Icon, icon};
 use crate::ui::text_input::{InputEvent, TextInput};
@@ -187,6 +188,18 @@ impl ReviewDialog {
         let schema = self.review.schema;
         self.running = true;
         self.error = None;
+        // Listed without Cancel: stopping statements that change a table halfway could
+        // leave it changed in part where the database cannot roll changes back, and the
+        // drivers can only stop everything the connection runs.
+        let task = tasks::start_task(
+            self.review.title.trim_end_matches('?').to_owned(),
+            self.review
+                .environment
+                .as_ref()
+                .map(|e| SharedString::from(e.name.clone())),
+            None,
+            cx,
+        );
         let job = cx.global::<Net>().run(async move {
             if schema {
                 return conn
@@ -212,6 +225,13 @@ impl ReviewDialog {
         let on_done = self.on_done.take();
         cx.spawn(async move |this, cx| {
             let result = job.await.unwrap_or_else(|| Err("cancelled".into()));
+            if let Some(task) = task {
+                let outcome = match &result {
+                    Ok(()) => TaskOutcome::Done,
+                    Err(e) => TaskOutcome::Failed(e.clone()),
+                };
+                cx.update(|cx| tasks::finish(task, outcome, cx)).ok();
+            }
             match result {
                 Ok(()) => {
                     cx.update(|cx| {

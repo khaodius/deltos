@@ -890,6 +890,7 @@ impl ImportDialog {
             };
             let spec = JobSpec {
                 title: format!("Running {}", file_label(&path)),
+                connection: self.safety.connection_name(),
                 unit: "statements",
                 window: self.window,
                 on_done,
@@ -946,6 +947,7 @@ impl ImportDialog {
         };
         let spec = JobSpec {
             title: format!("Importing {} into {}", file_label(&path), object.name),
+            connection: self.safety.connection_name(),
             unit: "rows",
             window: self.window,
             on_done,

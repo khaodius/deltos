@@ -37,6 +37,7 @@ use crate::net::Net;
 use crate::safety::{self, Confirm, Environment};
 use crate::snippets;
 use crate::state::{AppState, HistoryEntry, Inspected, StateEvent};
+use crate::tasks::{self, CacheFollower, CancelFn, TaskId, TaskOutcome};
 use crate::theme::{Theme, theme};
 use crate::ui::completion::{ExtraItems, query_completer};
 use crate::ui::editor::{Editor, EditorEvent};
@@ -120,6 +121,9 @@ enum Body {
     Result {
         run: Run,
         grid: Entity<GridView>,
+        /// Reading the whole result after Fetch all, in the task list. Closing the tab
+        /// ends the task.
+        reading: CacheFollower,
         _subs: Vec<Subscription>,
     },
     Plan(PlanTab),
@@ -141,6 +145,8 @@ struct Running {
     tab: Option<u64>,
     /// Its line in the summary, in a run of several.
     index: Option<usize>,
+    /// Its line in the task list.
+    task: Option<TaskId>,
 }
 
 /// What waits for the person to confirm it.
@@ -233,6 +239,13 @@ impl QueryPanel {
                     }
                     this.sync_connection(cx);
                     cx.notify();
+                }
+            }),
+            // A tab closed while its statement runs drops the statement; the task
+            // would otherwise stay listed as running for good.
+            cx.on_release(|this, cx| {
+                if let Some(id) = this.running.take().and_then(|r| r.task) {
+                    tasks::finish(id, TaskOutcome::Cancelled, cx);
                 }
             }),
         ];
@@ -533,17 +546,20 @@ impl QueryPanel {
                         closed: false,
                     },
                     grid,
+                    reading: CacheFollower::default(),
                     _subs: subs,
                 },
             );
             self.active_tab = Some(id);
             Some(id)
         };
+        let task = self.start_task(tasks::statement_label(statement), cx);
         self.running = Some(Running {
             started,
             cancel: conn.cancel_handle(),
             tab,
             index: many.then_some(index),
+            task,
         });
         let timeout = data.query_timeout_secs;
         if timeout > 0 {
@@ -609,6 +625,7 @@ impl QueryPanel {
                                     closed: false,
                                 },
                                 grid,
+                                reading: CacheFollower::default(),
                                 _subs: subs,
                             },
                         );
@@ -675,6 +692,16 @@ impl QueryPanel {
             }
         };
         let failed = error.is_some();
+        if let Some(task) = running.task {
+            if let Some(n) = rows {
+                tasks::progress(task, n, cx);
+            }
+            let outcome = match &error {
+                Some(e) => TaskOutcome::Failed(e.clone()),
+                None => TaskOutcome::Done,
+            };
+            tasks::finish(task, outcome, cx);
+        }
         let entry = HistoryEntry {
             at: SystemTime::now(),
             connection: self.connection.clone().unwrap_or_default(),
@@ -756,6 +783,7 @@ impl QueryPanel {
                         closed: false,
                     },
                     grid,
+                    reading: CacheFollower::default(),
                     _subs: Vec::new(),
                 },
             );
@@ -779,6 +807,14 @@ impl QueryPanel {
         let Some(running) = self.running.take() else {
             return;
         };
+        if let Some(task) = running.task {
+            // A timeout is a failure of the statement; anything else stopped it on purpose.
+            let outcome = match &reason {
+                Some(r) => TaskOutcome::Failed(r.clone()),
+                None => TaskOutcome::Cancelled,
+            };
+            tasks::finish(task, outcome, cx);
+        }
         if let Some(handle) = running.cancel {
             cx.global::<Net>().spawn(async move {
                 if let Err(e) = handle.cancel().await {
@@ -816,14 +852,52 @@ impl QueryPanel {
                         outcome: Outcome::Open { loader, .. },
                         ..
                     },
+                reading,
                 ..
             } = &tab.body
             {
                 loader.stop_fetching();
+                reading.cancelled(cx);
             }
         }
         self.cancel(None, cx);
         cx.notify();
+    }
+
+    /// Lists `work` in the task list, with Cancel stopping it as the Stop button does.
+    fn start_task(&self, work: String, cx: &mut Context<Self>) -> Option<TaskId> {
+        let weak = cx.entity().downgrade();
+        let cancel: CancelFn = Rc::new(move |cx| {
+            weak.update(cx, |this, cx| this.stop(cx)).ok();
+        });
+        let name = self.connection_name(cx).map(SharedString::from);
+        tasks::start_task(work, name, Some(cancel), cx)
+    }
+
+    /// Lists reading the whole result of tab `id` as a task, which Cancel stops.
+    fn follow_reading(&mut self, id: u64, loader: &Arc<StreamLoader>, cx: &mut Context<Self>) {
+        let name = self.connection_name(cx).map(SharedString::from);
+        let Some(tab) = self.tab(Some(id)) else {
+            return;
+        };
+        let Body::Result { grid, reading, .. } = &tab.body else {
+            return;
+        };
+        let Some(cache) = grid.read(cx).cache().cloned() else {
+            return;
+        };
+        let label = format!("Reading all rows: {}", tasks::statement_label(&tab.title));
+        let l = loader.clone();
+        let cancel: CancelFn = Rc::new(move |_| l.stop_fetching());
+        reading.follow(cache, label.into(), name, Some(cancel), cx);
+    }
+
+    /// Stops reading the result of tab `id`.
+    fn stop_reading(&mut self, id: u64, loader: &Arc<StreamLoader>, cx: &mut Context<Self>) {
+        loader.stop_fetching();
+        if let Some(Body::Result { reading, .. }) = self.tab(Some(id)).map(|t| &t.body) {
+            reading.cancelled(cx);
+        }
     }
 
     fn is_running(&self) -> bool {
@@ -973,11 +1047,16 @@ impl QueryPanel {
             }
         };
         let options = ExecuteOptions::default();
+        let task = self.start_task(
+            format!("Explain: {}", tasks::statement_label(&statement)),
+            cx,
+        );
         self.running = Some(Running {
             started,
             cancel: conn.cancel_handle(),
             tab: Some(id),
             index: None,
+            task,
         });
         let task = cx.spawn(async move |this, cx| {
             if close_open_results(&this, cx).await.is_none() {
@@ -1015,8 +1094,15 @@ impl QueryPanel {
                 .await
                 .unwrap_or_else(|| Err("The request was cancelled.".into()));
             this.update(cx, |this, cx| {
-                if this.running.take_if(|r| r.started == started).is_none() {
+                let Some(running) = this.running.take_if(|r| r.started == started) else {
                     return;
+                };
+                if let Some(task) = running.task {
+                    let outcome = match &result {
+                        Ok(_) => TaskOutcome::Done,
+                        Err(e) => TaskOutcome::Failed(e.clone()),
+                    };
+                    tasks::finish(task, outcome, cx);
                 }
                 if let Some(Body::Plan(p)) = this.tab_mut(Some(id)).map(|t| &mut t.body) {
                     p.elapsed = Some(p.started.elapsed());
@@ -1186,12 +1272,16 @@ impl QueryPanel {
         });
     }
 
-    fn mark_closed(&mut self, id: u64) {
-        if let Some(Body::Result { run, .. }) = self.tab_mut(Some(id)).map(|t| &mut t.body)
+    fn mark_closed(&mut self, id: u64, cx: &mut App) {
+        if let Some(Body::Result { run, reading, .. }) = self.tab_mut(Some(id)).map(|t| &mut t.body)
             && let Outcome::Open { loader, .. } = &run.outcome
         {
             loader.stop_fetching();
             run.closed = !loader.is_complete();
+            if run.closed {
+                // A Fetch all on it stops here, short of the end.
+                reading.cancelled(cx);
+            }
         }
     }
 
@@ -1214,6 +1304,7 @@ impl QueryPanel {
         let page_rows = s.settings.data.page_size;
         crate::ui::transfer::export::open(
             conn,
+            self.connection_name(cx),
             crate::ui::transfer::export::Source::Result { loader },
             page_rows,
             window,
@@ -1699,7 +1790,7 @@ impl QueryPanel {
                             && loader.stopped_reason().is_none()
                             && !loader.columns().is_empty()
                         {
-                            fetch_all = Some(loader.clone());
+                            fetch_all = Some((*id, loader.clone()));
                         }
                         if !loader.columns().is_empty() {
                             export = Some(loader.clone());
@@ -1787,7 +1878,7 @@ impl QueryPanel {
                     .gap(px(12.))
                     .children(left),
             )
-            .when_some(fetch_all, |el, loader| {
+            .when_some(fetch_all, |el, (tab, loader)| {
                 let l2 = loader.clone();
                 el.child(
                     button("fetch-all", "Fetch all", ButtonStyle::Ghost, t)
@@ -1795,16 +1886,18 @@ impl QueryPanel {
                         .tooltip(|_, cx| {
                             Tooltip::view("Read the whole result now, for an exact count", cx)
                         })
-                        .on_click(cx.listener(move |_, _, _, cx| {
-                            loader.fetch_all();
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if loader.fetch_all() {
+                                this.follow_reading(tab, &loader, cx);
+                            }
                             cx.notify();
                         })),
                 )
                 .child(
                     button("stop-reading", "Stop", ButtonStyle::Ghost, t)
                         .h(t.s(22.))
-                        .on_click(cx.listener(move |_, _, _, cx| {
-                            l2.stop_fetching();
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.stop_reading(tab, &l2, cx);
                             cx.notify();
                         })),
                 )
@@ -1894,7 +1987,7 @@ async fn close_open_results(
             return None;
         }
         this.update(cx, |this, cx| {
-            this.mark_closed(id);
+            this.mark_closed(id, cx);
             cx.notify();
         })
         .ok()?;

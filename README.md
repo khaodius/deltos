@@ -233,6 +233,7 @@ publisher the first time.
 | Filter rows                 | `Ctrl+F`           |
 | Save the query              | `Ctrl+Shift+S` in a query tab |
 | Open the referenced row     | `Ctrl+Enter` in a table |
+| Show or hide the tasks      | `Ctrl+Shift+A`     |
 
 Every binding can be changed in Settings → Keyboard.
 

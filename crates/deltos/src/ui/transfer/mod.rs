@@ -14,6 +14,7 @@ pub mod read;
 pub mod sql;
 
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
@@ -26,6 +27,7 @@ use gpui::{
 use crate::net::Net;
 use crate::safety::Environment;
 use crate::state::AppState;
+use crate::tasks::{self, CancelFn, TaskId, TaskOutcome};
 use crate::theme::{Theme, theme};
 use crate::ui::icons::{Icon, icon};
 use crate::ui::{ButtonStyle, Tooltip, button, icon_button, thousands};
@@ -94,6 +96,8 @@ struct Job {
     window: Option<WindowId>,
     /// Called on the UI thread when the job ends, to reload what it changed.
     on_done: Option<Box<dyn FnOnce(&Outcome, &mut App)>>,
+    /// Its line in the task list.
+    task: Option<TaskId>,
 }
 
 /// The open dialog and the jobs. See the module documentation.
@@ -147,18 +151,29 @@ pub fn close_dialog(cx: &mut App) {
 /// What [`start_job`] needs besides the work itself.
 pub struct JobSpec {
     pub title: String,
+    /// The name of the connection it works on, for the task list.
+    pub connection: Option<String>,
     pub unit: &'static str,
     pub window: Option<WindowId>,
     pub on_done: Option<Box<dyn FnOnce(&Outcome, &mut App)>>,
 }
 
 /// Runs `work` on the blocking pool and shows it as a card until the person closes it.
+/// It is listed in the task list too, where Cancel stops it as the card's button does.
 pub fn start_job(
     spec: JobSpec,
     work: impl FnOnce(Arc<Progress>) -> Outcome + Send + 'static,
     cx: &mut App,
 ) {
     let progress = Arc::new(Progress::default());
+    let p = progress.clone();
+    let cancel: CancelFn = Rc::new(move |_| p.cancel());
+    let task = tasks::start_task(
+        spec.title.clone(),
+        spec.connection.map(SharedString::from),
+        Some(cancel),
+        cx,
+    );
     let host = host(cx);
     let id = host.update(cx, |h, cx| {
         let id = h.next_id;
@@ -171,6 +186,7 @@ pub fn start_job(
             outcome: None,
             window: spec.window,
             on_done: spec.on_done,
+            task,
         });
         h.tick(cx);
         cx.notify();
@@ -187,9 +203,23 @@ pub fn start_job(
     .detach();
 }
 
+/// How a job's end reads in the task list: a job stopped by Cancel ends in a failure
+/// that says how far it got, which is listed as cancelled.
+fn task_outcome(outcome: &Outcome, cancelled: bool) -> TaskOutcome {
+    match (outcome.failed, cancelled) {
+        (false, _) => TaskOutcome::Done,
+        (true, true) => TaskOutcome::Cancelled,
+        (true, false) => TaskOutcome::Failed(outcome.message.clone()),
+    }
+}
+
 impl Host {
     fn finish(&mut self, id: u64, outcome: Outcome, cx: &mut Context<Self>) {
         if let Some(job) = self.jobs.iter_mut().find(|j| j.id == id) {
+            if let Some(task) = job.task {
+                tasks::progress(task, job.progress.rows.load(Ordering::Relaxed), cx);
+                tasks::finish(task, task_outcome(&outcome, job.progress.cancelled()), cx);
+            }
             if let Some(done) = job.on_done.take() {
                 let o = outcome.clone();
                 cx.defer(move |cx| done(&o, cx));
@@ -213,6 +243,12 @@ impl Host {
                 let running = this
                     .update(cx, |h, cx| {
                         cx.notify();
+                        for job in h.jobs.iter().filter(|j| j.outcome.is_none()) {
+                            if let Some(task) = job.task {
+                                let rows = job.progress.rows.load(Ordering::Relaxed);
+                                tasks::progress(task, rows, cx);
+                            }
+                        }
                         let running = h.jobs.iter().any(|j| j.outcome.is_none());
                         if !running {
                             h.ticking = false;
@@ -588,6 +624,11 @@ impl Safety {
         self.environment.as_ref().is_some_and(|e| e.read_only)
     }
 
+    /// The connection's name, when it is known.
+    pub fn connection_name(&self) -> Option<String> {
+        self.environment.as_ref().map(|e| e.name.clone())
+    }
+
     /// The environment, when it is staging or production.
     pub fn sensitive(&self) -> Option<&Environment> {
         self.environment.as_ref().filter(|e| e.is_sensitive())
@@ -693,7 +734,7 @@ pub fn table_items(
         })
     };
     let mut items = Vec::new();
-    let (c1, o1) = (connection.clone(), object.clone());
+    let (c1, o1, n1) = (connection.clone(), object.clone(), safety.connection_name());
     items.push(
         MenuItem::new("Export…", move |window, cx| {
             let source = export::Source::Table {
@@ -701,7 +742,7 @@ pub fn table_items(
                 view: view.clone(),
                 columns: columns.clone(),
             };
-            export::open(c1.clone(), source, page_rows, window, cx);
+            export::open(c1.clone(), n1.clone(), source, page_rows, window, cx);
         })
         .enabled(browsable),
     );
@@ -764,5 +805,31 @@ pub fn script_item(
         item.detail(READ_ONLY)
     } else {
         item
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn jobs_end_in_the_task_list_as_they_ended() {
+        assert_eq!(
+            task_outcome(&Outcome::done("Exported 3 rows"), false),
+            TaskOutcome::Done
+        );
+        // Finished before the cancel was seen: it is done.
+        assert_eq!(
+            task_outcome(&Outcome::done("Exported 3 rows"), true),
+            TaskOutcome::Done
+        );
+        assert_eq!(
+            task_outcome(&Outcome::failed("Cancelled after 2 rows"), true),
+            TaskOutcome::Cancelled
+        );
+        assert_eq!(
+            task_outcome(&Outcome::failed("Disk full"), false),
+            TaskOutcome::Failed("Disk full".into())
+        );
     }
 }

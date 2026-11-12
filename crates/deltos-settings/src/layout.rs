@@ -31,6 +31,8 @@ pub enum PanelKind {
         text: String,
     },
     Settings,
+    /// Long-running work: statements, table loads and counts, with a way to stop them.
+    Tasks,
 }
 
 impl PanelKind {
@@ -39,7 +41,7 @@ impl PanelKind {
     pub fn is_document(&self) -> bool {
         !matches!(
             self,
-            PanelKind::Objects | PanelKind::Inspector | PanelKind::History
+            PanelKind::Objects | PanelKind::Inspector | PanelKind::History | PanelKind::Tasks
         )
     }
 
@@ -52,6 +54,7 @@ impl PanelKind {
                 | PanelKind::Inspector
                 | PanelKind::History
                 | PanelKind::Settings
+                | PanelKind::Tasks
         )
     }
 }
@@ -225,6 +228,19 @@ mod tests {
         assert_eq!(l.panels.len(), 3);
         assert_eq!(l.dock.panels().len(), 3);
         assert!(l.next_id().0 >= 16);
+    }
+
+    #[test]
+    fn the_tasks_panel_is_a_tool_kept_once() {
+        let p = SavedPanel {
+            id: PanelId(30),
+            kind: PanelKind::Tasks,
+        };
+        let text = toml::to_string(&p).unwrap();
+        assert!(text.contains("type = \"tasks\""));
+        assert_eq!(toml::from_str::<SavedPanel>(&text).unwrap(), p);
+        assert!(PanelKind::Tasks.is_singleton());
+        assert!(!PanelKind::Tasks.is_document());
     }
 
     #[test]
