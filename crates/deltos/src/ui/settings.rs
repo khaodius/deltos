@@ -85,6 +85,12 @@ const GRID_FONTS: [&str; 5] = [
     "JetBrains Mono",
 ];
 
+/// Text colors offered as swatches: dark ones for light mode, light ones for dark mode.
+const LIGHT_TEXTS: [u32; 6] = [0x000000, 0x1D1D20, 0x2B2B30, 0x1B2430, 0x2A251F, 0x1F2A22];
+const DARK_TEXTS: [u32; 8] = [
+    0xFFFFFF, 0xE6E6E6, 0xDDE3EE, 0xEEE2D8, 0xDCE8E0, 0xE9E1F0, 0xF2D99A, 0xA8E6B8,
+];
+
 const TINTS: [(&str, u32); 4] = [("Off", 0), ("Subtle", 5), ("Medium", 10), ("Strong", 18)];
 
 /// Which font a font menu sets.
@@ -101,6 +107,9 @@ pub struct SettingsPanel {
     section: Section,
     accent_hex: Entity<TextInput>,
     accent_picker: Entity<ColorPicker>,
+    /// The text color of the mode on screen: its hex field and picker.
+    text_hex: Entity<TextInput>,
+    text_picker: Entity<ColorPicker>,
     font_menu: Option<FontTarget>,
     /// The system's font families, read when a font menu first opens.
     system_fonts: Option<Vec<String>>,
@@ -136,14 +145,36 @@ impl SettingsPanel {
             })
             .collect();
         let accent_picker = cx.new(|cx| ColorPicker::new(s.appearance.accent, cx));
+        let text_now = shown_text(cx);
+        let text_hex = text_input("#E6E6E6", Some(format!("#{text_now:06X}")), cx);
+        let text_picker = cx.new(|cx| ColorPicker::new(text_now, cx));
         let mut subs = vec![cx.subscribe(&state, |this, state, e, cx| {
             if matches!(e, StateEvent::Settings | StateEvent::Update) {
                 // A swatch, the hex field or a reset moved the accent: the picker follows.
                 let accent = state.read(cx).settings.appearance.accent;
                 this.accent_picker.update(cx, |p, cx| p.set_rgb(accent, cx));
+                // The text color too, and a change of mode shows the other mode's color.
+                let text = shown_text(cx);
+                this.text_picker.update(cx, |p, cx| p.set_rgb(text, cx));
+                this.text_hex
+                    .update(cx, |i, cx| i.set_text(format!("#{text:06X}"), cx));
                 cx.notify();
             }
         })];
+        subs.push(cx.subscribe(&text_picker, |this, _, e, cx| {
+            let ColorEvent::Changed(c) = *e;
+            this.set_text_color(Some(c), cx);
+        }));
+        subs.push(cx.subscribe(&text_hex, |this, input, e, cx| {
+            if matches!(e, InputEvent::Submit | InputEvent::Cancel) {
+                let parsed = deltos_settings::parse_color(input.read(cx).text());
+                if let (InputEvent::Submit, Some(rgba)) = (e, parsed) {
+                    this.set_text_color(Some(rgba >> 8), cx);
+                }
+                let current = shown_text(cx);
+                input.update(cx, |i, cx| i.set_text(format!("#{current:06X}"), cx));
+            }
+        }));
         subs.push(cx.subscribe(&accent_picker, |this, _, e, cx| {
             let ColorEvent::Changed(c) = *e;
             this.accent_hex
@@ -198,6 +229,8 @@ impl SettingsPanel {
             section: Section::Appearance,
             accent_hex,
             accent_picker,
+            text_hex,
+            text_picker,
             font_menu: None,
             system_fonts: None,
             keys,
@@ -220,6 +253,71 @@ impl SettingsPanel {
 
     fn set(&self, cx: &mut App, f: impl FnOnce(&mut Settings)) {
         self.state.update(cx, |s, cx| s.update_settings(cx, f));
+    }
+
+    /// Sets the text color of the mode on screen; `None` goes back to the palette's.
+    fn set_text_color(&self, c: Option<u32>, cx: &mut App) {
+        let dark = theme(cx).dark;
+        self.set(cx, move |s| {
+            if dark {
+                s.appearance.dark_text = c;
+            } else {
+                s.appearance.light_text = c;
+            }
+        });
+    }
+
+    /// The text color control: swatches for the mode on screen, the hex field, Default,
+    /// and the picker.
+    fn text_color_control(
+        &self,
+        a: &Appearance,
+        t: &Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let current = if t.dark { a.dark_text } else { a.light_text };
+        let presets: &[u32] = if t.dark { &DARK_TEXTS } else { &LIGHT_TEXTS };
+        let mut swatches = div().flex().flex_wrap().gap(px(6.)).max_w(px(240.));
+        for (i, c) in presets.iter().copied().enumerate() {
+            let w = cx.entity().downgrade();
+            swatches = swatches.child(
+                div()
+                    .id(("text-color", i))
+                    .size(px(18.))
+                    .rounded_full()
+                    .bg(color(c))
+                    .cursor_pointer()
+                    .border_2()
+                    .border_color(if current == Some(c) {
+                        t.accent
+                    } else {
+                        t.border_strong
+                    })
+                    .on_click(move |_, _, cx| {
+                        w.update(cx, |this, cx| this.set_text_color(Some(c), cx))
+                            .ok();
+                    }),
+            );
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .child(swatches)
+                    .child(div().w(px(84.)).child(field(&self.text_hex, t, window, cx)))
+                    .child(
+                        button("text-color-default", "Default", ButtonStyle::Secondary, t)
+                            .on_click(cx.listener(|this, _, _, cx| this.set_text_color(None, cx))),
+                    ),
+            )
+            .child(self.text_picker.clone())
+            .into_any_element()
     }
 
     /// The font picker for one setting: the fonts Deltos ships first, then the system's.
@@ -844,6 +942,12 @@ impl SettingsPanel {
         );
         let hex_reset = self.accent_hex.clone();
         let motion = self.motion_rows(&a, t, window, cx);
+        let text_control = self.text_color_control(&a, t, window, cx);
+        let text_color_label = if t.dark {
+            "Text color in dark mode"
+        } else {
+            "Text color in light mode"
+        };
         group("Theme", t)
             .child(preview)
             .child(row(
@@ -959,6 +1063,12 @@ impl SettingsPanel {
             ))
             .child(gap())
             .child(heading("Text", t))
+            .child(stacked_row(
+                text_color_label,
+                Some("The color of text in this mode. Secondary and faint text follow it. Switch the mode above to set the other one."),
+                text_control,
+                t,
+            ))
             .child(row(
                 "Interface zoom",
                 None,
@@ -2010,6 +2120,11 @@ impl Render for SettingsPanel {
                 .child(div().max_w(px(640.)).px(px(28.)).py(px(20.)).child(body)),
         )
     }
+}
+
+/// The text color of the mode on screen as 0xRRGGBB: the setting, or the palette's.
+fn shown_text(cx: &App) -> u32 {
+    crate::theme::to_rgb(theme(cx).text)
 }
 
 #[cfg(test)]
