@@ -6,14 +6,76 @@ use std::time::Duration;
 
 use gpui::{Pixels, Point, Window};
 
-/// How long a panel takes to settle after it lands in a window.
+/// How long a panel takes to settle after it lands in a window, at normal speed.
 pub const SETTLE: Duration = Duration::from_millis(240);
 
-/// The squash of a landing panel at `t` (0 to 1) of [`SETTLE`]: positive is squashed
-/// (wider than tall), negative is stretched, and it rings down to rest at 0.
-pub fn squash(t: f32) -> f32 {
-    let t = t.clamp(0.0, 1.0);
-    (1.0 - t).powi(2) * (t * 3.0 * std::f32::consts::PI).cos()
+/// How long the drag ghost's stretch takes to ease off once the pointer stops, in seconds
+/// at normal speed.
+const DRAG_EASE: f32 = 0.09;
+
+/// The squash of a landing panel at `t` (0 to 1) of its settle: positive is squashed
+/// (wider than tall), negative is stretched, and it comes to rest at 0. `smoothness` runs
+/// from 0 (rings one and a half times) to 1 (eases to rest with no overshoot): it rings
+/// fewer times and dies down sooner as smoothness rises.
+pub fn squash_smoothed(t: f32, smoothness: f32) -> f32 {
+    let (t, s) = (t.clamp(0.0, 1.0), smoothness.clamp(0.0, 1.0));
+    // Half-waves of the cosine: 3 rings, 0.5 is a quarter wave that only falls to rest.
+    let half_waves = 3.0 - 2.5 * s;
+    let decay = 2.0 + 2.0 * s;
+    (1.0 - t).powf(decay) * (t * half_waves * std::f32::consts::PI).cos()
+}
+
+/// The motion settings, as the views read them from the theme.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Motion {
+    /// Off with reduced motion: nothing animates.
+    pub on: bool,
+    pub speed: f32,
+    pub smoothness: f32,
+    pub squash: f32,
+    pub easing: deltos_settings::MotionEasing,
+    pub drag_stretch: bool,
+    pub outline: bool,
+}
+
+impl Motion {
+    pub fn new(a: &deltos_settings::Appearance) -> Self {
+        Self {
+            on: !a.reduced_motion,
+            speed: a.motion_speed.clamp(0.25, 3.0),
+            smoothness: a.motion_smoothness.clamp(0.0, 1.0),
+            squash: a.motion_squash.clamp(0.0, 2.0),
+            easing: a.motion_easing,
+            drag_stretch: a.motion_drag_stretch,
+            outline: a.motion_outline,
+        }
+    }
+
+    /// How long a landing panel takes to settle.
+    pub fn settle(&self) -> Duration {
+        SETTLE.div_f32(self.speed)
+    }
+
+    /// Whether a landing panel animates at all: with nothing to squash or outline, there
+    /// is nothing to draw.
+    pub fn settles(&self) -> bool {
+        self.on && (self.squash > 0.0 || self.outline)
+    }
+
+    /// The squash at `t` (0 to 1) of [`Motion::settle`], eased and scaled by the settings.
+    pub fn squash_at(&self, t: f32) -> f32 {
+        squash_smoothed(self.easing.apply(t), self.smoothness) * self.squash
+    }
+
+    /// How long the drag ghost's stretch takes to ease off, in seconds.
+    pub fn drag_ease(&self) -> f32 {
+        DRAG_EASE / self.speed
+    }
+
+    /// Whether the drag ghost stretches and leans.
+    pub fn stretches(&self) -> bool {
+        self.on && self.drag_stretch
+    }
 }
 
 /// Insets, as `(horizontal, vertical)` fractions of the panel, that draw `squash`: a
@@ -258,6 +320,10 @@ fn windows_follow(window: &Window, grab: Point<Pixels>) -> bool {
 mod tests {
     use super::*;
 
+    fn squash(t: f32) -> f32 {
+        squash_smoothed(t, 0.0)
+    }
+
     #[test]
     fn squash_starts_squashed_and_comes_to_rest() {
         assert!(squash(0.0) > 0.9);
@@ -268,6 +334,38 @@ mod tests {
         assert!(squash(1.0).abs() < 1e-6);
         let (x, y) = insets(squash(0.0));
         assert!(y > 0.0 && x == 0.0);
+    }
+
+    #[test]
+    fn smooth_settles_never_overshoot() {
+        for i in 0..=20 {
+            let v = squash_smoothed(i as f32 / 20.0, 1.0);
+            assert!(v >= -1e-6, "a fully smooth settle stretches at {i}");
+        }
+        assert!(squash_smoothed(0.0, 1.0) > 0.9);
+        assert!(squash_smoothed(1.0, 0.5).abs() < 1e-6);
+        // Smoothness 0 is the springy settle Deltos always had.
+        for i in 0..=10 {
+            let t = i as f32 / 10.0;
+            let old = (1.0 - t).powi(2) * (t * 3.0 * std::f32::consts::PI).cos();
+            assert!((squash(t) - old).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn motion_follows_the_settings() {
+        let mut a = deltos_settings::Appearance::default();
+        let m = Motion::new(&a);
+        assert!(m.settles() && m.stretches());
+        assert_eq!(m.settle(), SETTLE);
+        a.motion_speed = 2.0;
+        a.motion_squash = 0.0;
+        a.motion_outline = false;
+        let m = Motion::new(&a);
+        assert_eq!(m.settle(), SETTLE / 2);
+        assert!(!m.settles(), "nothing to draw");
+        a.reduced_motion = true;
+        assert!(!Motion::new(&a).stretches());
     }
 
     #[test]
