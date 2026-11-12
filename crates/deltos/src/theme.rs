@@ -94,8 +94,9 @@ pub struct Theme {
     pub title_bar_line: Option<Hsla>,
     pub tab_style: TabStyle,
     pub header_style: HeaderStyle,
-    /// Panels animate as they leave and join windows; off with reduced motion.
-    pub motion: bool,
+    /// How panels animate as they leave and join windows: on or off, speed, smoothness,
+    /// squash and the rest of the motion settings.
+    pub motion_style: crate::ui::motion::Motion,
 }
 
 impl Global for Theme {}
@@ -507,7 +508,7 @@ impl Theme {
             title_bar_line: (a.title_bar_style == TitleBarStyle::Line).then_some(accent),
             tab_style: a.tab_style,
             header_style: a.header_style,
-            motion: !a.reduced_motion,
+            motion_style: crate::ui::motion::Motion::new(a),
         };
         if let Some(custom) = custom {
             theme.apply(custom);

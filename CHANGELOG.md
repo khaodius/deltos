@@ -4,6 +4,13 @@ Packages for every version are attached to its
 [release](https://github.com/khaodius/deltos/releases), with SHA-256 checksums and a signed
 update manifest.
 
+## 0.1.18 - 2026-11-12
+
+- **Motion settings.** Settings → Appearance → Motion turns panel animations on or off and
+  tunes them: sliders for speed, smoothness (springy to no overshoot) and how far a landing
+  panel squashes, a choice of easing, and switches for the stretch while dragging and the
+  accent outline on landing. A preview plays a landing with the current settings.
+
 ## 0.1.17 - 2026-11-12
 
 - **Starts on Wayland again.** Deltos no longer aborts at start with "RefCell already
