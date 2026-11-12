@@ -1058,10 +1058,7 @@ impl GridView {
         let rows = s.rows();
         let rows = rows.start..rows.end.min(rows.start + COPY_LIMIT);
         let cols: Vec<usize> = s.cols().filter(|c| *c < self.columns.len()).collect();
-        let names: Vec<&str> = cols
-            .iter()
-            .map(|c| self.columns[*c].name.as_str())
-            .collect();
+        let columns: Vec<Column> = cols.iter().map(|c| self.columns[*c].clone()).collect();
         let mut values: Vec<Vec<Value>> = Vec::new();
         each_row(Some(&*cache), &self.pending, rows, |_, row| {
             values.push(
@@ -1074,7 +1071,7 @@ impl GridView {
                     .collect(),
             );
         });
-        let out = format_rows(format, &names, &values);
+        let out = format_rows(format, &columns, &values);
         cx.write_to_clipboard(ClipboardItem::new_string(out));
     }
 
@@ -1287,6 +1284,10 @@ impl GridView {
                     act(|g, _, cx| g.copy_as(CopyFormat::Csv, cx)),
                 ));
                 items.push(MenuItem::new(
+                    "Copy as TSV",
+                    act(|g, _, cx| g.copy_as(CopyFormat::Tsv, cx)),
+                ));
+                items.push(MenuItem::new(
                     "Copy as JSON",
                     act(|g, _, cx| g.copy_as(CopyFormat::Json, cx)),
                 ));
@@ -1486,88 +1487,34 @@ impl GridView {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CopyFormat {
     Csv,
+    Tsv,
     Json,
     Markdown,
 }
 
-/// Rows of values as text in `format`, `names` naming the columns.
-pub fn format_rows(format: CopyFormat, names: &[&str], rows: &[Vec<Value>]) -> String {
+/// Rows of values as text in `format`, through the same writers as the export.
+pub fn format_rows(format: CopyFormat, columns: &[Column], rows: &[Vec<Value>]) -> String {
+    use deltos_grid::{CsvFormat, CsvWriter, JsonStyle, JsonWriter, MarkdownWriter, write_rows};
+    let csv = |delimiter| {
+        CsvWriter::new(CsvFormat {
+            delimiter,
+            line_end: "\n",
+            ..CsvFormat::default()
+        })
+    };
     match format {
-        CopyFormat::Csv => {
-            let field = |s: &str| {
-                if s.contains([',', '"', '\n', '\r']) {
-                    format!("\"{}\"", s.replace('"', "\"\""))
-                } else {
-                    s.to_owned()
-                }
-            };
-            let mut out = names.iter().map(|n| field(n)).collect::<Vec<_>>().join(",");
-            for row in rows {
-                out.push('\n');
-                let cells: Vec<String> = row
-                    .iter()
-                    .map(|v| {
-                        if v.is_null() {
-                            String::new()
-                        } else {
-                            field(&v.to_string())
-                        }
-                    })
-                    .collect();
-                out.push_str(&cells.join(","));
-            }
-            out
-        }
+        CopyFormat::Csv => write_rows(&mut csv(b','), columns, rows),
+        CopyFormat::Tsv => write_rows(&mut csv(b'\t'), columns, rows),
         CopyFormat::Json => {
-            let list: Vec<serde_json::Value> = rows
-                .iter()
-                .map(|row| {
-                    let mut object = serde_json::Map::new();
-                    for (name, v) in names.iter().zip(row) {
-                        object.insert((*name).to_owned(), json_value(v));
-                    }
-                    serde_json::Value::Object(object)
-                })
-                .collect();
-            let value = if list.len() == 1 {
-                list.into_iter().next().unwrap_or_default()
+            // One row is copied as an object, several as an array.
+            let style = if rows.len() == 1 {
+                JsonStyle::Lines
             } else {
-                serde_json::Value::Array(list)
+                JsonStyle::Array
             };
-            serde_json::to_string_pretty(&value).unwrap_or_default()
+            write_rows(&mut JsonWriter::new(style, true), columns, rows)
         }
-        CopyFormat::Markdown => {
-            let cell = |s: &str| s.replace('|', "\\|").replace(['\n', '\r'], " ");
-            let mut out = format!(
-                "| {} |\n|{}|",
-                names
-                    .iter()
-                    .map(|n| cell(n))
-                    .collect::<Vec<_>>()
-                    .join(" | "),
-                names.iter().map(|_| " --- ").collect::<Vec<_>>().join("|")
-            );
-            for row in rows {
-                let cells: Vec<String> = row.iter().map(|v| cell(&v.to_string())).collect();
-                out.push_str(&format!("\n| {} |", cells.join(" | ")));
-            }
-            out
-        }
-    }
-}
-
-fn json_value(v: &Value) -> serde_json::Value {
-    match v {
-        Value::Null => serde_json::Value::Null,
-        Value::Bool(b) => serde_json::Value::Bool(*b),
-        Value::Int(i) => serde_json::Value::from(*i),
-        Value::Float(f) => serde_json::Number::from_f64(*f).map_or_else(
-            || serde_json::Value::String(f.to_string()),
-            serde_json::Value::Number,
-        ),
-        Value::Json(s) => serde_json::from_str(s).unwrap_or_else(|_| s.to_string().into()),
-        Value::Text(s) => serde_json::Value::String(s.to_string()),
-        Value::Bytes(_) => serde_json::Value::String(v.to_string()),
+        CopyFormat::Markdown => write_rows(&mut MarkdownWriter::new(), columns, rows),
     }
 }
 

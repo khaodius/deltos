@@ -21,7 +21,8 @@
 //! - [`StreamLoader`] reads a statement's forward-only result into a [`SpillStore`] on
 //!   disk as the viewport approaches the end of what has been read, or to the end on
 //!   request, and decodes pages from the file.
-//! - [`export_csv`] streams any loader to CSV one page at a time.
+//! - [`export`] streams any loader to CSV, JSON, Markdown or a [`RowWriter`] of the app's
+//!   one page at a time; [`write_rows`] runs the same writers over rows in memory.
 //!
 //! # The memory bound
 //!
@@ -70,7 +71,10 @@ mod testing;
 
 pub use browse::{BrowseConfig, BrowseLoader, BrowseQuery, BrowseStats};
 pub use cache::{CacheConfig, CacheStats, GridCache};
-pub use export::{CsvOptions, export_csv};
+pub use export::{
+    CsvFormat, CsvOptions, CsvWriter, ExportOptions, JsonStyle, JsonWriter, MarkdownWriter,
+    QuoteStyle, RowWriter, export, export_csv, json_value, write_rows,
+};
 pub use loader::{
     Hooks, LoadedPage, LoaderEvent, NotifyFn, PageLoader, PageRequest, Reporter, RowCount,
     SpawnBlockingFn, SpawnFn, Status, run_blocking,

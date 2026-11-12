@@ -1190,6 +1190,32 @@ impl QueryPanel {
         }
     }
 
+    /// Opens the export dialog for the open result.
+    fn export_result(
+        &mut self,
+        loader: Arc<StreamLoader>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let s = self.state.read(cx);
+        let Some(conn) = self
+            .connection
+            .as_ref()
+            .and_then(|id| s.session(id))
+            .map(|s| s.conn.clone())
+        else {
+            return;
+        };
+        let page_rows = s.settings.data.page_size;
+        crate::ui::transfer::export::open(
+            conn,
+            crate::ui::transfer::export::Source::Result { loader },
+            page_rows,
+            window,
+            cx,
+        );
+    }
+
     // ---- drawing -------------------------------------------------------------------------
 
     fn connection_picker(&mut self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
@@ -1592,6 +1618,7 @@ impl QueryPanel {
     fn status_bar(&mut self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let mut left: Vec<AnyElement> = Vec::new();
         let mut fetch_all = None;
+        let mut export = None;
         let env = self
             .connection
             .as_deref()
@@ -1668,6 +1695,9 @@ impl QueryPanel {
                             && !loader.columns().is_empty()
                         {
                             fetch_all = Some(loader.clone());
+                        }
+                        if !loader.columns().is_empty() {
+                            export = Some(loader.clone());
                         }
                     }
                 }
@@ -1771,6 +1801,16 @@ impl QueryPanel {
                         .on_click(cx.listener(move |_, _, _, cx| {
                             l2.stop_fetching();
                             cx.notify();
+                        })),
+                )
+            })
+            .when_some(export, |el, loader| {
+                el.child(
+                    button("export-result", "Export…", ButtonStyle::Ghost, t)
+                        .h(t.s(22.))
+                        .tooltip(|_, cx| Tooltip::view("Save the whole result to a file", cx))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.export_result(loader.clone(), window, cx)
                         })),
                 )
             })

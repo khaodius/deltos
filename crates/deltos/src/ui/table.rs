@@ -32,7 +32,9 @@ use crate::ui::edit;
 use crate::ui::grid::{Batch, CellInput, GridEvent, GridView, MenuTarget, RowRef};
 use crate::ui::icons::{Icon, icon};
 use crate::ui::pending::RowMark;
-use crate::ui::{ButtonStyle, Tooltip, button, empty_state, icon_button, segmented, thousands};
+use crate::ui::{
+    ButtonStyle, Tooltip, button, empty_state, icon_button, menu, segmented, thousands,
+};
 
 mod filters;
 mod memory;
@@ -148,6 +150,8 @@ pub struct TablePanel {
     commit_error: Option<SharedString>,
     review: Option<Review>,
     review_focus: FocusHandle,
+    /// The status bar's import and export menu is open.
+    transfer_menu: bool,
     _subs: Vec<Subscription>,
 }
 
@@ -244,6 +248,7 @@ impl TablePanel {
             commit_error: None,
             review: None,
             review_focus: cx.focus_handle(),
+            transfer_menu: false,
             _subs: subs,
         };
         let weak = cx.entity().downgrade();
@@ -1839,6 +1844,7 @@ impl TablePanel {
                         .on_click(cx.listener(|this, _, window, cx| this.add_row(window, cx))),
                 )
             })
+            .child(self.transfer_button(t, cx))
             .child(div().flex_1())
             .when_some(self.notice.clone(), |el, (text, error)| {
                 // A long message is cut short here; the tooltip has all of it.
@@ -1931,6 +1937,7 @@ impl TablePanel {
             .when(memory > 0, |el| {
                 el.child(
                     div()
+                        .flex_none()
                         .text_color(t.text_faint)
                         .child(format!("{:.1} MB", memory as f64 / 1_048_576.0)),
                 )
@@ -1941,6 +1948,49 @@ impl TablePanel {
                     .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
             )
             .into_any_element()
+    }
+
+    /// The status bar's export and import button, and its menu when open.
+    fn transfer_button(&mut self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let mut el = icon_button("table-transfer", Icon::Export, t)
+            .relative()
+            .tooltip(|_, cx| Tooltip::view("Export and import", cx))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.transfer_menu = !this.transfer_menu;
+                cx.notify();
+            }));
+        if self.transfer_menu
+            && let (Some(conn), Some(loader)) = (self.connection(cx), self.loader.clone())
+        {
+            let columns = self.grid.read(cx).columns().clone();
+            let weak = cx.entity().downgrade();
+            let reload = weak.clone();
+            let items = crate::ui::transfer::table_items(
+                conn,
+                self.object.clone(),
+                Some(loader.query()),
+                (!columns.is_empty()).then_some(columns),
+                self.state.read(cx).settings.data.page_size,
+                crate::ui::transfer::Safety::of(self.state.read(cx), &self.connection),
+                Some(Rc::new(move |cx: &mut App| {
+                    reload.update(cx, |t, cx| t.refresh(cx)).ok();
+                })),
+            );
+            el = el.child(menu(
+                "table-transfer-menu",
+                items,
+                220.,
+                move |_, cx| {
+                    weak.update(cx, |this, cx| {
+                        this.transfer_menu = false;
+                        cx.notify();
+                    })
+                    .ok();
+                },
+                t,
+            ));
+        }
+        el.into_any_element()
     }
 
     fn structure(&mut self, t: &Theme) -> AnyElement {

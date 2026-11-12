@@ -103,6 +103,9 @@ impl ObjectsPanel {
             return Vec::new();
         };
         let (sid, kind) = (session.id.clone(), session.kind);
+        let conn = session.conn.clone();
+        let page_rows = self.state.read(cx).settings.data.page_size;
+        let safety = crate::ui::transfer::Safety::of(self.state.read(cx), &sid);
         let this = self.state.clone();
         let copy = |text: String| {
             move |_: &mut Window, cx: &mut gpui::App| {
@@ -160,6 +163,19 @@ impl ObjectsPanel {
                     items.push(MenuItem::new("Copy SELECT statement", copy(select)));
                 }
                 items.push(MenuItem::separator());
+                let (state, s3, p3) = (this.clone(), sid.clone(), object.namespace.clone());
+                items.extend(crate::ui::transfer::table_items(
+                    conn.clone(),
+                    object.clone(),
+                    None,
+                    None,
+                    page_rows,
+                    safety.clone(),
+                    Some(Rc::new(move |cx: &mut gpui::App| {
+                        state.update(cx, |s, cx| s.load_objects(&s3, &p3, cx))
+                    })),
+                ));
+                items.push(MenuItem::separator());
                 let (state, sid, path) = (this.clone(), sid.clone(), object.namespace.clone());
                 items.push(MenuItem::new("Reload the list", move |_, cx| {
                     state.update(cx, |s, cx| s.load_objects(&sid, &path, cx))
@@ -175,6 +191,17 @@ impl ObjectsPanel {
                 items.push(MenuItem::new("Reload", move |_, cx| {
                     state.update(cx, |s, cx| s.load_objects(&s2, &p2, cx))
                 }));
+                if edit::speaks_sql(kind) {
+                    let (state, s3, p3) = (this.clone(), sid.clone(), path.clone());
+                    items.push(crate::ui::transfer::script_item(
+                        conn.clone(),
+                        path.clone(),
+                        safety.clone(),
+                        Some(Rc::new(move |cx: &mut gpui::App| {
+                            state.update(cx, |s, cx| s.load_objects(&s3, &p3, cx))
+                        })),
+                    ));
+                }
                 items.push(MenuItem::separator());
                 items.push(MenuItem::new(
                     "Copy name",

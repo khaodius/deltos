@@ -622,6 +622,7 @@ impl Render for Root {
                 el.child(ui::title_bar::resize_grips(window))
             })
             .child(self.palette.clone())
+            .child(ui::transfer::overlay(cx))
     }
 }
 

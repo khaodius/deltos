@@ -24,6 +24,7 @@ pub mod sidebar;
 pub mod table;
 pub mod text_input;
 pub mod title_bar;
+pub mod transfer;
 pub mod tsv;
 pub mod workspace;
 
