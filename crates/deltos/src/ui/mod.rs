@@ -25,6 +25,7 @@ pub mod save_query;
 pub mod screen_color;
 pub mod settings;
 pub mod sidebar;
+pub mod slider;
 pub mod structure;
 pub mod table;
 pub mod tasks;

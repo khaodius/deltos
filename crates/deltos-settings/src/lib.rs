@@ -125,6 +125,47 @@ impl Density {
     }
 }
 
+/// The pace of a panel's settle as it lands: how the animation's time maps to its motion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MotionEasing {
+    /// Even pace from start to end.
+    #[default]
+    Linear,
+    /// Fast at first, slowing into rest.
+    EaseOut,
+    /// Slow at both ends.
+    EaseInOut,
+}
+
+impl MotionEasing {
+    pub const ALL: [Self; 3] = [Self::Linear, Self::EaseOut, Self::EaseInOut];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Linear => "Linear",
+            Self::EaseOut => "Ease out",
+            Self::EaseInOut => "Ease in-out",
+        }
+    }
+
+    /// Maps linear time `t` (0 to 1) to eased time.
+    pub fn apply(self, t: f32) -> f32 {
+        let t = t.clamp(0.0, 1.0);
+        match self {
+            Self::Linear => t,
+            Self::EaseOut => 1.0 - (1.0 - t).powi(3),
+            Self::EaseInOut => {
+                if t < 0.5 {
+                    4.0 * t * t * t
+                } else {
+                    1.0 - (-2.0 * t + 2.0).powi(3) / 2.0
+                }
+            }
+        }
+    }
+}
+
 /// How a NULL cell reads in the grid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -330,6 +371,11 @@ pub struct Appearance {
     pub dark_palette: Palette,
     /// How much of the accent color washes into the window's surfaces, 0 to 0.3.
     pub accent_tint: f32,
+    /// Text color as 0xRRGGBB in light mode, over the palette's. Secondary and faint text
+    /// follow it. `None` is the palette's own.
+    pub light_text: Option<u32>,
+    /// Text color as 0xRRGGBB in dark mode, as `light_text` is for light mode.
+    pub dark_text: Option<u32>,
     pub title_bar_style: TitleBarStyle,
     pub tab_style: TabStyle,
     pub header_style: HeaderStyle,
@@ -364,6 +410,20 @@ pub struct Appearance {
     pub ui_scale: f32,
     /// Turns off animations.
     pub reduced_motion: bool,
+    /// How fast panels animate as they leave and join windows, 0.25 to 3 times the
+    /// normal pace.
+    pub motion_speed: f32,
+    /// How smoothly a landing panel comes to rest, 0 (springy: it overshoots and rings)
+    /// to 1 (no overshoot).
+    pub motion_smoothness: f32,
+    /// How far a landing panel squashes and stretches, 0 (not at all) to 2 (twice the
+    /// normal amount).
+    pub motion_squash: f32,
+    pub motion_easing: MotionEasing,
+    /// Stretches the dragged panel along its motion and leans it toward window edges.
+    pub motion_drag_stretch: bool,
+    /// Outlines a landing panel in the accent color while it settles.
+    pub motion_outline: bool,
     /// Draws Deltos' own title bar instead of the system's.
     pub custom_title_bar: bool,
     /// Window opacity, 0.5 to 1. Only some systems honor it.
@@ -381,6 +441,8 @@ impl Default for Appearance {
             light_palette: Palette::Classic,
             dark_palette: Palette::Obsidian,
             accent_tint: 0.0,
+            light_text: None,
+            dark_text: None,
             title_bar_style: TitleBarStyle::Plain,
             tab_style: TabStyle::Card,
             header_style: HeaderStyle::Bold,
@@ -400,6 +462,12 @@ impl Default for Appearance {
             date_format: DateFormat::Raw,
             ui_scale: 1.0,
             reduced_motion: false,
+            motion_speed: 1.0,
+            motion_smoothness: 0.0,
+            motion_squash: 1.0,
+            motion_easing: MotionEasing::Linear,
+            motion_drag_stretch: true,
+            motion_outline: true,
             custom_title_bar: true,
             window_opacity: 1.0,
             sidebar_row_counts: true,
@@ -720,12 +788,17 @@ impl Settings {
             a.dark_palette = d.dark_palette;
         }
         a.zebra_color = a.zebra_color.map(|c| c & 0xFF_FFFF);
+        a.light_text = a.light_text.map(|c| c & 0xFF_FFFF);
+        a.dark_text = a.dark_text.map(|c| c & 0xFF_FFFF);
         a.ui_font_size = finite_or(a.ui_font_size, d.ui_font_size).clamp(11.0, 16.0);
         a.mono_font_size = finite_or(a.mono_font_size, d.mono_font_size).clamp(10.0, 18.0);
         a.corner_radius = finite_or(a.corner_radius, d.corner_radius).clamp(0.0, 10.0);
         a.border_contrast = finite_or(a.border_contrast, 1.0).clamp(0.5, 2.0);
         a.ui_scale = finite_or(a.ui_scale, 1.0).clamp(0.75, 1.5);
         a.window_opacity = finite_or(a.window_opacity, 1.0).clamp(0.5, 1.0);
+        a.motion_speed = finite_or(a.motion_speed, d.motion_speed).clamp(0.25, 3.0);
+        a.motion_smoothness = finite_or(a.motion_smoothness, d.motion_smoothness).clamp(0.0, 1.0);
+        a.motion_squash = finite_or(a.motion_squash, d.motion_squash).clamp(0.0, 2.0);
         for font in [
             &mut a.ui_font,
             &mut a.mono_font,
@@ -946,6 +1019,49 @@ mod tests {
             Settings::from_toml(plum).unwrap().appearance.dark_palette,
             Palette::Plum
         );
+    }
+
+    #[test]
+    fn loads_and_clamps_the_motion_settings() {
+        let text = "[appearance]\nmotion_speed = 9.0\nmotion_smoothness = -1.0\n\
+                    motion_squash = 0.5\nmotion_easing = \"ease-out\"\nmotion_outline = false\n";
+        let s = Settings::from_toml(text).unwrap();
+        let a = &s.appearance;
+        assert_eq!(a.motion_speed, 3.0);
+        assert_eq!(a.motion_smoothness, 0.0);
+        assert_eq!(a.motion_squash, 0.5);
+        assert_eq!(a.motion_easing, MotionEasing::EaseOut);
+        assert!(!a.motion_outline);
+        assert!(a.motion_drag_stretch);
+        // A file from before these settings keeps the old motion.
+        let old = Settings::from_toml("[appearance]\nreduced_motion = false\n").unwrap();
+        assert_eq!(old.appearance.motion_speed, 1.0);
+        assert_eq!(old.appearance.motion_easing, MotionEasing::Linear);
+    }
+
+    #[test]
+    fn keeps_a_text_color_per_mode() {
+        let text = "[appearance]\nlight_text = 0xFF102030\ndark_text = 0xF0E0D0\n";
+        let s = Settings::from_toml(text).unwrap();
+        assert_eq!(s.appearance.light_text, Some(0x102030));
+        assert_eq!(s.appearance.dark_text, Some(0xF0E0D0));
+        let back = Settings::from_toml(&s.to_toml().unwrap()).unwrap();
+        assert_eq!(back.appearance, s.appearance);
+        assert_eq!(Settings::default().appearance.dark_text, None);
+    }
+
+    #[test]
+    fn easings_start_at_0_and_end_at_1() {
+        for e in MotionEasing::ALL {
+            assert!(e.apply(0.0).abs() < 1e-6, "{e:?}");
+            assert!((e.apply(1.0) - 1.0).abs() < 1e-6, "{e:?}");
+            let mut last = 0.0;
+            for i in 0..=20 {
+                let v = e.apply(i as f32 / 20.0);
+                assert!(v >= last - 1e-6, "{e:?} goes back at {i}");
+                last = v;
+            }
+        }
     }
 
     #[test]

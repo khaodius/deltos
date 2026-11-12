@@ -886,46 +886,56 @@ pub fn open_connection(
     cx: &App,
 ) -> impl std::future::Future<Output = Result<Opened, String>> + use<> {
     let ask = cx.global::<HostKeys>().asker();
-    let job = cx.global::<Net>().run(async move {
-        let tunneled = config.ssh.enabled && kind != DriverKind::Sqlite;
-        if !tunneled {
-            let conn = connect_on_runtime(kind, &config).await?;
-            return Ok(Opened {
-                conn,
-                tunnel: None,
-                config,
-            });
-        }
-        let reason = |e: deltos_data::Error| match e {
-            deltos_data::Error::Connect(m) => m,
-            other => other.to_string(),
-        };
-        let (target_host, target_port) = deltos_drivers::tunnel_target(kind, &config)
-            .map_err(|e| format!("SSH: {}", reason(e)))?;
-        let request = deltos_ssh::TunnelRequest {
-            ssh: config.ssh.clone(),
-            target_host,
-            target_port,
-            host_keys: deltos_ssh::HostKeyFiles::default(),
-        };
-        let tunnel = deltos_ssh::Tunnel::open(request, ask)
-            .await
-            .map_err(|e| e.to_string())?;
-        let through = deltos_drivers::through_tunnel(kind, &config, tunnel.local_port())
-            .map_err(|e| format!("SSH: {}", reason(e)))?;
-        let conn = connect_on_runtime(kind, &through)
-            .await
-            .map_err(|e| format!("Tunnel OK, database: {e}"))?;
-        Ok(Opened {
-            conn,
-            tunnel: Some(Arc::new(tunnel)),
-            config: through,
-        })
-    });
+    let job = cx
+        .global::<Net>()
+        .run(async move { open_on_runtime(kind, config, ask).await });
     async move {
         job.await
             .unwrap_or_else(|| Err("the connection attempt stopped".into()))
     }
+}
+
+/// [`open_connection`] on the runtime itself, for callers already there, such as the
+/// command line. `ask` decides on SSH host keys not seen before.
+pub async fn open_on_runtime(
+    kind: DriverKind,
+    config: ConnectionConfig,
+    ask: deltos_ssh::AskHostKey,
+) -> Result<Opened, String> {
+    let tunneled = config.ssh.enabled && kind != DriverKind::Sqlite;
+    if !tunneled {
+        let conn = connect_on_runtime(kind, &config).await?;
+        return Ok(Opened {
+            conn,
+            tunnel: None,
+            config,
+        });
+    }
+    let reason = |e: deltos_data::Error| match e {
+        deltos_data::Error::Connect(m) => m,
+        other => other.to_string(),
+    };
+    let (target_host, target_port) =
+        deltos_drivers::tunnel_target(kind, &config).map_err(|e| format!("SSH: {}", reason(e)))?;
+    let request = deltos_ssh::TunnelRequest {
+        ssh: config.ssh.clone(),
+        target_host,
+        target_port,
+        host_keys: deltos_ssh::HostKeyFiles::default(),
+    };
+    let tunnel = deltos_ssh::Tunnel::open(request, ask)
+        .await
+        .map_err(|e| e.to_string())?;
+    let through = deltos_drivers::through_tunnel(kind, &config, tunnel.local_port())
+        .map_err(|e| format!("SSH: {}", reason(e)))?;
+    let conn = connect_on_runtime(kind, &through)
+        .await
+        .map_err(|e| format!("Tunnel OK, database: {e}"))?;
+    Ok(Opened {
+        conn,
+        tunnel: Some(Arc::new(tunnel)),
+        config: through,
+    })
 }
 
 /// Opens a driver connection with `config` as it is, with no tunnel.

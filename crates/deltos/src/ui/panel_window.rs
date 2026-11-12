@@ -178,7 +178,7 @@ impl Render for PanelWindow {
                     .min_h_0()
                     .child(crate::ui::dock::settle(
                         div().absolute().inset_0().child(self.dock.clone()),
-                        t.motion.then_some(("intro", 0)),
+                        t.motion_style.settles().then_some(("intro", 0)),
                         &t,
                     )),
             )
