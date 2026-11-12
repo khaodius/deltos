@@ -371,6 +371,11 @@ pub struct Appearance {
     pub dark_palette: Palette,
     /// How much of the accent color washes into the window's surfaces, 0 to 0.3.
     pub accent_tint: f32,
+    /// Text color as 0xRRGGBB in light mode, over the palette's. Secondary and faint text
+    /// follow it. `None` is the palette's own.
+    pub light_text: Option<u32>,
+    /// Text color as 0xRRGGBB in dark mode, as `light_text` is for light mode.
+    pub dark_text: Option<u32>,
     pub title_bar_style: TitleBarStyle,
     pub tab_style: TabStyle,
     pub header_style: HeaderStyle,
@@ -436,6 +441,8 @@ impl Default for Appearance {
             light_palette: Palette::Classic,
             dark_palette: Palette::Obsidian,
             accent_tint: 0.0,
+            light_text: None,
+            dark_text: None,
             title_bar_style: TitleBarStyle::Plain,
             tab_style: TabStyle::Card,
             header_style: HeaderStyle::Bold,
@@ -781,6 +788,8 @@ impl Settings {
             a.dark_palette = d.dark_palette;
         }
         a.zebra_color = a.zebra_color.map(|c| c & 0xFF_FFFF);
+        a.light_text = a.light_text.map(|c| c & 0xFF_FFFF);
+        a.dark_text = a.dark_text.map(|c| c & 0xFF_FFFF);
         a.ui_font_size = finite_or(a.ui_font_size, d.ui_font_size).clamp(11.0, 16.0);
         a.mono_font_size = finite_or(a.mono_font_size, d.mono_font_size).clamp(10.0, 18.0);
         a.corner_radius = finite_or(a.corner_radius, d.corner_radius).clamp(0.0, 10.0);
@@ -1028,6 +1037,17 @@ mod tests {
         let old = Settings::from_toml("[appearance]\nreduced_motion = false\n").unwrap();
         assert_eq!(old.appearance.motion_speed, 1.0);
         assert_eq!(old.appearance.motion_easing, MotionEasing::Linear);
+    }
+
+    #[test]
+    fn keeps_a_text_color_per_mode() {
+        let text = "[appearance]\nlight_text = 0xFF102030\ndark_text = 0xF0E0D0\n";
+        let s = Settings::from_toml(text).unwrap();
+        assert_eq!(s.appearance.light_text, Some(0x102030));
+        assert_eq!(s.appearance.dark_text, Some(0xF0E0D0));
+        let back = Settings::from_toml(&s.to_toml().unwrap()).unwrap();
+        assert_eq!(back.appearance, s.appearance);
+        assert_eq!(Settings::default().appearance.dark_text, None);
     }
 
     #[test]

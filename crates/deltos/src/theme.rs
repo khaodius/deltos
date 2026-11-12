@@ -94,6 +94,8 @@ pub struct Theme {
     pub title_bar_line: Option<Hsla>,
     pub tab_style: TabStyle,
     pub header_style: HeaderStyle,
+    /// Whether the theme is a dark one.
+    pub dark: bool,
     /// How panels animate as they leave and join windows: on or off, speed, smoothness,
     /// squash and the rest of the motion settings.
     pub motion_style: crate::ui::motion::Motion,
@@ -422,8 +424,16 @@ impl Theme {
             }
             _ => tinted(p.title_bar),
         };
-        let (text, mut text_muted, mut text_faint) =
-            (hsla(p.text), hsla(p.text_muted), hsla(p.text_faint));
+        // A text color from the settings replaces the palette's; secondary and faint text
+        // sit between it and the surface as the palette's own do.
+        let custom_text = if dark { a.dark_text } else { a.light_text };
+        let (text, mut text_muted, mut text_faint) = match custom_text {
+            Some(c) => {
+                let text = hsla(c);
+                (text, mix(text, surface, 0.42), mix(text, surface, 0.68))
+            }
+            None => (hsla(p.text), hsla(p.text_muted), hsla(p.text_faint)),
+        };
         if a.high_contrast {
             text_faint = mix(text_faint, text_muted, 0.6);
             text_muted = mix(text_muted, text, 0.45);
@@ -508,6 +518,7 @@ impl Theme {
             title_bar_line: (a.title_bar_style == TitleBarStyle::Line).then_some(accent),
             tab_style: a.tab_style,
             header_style: a.header_style,
+            dark,
             motion_style: crate::ui::motion::Motion::new(a),
         };
         if let Some(custom) = custom {
@@ -629,6 +640,13 @@ pub fn is_dark(appearance: gpui::WindowAppearance) -> bool {
     )
 }
 
+/// A color as 0xRRGGBB, dropping its alpha.
+pub fn to_rgb(c: Hsla) -> u32 {
+    let c = Rgba::from(c);
+    let b = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u32;
+    (b(c.r) << 16) | (b(c.g) << 8) | b(c.b)
+}
+
 /// A tag or accent color as 0xRRGGBB.
 pub fn color(rgb_value: u32) -> Hsla {
     hsla(rgb_value)
@@ -639,9 +657,7 @@ mod tests {
     use super::*;
 
     fn hex(c: Hsla) -> u32 {
-        let c = Rgba::from(c);
-        let b = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u32;
-        (b(c.r) << 16) | (b(c.g) << 8) | b(c.b)
+        to_rgb(c)
     }
 
     fn is_dark(t: &Theme) -> bool {
@@ -668,6 +684,35 @@ mod tests {
         // The default is dark whatever the system says.
         let a = Appearance::default();
         assert!(is_dark(&Theme::new(&a, &Editor::default(), false, None)));
+    }
+
+    #[test]
+    fn text_color_follows_the_mode() {
+        let a = Appearance {
+            light_text: Some(0x203040),
+            dark_text: Some(0xF0D8A0),
+            ..Appearance::default()
+        };
+        let dark = Theme::new(&a, &Editor::default(), false, None);
+        assert!(dark.dark);
+        assert_eq!(hex(dark.text), 0xF0D8A0);
+        // Secondary text fades toward the surface, fainter still for faint text.
+        let lum = |c: Hsla| Rgba::from(c).r + Rgba::from(c).g + Rgba::from(c).b;
+        assert!(lum(dark.text) > lum(dark.text_muted));
+        assert!(lum(dark.text_muted) > lum(dark.text_faint));
+        let light = Theme::new(
+            &Appearance {
+                theme: ThemeMode::Light,
+                ..a.clone()
+            },
+            &Editor::default(),
+            false,
+            None,
+        );
+        assert_eq!(hex(light.text), 0x203040);
+        // Without one, the palette's own color.
+        let plain = Theme::new(&Appearance::default(), &Editor::default(), false, None);
+        assert_eq!(hex(plain.text), 0xe6e6e6);
     }
 
     #[test]

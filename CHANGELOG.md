@@ -4,6 +4,13 @@ Packages for every version are attached to its
 [release](https://github.com/khaodius/deltos/releases), with SHA-256 checksums and a signed
 update manifest.
 
+## 0.1.19 - 2026-11-12
+
+- **Text color.** Settings → Appearance → Text sets the color of text, the way the accent
+  is set: swatches, a hex field, the picker and its eyedropper. Light and dark mode each
+  keep their own, and secondary and faint text follow it. Default goes back to the
+  palette's color.
+
 ## 0.1.18 - 2026-11-12
 
 - **Motion settings.** Settings → Appearance → Motion turns panel animations on or off and
