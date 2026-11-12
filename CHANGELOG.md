@@ -4,6 +4,20 @@ Packages for every version are attached to its
 [release](https://github.com/khaodius/deltos/releases), with SHA-256 checksums and a signed
 update manifest.
 
+## 0.1.8 - 2026-11-11
+
+- **More ways to filter.** The filter bar joins its conditions with All (AND) or Any (OR) and
+  adds not contains, ends with, in list, not in list, between, LIKE pattern, is empty and is
+  not empty, in every database. Values are always sent as parameters.
+- **Write the WHERE yourself.** Switch the bar to SQL (JSON on MongoDB) to type a raw
+  condition; it starts out holding the WHERE of your conditions. A muted line always shows the
+  WHERE that runs, and Copy as SQL copies the whole query.
+- **Filters stay.** Ctrl+F focuses the filter bar, and each table keeps its sort and filters
+  when you close and reopen it during a session.
+- **Pages and counts.** The status bar shows the rows in view and the total, counts exactly on
+  demand in the background, and pages with previous and next, a page size, and a jump to any
+  page or row, without reading the rows in between.
+
 ## 0.1.7 - 2026-11-11
 
 - **Suggestions while you type.** The query editor suggests tables, columns, keywords and

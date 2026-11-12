@@ -65,6 +65,13 @@ runs in one transaction where the database has them. A failed commit keeps every
 staged. If you prefer each edit to be written at once, turn on Commit edits immediately in
 Settings.
 
+## Filtering
+
+Each table has a filter bar: pick a column, an operator and a value, add more conditions and
+join them with All or Any, or switch to SQL and type the WHERE yourself. The WHERE that runs
+is always shown under the bar. The status bar shows where you are in the table and its total,
+counts exactly when you ask, and jumps to any page or row.
+
 ## Connecting
 
 Paste a connection URL such as `mysql://user:pass@db.example.com:3306/shop` anywhere in the
@@ -197,6 +204,7 @@ publisher the first time.
 | Show suggestions            | `Ctrl+Space`       |
 | Explain the statement       | `Ctrl+E`           |
 | Format SQL                  | `Ctrl+Shift+F`     |
+| Filter rows                 | `Ctrl+F`           |
 
 Every binding can be changed in Settings → Keyboard.
 

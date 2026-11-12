@@ -170,6 +170,7 @@ async fn browses_with_and_without_seek() {
             column: "group".into(),
             op: FilterOp::Eq,
             value: Value::text("3"),
+            values: Vec::new(),
         }],
         raw_where: Some("{n: {$lt: 1000}}".into()),
         ..Default::default()
@@ -452,4 +453,85 @@ fn writes_definitions() {
 fn maps_errors() {
     let error = mongo_error(mongodb::error::Error::custom("boom"));
     assert!(matches!(error, Error::Other(_)));
+}
+
+/// Every filter bar operator against a live server.
+#[tokio::test(flavor = "multi_thread")]
+async fn filter_operators_keep_the_right_documents() {
+    let Some(fx) = Fixture::new("operators").await else {
+        return;
+    };
+    let name = &fx.object.name;
+    fx.run(&format!(
+        "db.getCollection('{name}').insertMany([
+           {{k: 1, name: 'Ada', n: 10}}, {{k: 2, name: 'grace', n: 20}},
+           {{k: 3, name: '50% off', n: 30}}, {{k: 4, name: '', n: 40}},
+           {{k: 5, name: null}}, {{k: 6, name: 'Linus_t', n: 50}}, {{k: 7, name: 'adam', n: 60}}])"
+    ))
+    .await;
+    // A first page teaches the driver the fields' types.
+    let _ = fx
+        .conn
+        .browse(
+            &fx.object,
+            &BrowseRequest {
+                limit: 10,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("browse");
+    let ks = async |filters: Vec<Filter>, match_any: bool| -> Vec<i64> {
+        let request = BrowseRequest {
+            limit: 100,
+            filters,
+            match_any,
+            sort: vec![deltos_data::Sort {
+                column: "k".into(),
+                direction: deltos_data::SortDirection::Ascending,
+            }],
+            ..Default::default()
+        };
+        let page = fx.conn.browse(&fx.object, &request).await.expect("browse");
+        let n = fx
+            .conn
+            .count(&fx.object, &request, true)
+            .await
+            .expect("count");
+        assert_eq!(n, page.rows.len() as u64);
+        let k = page.columns.iter().position(|c| c.name == "k").expect("k");
+        page.rows
+            .iter()
+            .map(|r| match r[k] {
+                Value::Int(i) => i,
+                _ => -1,
+            })
+            .collect()
+    };
+    let name = |op, text: &str| vec![Filter::new("name", op, Value::text(text))];
+    assert_eq!(
+        ks(name(FilterOp::NotContains, "ad"), false).await,
+        [2, 3, 4, 5, 6]
+    );
+    assert_eq!(ks(name(FilterOp::EndsWith, "_T"), false).await, [6]);
+    assert_eq!(ks(name(FilterOp::Like, "ad%"), false).await, [7]);
+    assert_eq!(ks(name(FilterOp::IsEmpty, ""), false).await, [4, 5]);
+    let n = |op, values: &[&str]| {
+        vec![Filter::list(
+            "n",
+            op,
+            values.iter().map(|v| Value::text(*v)).collect(),
+        )]
+    };
+    assert_eq!(ks(n(FilterOp::In, &["20", "60"]), false).await, [2, 7]);
+    assert_eq!(
+        ks(n(FilterOp::Between, &["20", "40"]), false).await,
+        [2, 3, 4]
+    );
+    let any = vec![
+        Filter::new("n", FilterOp::Lt, Value::Int(15)),
+        Filter::new("name", FilterOp::StartsWith, Value::text("lin")),
+    ];
+    assert_eq!(ks(any, true).await, [1, 6]);
+    fx.cleanup().await;
 }

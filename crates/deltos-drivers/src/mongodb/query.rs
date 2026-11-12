@@ -26,16 +26,32 @@ use super::convert::{self, Target};
 use super::shell::{self, Find};
 
 /// The filter of a browse request: the filter bar's conditions and the typed filter,
-/// all of which must hold. `kind_of` gives a field's grid kind, so text typed into the
-/// filter bar is compared as the field's type (an ObjectId, a date, a number).
+/// all of which must hold. With `match_any` the filter bar's conditions are one `$or`.
+/// `kind_of` gives a field's grid kind, so text typed into the filter bar is compared as
+/// the field's type (an ObjectId, a date, a number).
 pub(crate) fn filter(
     request: &BrowseRequest,
     kind_of: impl Fn(&str) -> Option<ValueKind>,
 ) -> Result<Vec<Document>> {
-    let mut all = Vec::with_capacity(request.filters.len() + 1);
+    let mut conditions = Vec::with_capacity(request.filters.len());
     for f in &request.filters {
         let target = kind_of(&f.column).map_or(Target::Any, Target::for_kind);
         let value = || convert::to_bson(&f.value, target);
+        let list = || {
+            Bson::Array(
+                f.values
+                    .iter()
+                    .map(|v| convert::to_bson(v, target))
+                    .collect(),
+            )
+        };
+        let empty = || {
+            Bson::Array(vec![
+                Bson::Null,
+                Bson::String(String::new()),
+                Bson::Array(Vec::new()),
+            ])
+        };
         let condition = match f.op {
             FilterOp::Eq => value(),
             FilterOp::NotEq => Bson::Document(doc! { "$ne": value() }),
@@ -43,15 +59,43 @@ pub(crate) fn filter(
             FilterOp::LtEq => Bson::Document(doc! { "$lte": value() }),
             FilterOp::Gt => Bson::Document(doc! { "$gt": value() }),
             FilterOp::GtEq => Bson::Document(doc! { "$gte": value() }),
-            FilterOp::Contains => regex(&f.value, false),
-            FilterOp::StartsWith => regex(&f.value, true),
+            FilterOp::Contains => regex(&escaped(&f.value, "", ""), "i"),
+            FilterOp::StartsWith => regex(&escaped(&f.value, "^", ""), "i"),
+            FilterOp::EndsWith => regex(&escaped(&f.value, "", "$"), "i"),
+            // `$not` over a `$regex` document needs MongoDB 4.0.7 or newer.
+            FilterOp::NotContains => {
+                Bson::Document(doc! { "$not": regex(&escaped(&f.value, "", ""), "i") })
+            }
+            // `s`: `%` runs across line breaks, as it does in SQL.
+            FilterOp::Like => regex(&like_pattern(&f.value.to_string()), "s"),
+            FilterOp::In => Bson::Document(doc! { "$in": list() }),
+            FilterOp::NotIn => Bson::Document(doc! { "$nin": list() }),
+            FilterOp::Between => {
+                let [low, high] = f.values.as_slice() else {
+                    return Err(Error::Query(format!(
+                        "Between on {} needs two values, the low and the high end.",
+                        f.column
+                    )));
+                };
+                Bson::Document(doc! {
+                    "$gte": convert::to_bson(low, target),
+                    "$lte": convert::to_bson(high, target),
+                })
+            }
             FilterOp::IsNull => Bson::Null,
             FilterOp::IsNotNull => Bson::Document(doc! { "$ne": Bson::Null }),
+            FilterOp::IsEmpty => Bson::Document(doc! { "$in": empty() }),
+            FilterOp::IsNotEmpty => Bson::Document(doc! { "$nin": empty() }),
         };
         let mut one = Document::new();
         one.insert(f.column.clone(), condition);
-        all.push(one);
+        conditions.push(one);
     }
+    let mut all = if request.match_any && conditions.len() > 1 {
+        vec![doc! { "$or": conditions }]
+    } else {
+        conditions
+    };
     if let Some(raw) = request.raw_where.as_deref().map(str::trim)
         && !raw.is_empty()
     {
@@ -73,23 +117,58 @@ pub(crate) fn all_of(mut conditions: Vec<Document>) -> Document {
     }
 }
 
-/// A case-insensitive match of the value's text, as the SQL drivers' `ILIKE` does.
-fn regex(value: &Value, anchored: bool) -> Bson {
+/// A `$regex` condition. Text matches ignore case (`i`), as the SQL drivers' `ILIKE` does.
+fn regex(pattern: &str, options: &str) -> Bson {
+    Bson::Document(doc! { "$regex": pattern, "$options": options })
+}
+
+/// The value's text as a regular expression that matches it literally, between `before`
+/// and `after`.
+fn escaped(value: &Value, before: &str, after: &str) -> String {
     let text = match value {
         Value::Null => String::new(),
         other => other.to_string(),
     };
     let mut pattern = String::with_capacity(text.len() + 8);
-    if anchored {
-        pattern.push('^');
-    }
+    pattern.push_str(before);
     for c in text.chars() {
         if c.is_ascii_punctuation() {
             pattern.push('\\');
         }
         pattern.push(c);
     }
-    Bson::Document(doc! { "$regex": pattern, "$options": "i" })
+    pattern.push_str(after);
+    pattern
+}
+
+/// A SQL `LIKE` pattern as an anchored regular expression: `%` is any run of characters,
+/// `_` one character, and a backslash takes the next character literally.
+fn like_pattern(like: &str) -> String {
+    let mut pattern = String::with_capacity(like.len() + 8);
+    pattern.push('^');
+    let mut chars = like.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '%' => pattern.push_str(".*"),
+            '_' => pattern.push('.'),
+            '\\' => {
+                if let Some(next) = chars.next() {
+                    if next.is_ascii_punctuation() {
+                        pattern.push('\\');
+                    }
+                    pattern.push(next);
+                }
+            }
+            c => {
+                if c.is_ascii_punctuation() {
+                    pattern.push('\\');
+                }
+                pattern.push(c);
+            }
+        }
+    }
+    pattern.push('$');
+    pattern
 }
 
 /// The sort document: the requested fields, then `_id`. The flag says whether the order
@@ -275,21 +354,25 @@ mod tests {
                 column: "_id".into(),
                 op: FilterOp::Eq,
                 value: Value::text("65a1b2c3d4e5f60718293a4b"),
+                values: Vec::new(),
             },
             Filter {
                 column: "age".into(),
                 op: FilterOp::GtEq,
                 value: Value::text("30"),
+                values: Vec::new(),
             },
             Filter {
                 column: "name".into(),
                 op: FilterOp::Contains,
                 value: Value::text("a.b"),
+                values: Vec::new(),
             },
             Filter {
                 column: "gone".into(),
                 op: FilterOp::IsNull,
                 value: Value::Null,
+                values: Vec::new(),
             },
         ];
         r.raw_where = Some("{status: 'open'}".into());
@@ -311,6 +394,76 @@ mod tests {
         let joined = all_of(all);
         assert!(joined.contains_key("$and"));
         assert_eq!(all_of(Vec::new()), Document::new());
+    }
+
+    #[test]
+    fn builds_every_operator() {
+        let mut r = request();
+        r.filters = vec![
+            Filter::new("name", FilterOp::NotContains, Value::text("x.")),
+            Filter::new("name", FilterOp::EndsWith, Value::text("son")),
+            Filter::list(
+                "age",
+                FilterOp::In,
+                vec![Value::text("1"), Value::text("2")],
+            ),
+            Filter::list("age", FilterOp::NotIn, vec![Value::Int(3)]),
+            Filter::list(
+                "age",
+                FilterOp::Between,
+                vec![Value::text("10"), Value::text("20")],
+            ),
+            Filter::new("code", FilterOp::Like, Value::text("A_%.\\%")),
+            Filter::new("note", FilterOp::IsEmpty, Value::Null),
+            Filter::new("note", FilterOp::IsNotEmpty, Value::Null),
+        ];
+        let kinds = |name: &str| (name == "age").then_some(ValueKind::Int);
+        let all = filter(&r, kinds).expect("filter");
+        assert_eq!(
+            all[0],
+            doc! { "name": { "$not": { "$regex": "x\\.", "$options": "i" } } }
+        );
+        assert_eq!(
+            all[1],
+            doc! { "name": { "$regex": "son$", "$options": "i" } }
+        );
+        assert_eq!(all[2], doc! { "age": { "$in": [1_i64, 2_i64] } });
+        assert_eq!(all[3], doc! { "age": { "$nin": [3_i64] } });
+        assert_eq!(all[4], doc! { "age": { "$gte": 10_i64, "$lte": 20_i64 } });
+        assert_eq!(
+            all[5],
+            doc! { "code": { "$regex": "^A..*\\.\\%$", "$options": "s" } }
+        );
+        assert_eq!(all[6], doc! { "note": { "$in": [Bson::Null, "", []] } });
+        assert_eq!(all[7], doc! { "note": { "$nin": [Bson::Null, "", []] } });
+
+        r.filters = vec![Filter::list("age", FilterOp::Between, vec![Value::Int(1)])];
+        assert!(filter(&r, kinds).is_err());
+    }
+
+    #[test]
+    fn any_puts_conditions_in_one_or() {
+        let mut r = request();
+        r.match_any = true;
+        r.filters = vec![
+            Filter::new("a", FilterOp::Eq, Value::Int(1)),
+            Filter::new("b", FilterOp::Eq, Value::Int(2)),
+        ];
+        r.raw_where = Some("{c: 3}".into());
+        let all = filter(&r, |_| None).expect("filter");
+        assert_eq!(
+            all,
+            vec![
+                doc! { "$or": [{ "a": 1_i64 }, { "b": 2_i64 }] },
+                doc! { "c": 3 },
+            ]
+        );
+        r.filters.pop();
+        r.raw_where = None;
+        assert_eq!(
+            filter(&r, |_| None).expect("filter"),
+            vec![doc! { "a": 1_i64 }]
+        );
     }
 
     #[test]
