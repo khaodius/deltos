@@ -196,6 +196,26 @@ and imports are off. Other screens:
 
 The demo starts from the default layout and never writes settings.
 
+## The command line
+
+`main` hands the arguments to `cli::run_from_args` before GPUI starts. When the first
+argument is a command (`query`, `export`, `import`, `objects`, `test`, `connections`, `help`,
+`version`) it runs it and exits; anything else, a link or nothing, starts the app. The CLI
+opens no window and reuses the layers under the views:
+
+- `cli/target.rs` resolves a saved connection by id or name, `demo`, or a link
+  (`link.rs`), fills passwords from `DELTOS_PASSWORD` / `DELTOS_SSH_SECRET` or the
+  keychain, and opens it with `state::open_on_runtime`, the same tunnel and connect path
+  the app uses. Saved connections keep their tag and read-only guard (`safety.rs`).
+- `query` splits statements with `ui/transfer/read.rs`'s `ScriptReader`, asks
+  `safety::confirmation` about each and refuses without `--yes`, and streams each result's
+  batches through a `deltos_grid` row writer, or `cli/output.rs`'s `TableWriter`, which
+  fixes its widths from the first 200 rows.
+- `export` is `BrowseLoader` plus `ui/transfer/export.rs`'s `run`; `import` is
+  `ui/transfer/import.rs`'s `run_import` and `run_script`.
+
+Logs go to standard error so they never mix into results.
+
 ## Files and logs
 
 - Settings, saved connections and the layout are in `settings.toml`, under
