@@ -6,7 +6,13 @@
 //! nothing until it is looked at. Browsing in id order (either direction) is random access
 //! at any offset, which is what lets the grid jump straight to row 49,999,000. The small
 //! tables also sort and filter by any column, by materializing a sorted list of row ids
-//! once per request shape; the large ones sort by id only.
+//! once per request shape; the large ones sort by id only, and filter only on columns
+//! that grow with the id (the key and the timestamps that follow it), which narrows
+//! them to a range of ids without reading a row.
+//!
+//! Cells, rows and the inspector stage edits as on a real database, so the review and
+//! its SQL can be tried; committing them is refused and they stay staged. The structure
+//! of tables and imports stay off.
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -15,13 +21,25 @@ use std::sync::Arc;
 use deltos_data::{
     BrowsePage, BrowseRequest, Capabilities, Column, Connection, DriverKind, Error, ExecuteOptions,
     Filter, FilterOp, Index, Namespace, NamespaceKind, ObjectEntry, ObjectInfo, ObjectKind,
-    ObjectRef, Result, Row, RowBatch, RowStream, SortDirection, Value, ValueKind,
+    ObjectRef, Result, Row, RowBatch, RowEdit, RowStream, SortDirection, Value, ValueKind,
 };
 use futures::future::BoxFuture;
 use parking_lot::Mutex;
 
 /// Tables up to this many rows sort and filter by any column.
 const SORTABLE_LIMIT: u64 = 20_000;
+
+const SERVER_VERSION: &str = "PostgreSQL 16.4 (demo)";
+
+/// What a commit on the demo answers.
+pub const NO_COMMIT: &str =
+    "The demo database doesn't save changes. Connect to a real database to commit.";
+
+/// Whether `conn` is the demo, whose rows stage edits but whose tables can't change
+/// shape or take imports.
+pub fn is_demo(conn: &dyn Connection) -> bool {
+    conn.server_version() == SERVER_VERSION
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Table {
@@ -682,15 +700,21 @@ fn like(text: &str, pattern: &str) -> bool {
 struct Shape {
     table: Table,
     sort: Vec<(usize, bool)>,
-    /// Column, operator and values, as text.
-    filters: Vec<(usize, FilterOp, String, Vec<String>)>,
+    filters: Vec<FilterParts>,
     match_any: bool,
 }
 
+/// Column, operator and values, as text.
+type FilterParts = (usize, FilterOp, String, Vec<String>);
+
 /// How a request maps positions to row ids.
 enum Order {
-    /// Ids 1..=n, possibly reversed: positions map to ids directly.
-    Key { descending: bool, rows: u64 },
+    /// Ids `first..first + rows`, possibly reversed: positions map to ids directly.
+    Key {
+        descending: bool,
+        first: u64,
+        rows: u64,
+    },
     /// A materialized list of ids, for the small tables.
     List(Arc<Vec<u64>>),
 }
@@ -740,17 +764,25 @@ impl DemoConnection {
                 f.values.iter().map(Value::to_string).collect(),
             ));
         }
-        let by_key = filters.is_empty()
-            && (sort.is_empty() || (sort.len() == 1 && Some(sort[0].0) == table.key_column()));
-        if by_key {
+        let key_order =
+            sort.is_empty() || (sort.len() == 1 && Some(sort[0].0) == table.key_column());
+        let range = if filters.is_empty() {
+            Some((1, table.rows()))
+        } else if table.rows() > SORTABLE_LIMIT {
+            id_range(table, &filters, request.match_any)
+        } else {
+            None
+        };
+        if let Some((first, last)) = range.filter(|_| key_order) {
             return Ok(Order::Key {
                 descending: sort.first().is_some_and(|s| s.1),
-                rows: table.rows(),
+                first,
+                rows: (last + 1).saturating_sub(first),
             });
         }
         if table.rows() > SORTABLE_LIMIT {
             return Err(Error::Unsupported(
-                "sorting or filtering a large demo table by anything but its key",
+                "on a large demo table, sorting by anything but the key or filtering by anything but the key and time columns",
             ));
         }
         let shape = Shape {
@@ -808,6 +840,116 @@ impl DemoConnection {
     }
 }
 
+/// How a column grows with the row id: `base + id * step`, read as a number (the key)
+/// or as a time in seconds (a timestamp that follows the key).
+#[derive(Clone, Copy)]
+struct Steady {
+    base: i64,
+    step: i64,
+    time: bool,
+}
+
+impl Table {
+    fn steady(self, c: usize) -> Option<Steady> {
+        let time = |base, step| {
+            Some(Steady {
+                base,
+                step,
+                time: true,
+            })
+        };
+        match (self, c) {
+            _ if Some(c) == self.key_column() => Some(Steady {
+                base: 0,
+                step: 1,
+                time: false,
+            }),
+            (Table::Users, 7) => time(EPOCH_2015, 21_600),
+            (Table::Orders, 6) => time(EPOCH_2015, 7),
+            (Table::Orders2019, 6) => time(1_546_300_800, 38),
+            (Table::Sessions, 3) => time(EPOCH_2015, 157),
+            _ => None,
+        }
+    }
+}
+
+/// The ids, first and last, that filters on steady columns leave, or `None` when a filter
+/// is on another column or can't be read that way. An empty range has `last < first`.
+fn id_range(table: Table, filters: &[FilterParts], match_any: bool) -> Option<(u64, u64)> {
+    if match_any && filters.len() > 1 {
+        return None;
+    }
+    // Bounds on the column's own scale, both included.
+    let (mut low, mut high) = (1_i64, table.rows() as i64);
+    for (c, op, value, values) in filters {
+        let steady = table.steady(*c)?;
+        let read = |text: &str| {
+            if steady.time {
+                parse_datetime(text)
+            } else {
+                text.trim().parse::<i64>().ok()
+            }
+        };
+        // `base + id * step` against a bound, as the first and last id that pass.
+        let at_least = |v: i64| (v - steady.base + steady.step - 1).div_euclid(steady.step);
+        let at_most = |v: i64| (v - steady.base).div_euclid(steady.step);
+        let (from, to) = match op {
+            FilterOp::Eq => {
+                let v = read(value)?;
+                (at_least(v), at_most(v))
+            }
+            FilterOp::Gt => (at_most(read(value)?) + 1, i64::MAX),
+            FilterOp::GtEq => (at_least(read(value)?), i64::MAX),
+            FilterOp::Lt => (i64::MIN, at_least(read(value)?) - 1),
+            FilterOp::LtEq => (i64::MIN, at_most(read(value)?)),
+            FilterOp::Between => match values.as_slice() {
+                [a, b] => (at_least(read(a)?), at_most(read(b)?)),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        low = low.max(from);
+        high = high.min(to);
+    }
+    if high < low {
+        return Some((1, 0));
+    }
+    Some((u64::try_from(low).ok()?, u64::try_from(high).ok()?))
+}
+
+/// `YYYY-MM-DD`, with an optional `HH:MM` or `HH:MM:SS` after a space or `T`, as seconds
+/// since 1970.
+fn parse_datetime(text: &str) -> Option<i64> {
+    let text = text.trim();
+    let (day, time) = match text.split_once([' ', 'T']) {
+        Some((d, t)) => (d, Some(t.trim())),
+        None => (text, None),
+    };
+    let mut ymd = day.splitn(3, '-').map(|p| p.parse::<i64>().ok());
+    let (y, m, d) = (ymd.next()??, ymd.next()??, ymd.next()??);
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) || !(1..=9999).contains(&y) {
+        return None;
+    }
+    let mut secs = 0;
+    if let Some(time) = time {
+        let mut hms = time.splitn(3, ':').map(|p| p.parse::<i64>().ok());
+        let (h, mi) = (hms.next()??, hms.next()??);
+        let s = hms.next().unwrap_or(Some(0))?;
+        if !(0..24).contains(&h) || !(0..60).contains(&mi) || !(0..60).contains(&s) {
+            return None;
+        }
+        secs = h * 3600 + mi * 60 + s;
+    }
+    // Howard Hinnant's days_from_civil, the inverse of `civil`.
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some((era * 146_097 + doe - 719_468) * 86_400 + secs)
+}
+
 impl Order {
     fn len(&self) -> u64 {
         match self {
@@ -818,11 +960,15 @@ impl Order {
 
     fn id_at(&self, position: u64) -> Option<u64> {
         match self {
-            Order::Key { descending, rows } => (position < *rows).then(|| {
+            Order::Key {
+                descending,
+                first,
+                rows,
+            } => (position < *rows).then(|| {
                 if *descending {
-                    rows - position
+                    first + (rows - 1 - position)
                 } else {
-                    position + 1
+                    first + position
                 }
             }),
             Order::List(l) => l.get(position as usize).copied(),
@@ -839,14 +985,14 @@ impl Connection for DemoConnection {
         Capabilities {
             schemas: true,
             transactions: false,
-            edit_rows: false,
+            edit_rows: true,
             cancel: false,
             language: "sql",
         }
     }
 
     fn server_version(&self) -> String {
-        "PostgreSQL 16.4 (demo)".into()
+        SERVER_VERSION.into()
     }
 
     fn namespaces(&self) -> BoxFuture<'_, Result<Vec<Namespace>>> {
@@ -1098,6 +1244,16 @@ impl Connection for DemoConnection {
             })
         })
     }
+
+    /// Edits stage as anywhere else, but the demo keeps nothing, so the commit says so
+    /// and the changes stay staged.
+    fn apply_edits<'a>(
+        &'a self,
+        _object: &'a ObjectRef,
+        _edits: &'a [RowEdit],
+    ) -> BoxFuture<'a, Result<u64>> {
+        Box::pin(async { Err(Error::Other(NO_COMMIT.into())) })
+    }
 }
 
 /// `EXPLAIN [(options)] <select>`: a plan in PostgreSQL's JSON form for what the demo
@@ -1307,6 +1463,80 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(desc.rows[0][0], Value::Int(50_000_000));
+    }
+
+    #[test]
+    fn large_tables_filter_on_the_key_and_the_times_that_follow_it() {
+        let demo = DemoConnection::new();
+        let orders = object("public", "orders");
+        let browse = |filters: Vec<Filter>, descending: bool| {
+            let request = BrowseRequest {
+                limit: 3,
+                filters,
+                sort: if descending {
+                    vec![deltos_data::Sort {
+                        column: "id".into(),
+                        direction: SortDirection::Descending,
+                    }]
+                } else {
+                    Vec::new()
+                },
+                ..Default::default()
+            };
+            let page = futures::executor::block_on(demo.browse(&orders, &request)).unwrap();
+            let n = futures::executor::block_on(demo.count(&orders, &request, true)).unwrap();
+            (page, n)
+        };
+        let ids = |page: &BrowsePage| page.rows.iter().map(|r| r[0].clone()).collect::<Vec<_>>();
+        let (page, n) = browse(
+            vec![Filter::new("id", FilterOp::Gt, Value::text("49999998"))],
+            false,
+        );
+        assert_eq!(n, 2);
+        assert_eq!(ids(&page), [Value::Int(49_999_999), Value::Int(50_000_000)]);
+        let range = Filter::list(
+            "id",
+            FilterOp::Between,
+            vec![Value::Int(10), Value::Int(19)],
+        );
+        let (page, n) = browse(vec![range], true);
+        assert_eq!(n, 10);
+        assert_eq!(ids(&page)[0], Value::Int(19));
+        // created_at is 2015-01-01 plus seven seconds an id.
+        let since = Filter::new("created_at", FilterOp::GtEq, Value::text("2025-01-01"));
+        let (page, n) = browse(vec![since.clone()], false);
+        let first = parse_datetime("2025-01-01").unwrap();
+        assert_eq!(page.rows[0][6], Value::text("2025-01-01 00:00:06"));
+        assert_eq!(n, 50_000_000 - ((first - EPOCH_2015 + 6) / 7) as u64 + 1);
+        let before = Filter::new(
+            "created_at",
+            FilterOp::Lt,
+            Value::text("2015-01-01 00:00:21"),
+        );
+        assert_eq!(browse(vec![before], false).1, 2);
+        let none = Filter::new("id", FilterOp::Lt, Value::Int(1));
+        assert_eq!(browse(vec![none, since], false).1, 0);
+        // Other columns of a large table still can't filter.
+        let status = Filter::new("status", FilterOp::Eq, Value::text("paid"));
+        let request = BrowseRequest {
+            filters: vec![status],
+            ..Default::default()
+        };
+        assert!(futures::executor::block_on(demo.count(&orders, &request, true)).is_err());
+        assert_eq!(parse_datetime("2015-01-01 00:00:00"), Some(EPOCH_2015));
+        assert_eq!(parse_datetime("2024-02-29T12:30"), Some(1_709_209_800));
+        assert_eq!(parse_datetime("2024-13-01"), None);
+        assert_eq!(parse_datetime("soon"), None);
+    }
+
+    #[test]
+    fn stages_edits_but_refuses_to_commit_them() {
+        let demo = DemoConnection::new();
+        assert!(demo.capabilities().edit_rows);
+        assert!(is_demo(&demo));
+        let orders = object("public", "orders");
+        let err = futures::executor::block_on(demo.apply_edits(&orders, &[])).unwrap_err();
+        assert_eq!(err.to_string(), NO_COMMIT);
     }
 
     #[test]

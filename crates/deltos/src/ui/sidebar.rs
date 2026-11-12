@@ -549,7 +549,7 @@ fn structure_items(
     object: &ObjectRef,
 ) -> Vec<MenuItem> {
     let mut items = Vec::new();
-    let changes = conn.capabilities().edit_rows;
+    let changes = conn.capabilities().edit_rows && !crate::demo::is_demo(conn.as_ref());
     if edit::speaks_sql(kind) {
         let (state, sid, path) = (
             state.clone(),

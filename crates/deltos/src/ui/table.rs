@@ -2021,7 +2021,9 @@ impl TablePanel {
                 Status::Error(_) => div().text_color(t.danger).child("Error").into_any_element(),
                 _ => div().into_any_element(),
             })
-            .when(memory > 0, |el| {
+            // Staged changes take the room the memory readout would; a narrow panel
+            // has no space for both beside the pager.
+            .when(memory > 0 && pending == 0, |el| {
                 el.child(
                     div()
                         .flex_none()

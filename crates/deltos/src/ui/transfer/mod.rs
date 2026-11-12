@@ -723,6 +723,7 @@ pub fn table_items(
     let browsable = object.kind.has_rows();
     let read_only = safety.read_only();
     let editable = connection.capabilities().edit_rows
+        && !crate::demo::is_demo(connection.as_ref())
         && matches!(
             object.kind,
             deltos_data::ObjectKind::Table | deltos_data::ObjectKind::Collection

@@ -6,7 +6,7 @@ A native database client for PostgreSQL, MySQL, MariaDB, SQLite and MongoDB, on 
 [![Release](https://img.shields.io/github/v/release/khaodius/deltos?display_name=tag&sort=semver)](https://github.com/khaodius/deltos/releases/latest)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-![Deltos showing a 50 million row table, the object sidebar and the row inspector](docs/images/screenshot.png)
+![Deltos in dark mode with the Obsidian palette: the 50 million row orders table filtered to this year, two edited cells and a deleted row staged for review in the status bar, and the inspector showing an edited field beside its old value](docs/images/screenshot.png)
 
 Deltos is written in Rust and drawn on the GPU with [GPUI](https://www.gpui.rs). It ships as
 one small binary, starts in well under a second, and keeps its memory flat however big the
@@ -32,7 +32,7 @@ the same everywhere.
 
 ## Panels
 
-![Dragging a panel out of the main window and docking it back](docs/images/panels.gif)
+![Opening a table from the command palette, typing into cells, editing a field in the inspector, reviewing the SQL a commit would run, then popping the inspector out into its own window and docking it back](docs/images/panels.gif)
 
 Every part of the window is a panel: connections, the object sidebar, tables, queries,
 results, the inspector, history and settings. Drag a tab to split a pane or join another
@@ -131,8 +131,8 @@ write asks.
 
 ## Appearance
 
-Ten palettes, four light and six dark, chosen separately so following the system switches
-between your two. Any accent color, with an optional tint across the window. Title bar,
+Deltos starts in dark mode with the Obsidian palette. Ten palettes, four light and six dark,
+chosen separately, so picking System to follow the OS switches between your two. Any accent color, with an optional tint across the window. Title bar,
 tab and column header styles. Density, corner radius, separators and zoom. A live preview
 shows each change as you make it. The interface uses Adwaita Sans and code uses Go Mono, both
 bundled; the grid uses Malgun Gothic where it is installed. You can also pick any font
@@ -261,7 +261,8 @@ cargo run --release
 ```
 
 `DELTOS_DEMO=1 cargo run` opens a built-in demo database with a 50 million row table, so you
-can try Deltos without a server.
+can try Deltos without a server. Edits to its rows stage and show their SQL as on a real
+database; committing them is refused, since the demo keeps nothing.
 
 ## Contributing
 

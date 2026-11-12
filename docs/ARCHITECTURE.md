@@ -182,7 +182,11 @@ constraints, WITHOUT ROWID and the like) are refused with a note.
 
 `DELTOS_DEMO=1` opens a built-in connection (`demo.rs`). Its values are computed from a hash
 of row and column, so nothing is stored. It has a 50,000,000 row `orders` table, a 300 column
-`events_wide` table, JSON documents, and views. Other screens:
+`events_wide` table, JSON documents, and views. Tables over 20,000 rows sort only by their
+key and filter only on columns that grow with it (the key and the timestamps that follow
+it), which narrows them to a range of ids. Row edits stage, review and show their SQL, but
+`apply_edits` refuses the commit and the changes stay staged; changing a table's structure
+and imports are off. Other screens:
 
 - `DELTOS_DEMO=settings`: Settings.
 - `DELTOS_DEMO=connections`: the connection form.

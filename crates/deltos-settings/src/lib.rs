@@ -52,7 +52,8 @@ pub struct Settings {
 }
 
 /// 2: Obsidian replaced Graphite as the default dark palette.
-const REVISION: u32 = 2;
+/// 3: dark mode became the default.
+const REVISION: u32 = 3;
 
 impl Default for Settings {
     fn default() -> Self {
@@ -75,9 +76,9 @@ impl Default for Settings {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ThemeMode {
-    #[default]
     System,
     Light,
+    #[default]
     Dark,
 }
 
@@ -374,7 +375,7 @@ pub struct Appearance {
 impl Default for Appearance {
     fn default() -> Self {
         Self {
-            theme: ThemeMode::System,
+            theme: ThemeMode::Dark,
             custom_theme: None,
             accent: 0x2F7CF6,
             light_palette: Palette::Classic,
@@ -769,6 +770,11 @@ impl Settings {
         if s.revision < 2 && s.appearance.dark_palette == Palette::Graphite {
             s.appearance.dark_palette = Palette::Obsidian;
         }
+        // Files from before dark became the default still say System, the old default;
+        // System picked again after that stays.
+        if s.revision < 3 && s.appearance.theme == ThemeMode::System {
+            s.appearance.theme = ThemeMode::Dark;
+        }
         s.revision = s.revision.max(REVISION);
         s.sanitize();
         Ok(s)
@@ -939,6 +945,41 @@ mod tests {
         assert_eq!(
             Settings::from_toml(plum).unwrap().appearance.dark_palette,
             Palette::Plum
+        );
+    }
+
+    #[test]
+    fn defaults_to_dark_with_obsidian() {
+        let s = Settings::default();
+        assert_eq!(s.appearance.theme, ThemeMode::Dark);
+        assert_eq!(s.appearance.dark_palette, Palette::Obsidian);
+        assert_eq!(s.revision, REVISION);
+        let back = Settings::from_toml(&s.to_toml().unwrap()).unwrap();
+        assert_eq!(back.appearance.theme, ThemeMode::Dark);
+    }
+
+    #[test]
+    fn moves_old_files_that_followed_the_system_to_dark() {
+        let old = "revision = 2\n[appearance]\ntheme = \"system\"\n";
+        let s = Settings::from_toml(old).unwrap();
+        assert_eq!(s.appearance.theme, ThemeMode::Dark);
+        assert_eq!(s.revision, REVISION);
+        // Graphite from before revision 2 still moves to Obsidian along the way.
+        let older = "revision = 1\n[appearance]\ntheme = \"system\"\ndark_palette = \"graphite\"\n";
+        let s = Settings::from_toml(older).unwrap();
+        assert_eq!(s.appearance.theme, ThemeMode::Dark);
+        assert_eq!(s.appearance.dark_palette, Palette::Obsidian);
+        // System picked again after the upgrade stays.
+        let picked = "revision = 3\n[appearance]\ntheme = \"system\"\n";
+        let s = Settings::from_toml(picked).unwrap();
+        assert_eq!(s.appearance.theme, ThemeMode::System);
+        let again = Settings::from_toml(&s.to_toml().unwrap()).unwrap();
+        assert_eq!(again.appearance.theme, ThemeMode::System);
+        // Light stays light.
+        let light = "revision = 2\n[appearance]\ntheme = \"light\"\n";
+        assert_eq!(
+            Settings::from_toml(light).unwrap().appearance.theme,
+            ThemeMode::Light
         );
     }
 
