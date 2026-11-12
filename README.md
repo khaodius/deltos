@@ -81,9 +81,29 @@ counts exactly when you ask, and jumps to any page or row.
 
 ## Import and export
 
-Export a table, a filtered view or a query result to CSV, JSON, SQL or Markdown. The rows
+Export a table, a filtered view or a query result to CSV, JSON, SQL or Markdown, from the
+app or the [command line](#command-line). The rows
 stream to disk, so the size of the table does not matter. Import CSV or JSON into a table,
 matching columns by name, or run a `.sql` file.
+
+## Command line
+
+The same binary works without a window. `deltos query`, `export`, `import`, `objects`,
+`test` and `connections` use your saved connections (by name), their keychain passwords and
+SSH tunnels, or any connection link, and keep read-only connections read-only. Results
+stream, so they work on tables of any size.
+
+```sh
+deltos query prod -e "SELECT id, email FROM users LIMIT 20"
+deltos query app.db -f report.sql --format json -o report.json
+deltos export prod public.orders --where "created_at > '2026-01-01'" -o orders.csv
+deltos import staging users.csv --into users --yes
+echo "SELECT count(*) FROM orders" | deltos query prod --format csv
+```
+
+Statements the app would ask about, such as `DELETE` without `WHERE` or any write on a
+Production connection, need `--yes`. `deltos help` lists every option, and
+`DELTOS_PASSWORD` supplies a password where there is no keychain.
 
 ## Structure
 

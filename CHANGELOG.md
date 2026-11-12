@@ -4,6 +4,16 @@ Packages for every version are attached to its
 [release](https://github.com/khaodius/deltos/releases), with SHA-256 checksums and a signed
 update manifest.
 
+## 0.1.20 - 2026-11-12
+
+- **Command line.** `deltos query`, `export`, `import`, `objects`, `test` and `connections`
+  work with databases without opening a window, using saved connections by name with their
+  keychain passwords and SSH tunnels, or any connection link. Queries print an aligned
+  table on a terminal and TSV, CSV, JSON, JSON Lines or Markdown elsewhere; exports write
+  any table of any size to a file or standard output, with an optional `--where`; imports
+  load CSV, TSV, JSON or SQL files. Read-only connections stay read-only, and statements
+  the app would ask about need `--yes`. `deltos help` lists every option.
+
 ## 0.1.19 - 2026-11-12
 
 - **Text color.** Settings → Appearance → Text sets the color of text, the way the accent
