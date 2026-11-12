@@ -64,11 +64,8 @@ impl PanelWindow {
                     cx.notify();
                 }
             }),
-            cx.observe_window_appearance(window, move |_: &mut Self, _, cx| {
-                appearance_state.update(cx, |s, cx| {
-                    s.rebuild_theme(cx);
-                    cx.refresh_windows();
-                });
+            cx.observe_window_appearance(window, move |_: &mut Self, window, cx| {
+                follow_appearance(&appearance_state, window.appearance(), cx);
             }),
         ];
         Self {
@@ -188,4 +185,22 @@ impl Render for PanelWindow {
             .when(own_bar, |el| el.child(title_bar::resize_grips(window)))
             .child(crate::ui::transfer::overlay(cx))
     }
+}
+
+/// Takes the system appearance a window reported. gpui on Wayland calls the appearance
+/// observers while it holds its own state, and any call back into the platform from there
+/// panics ("RefCell already borrowed"), so the theme is rebuilt on the next turn of the
+/// event loop, from the appearance the window passed in.
+pub fn follow_appearance<T: 'static>(
+    state: &Entity<AppState>,
+    appearance: gpui::WindowAppearance,
+    cx: &mut Context<T>,
+) {
+    let state = state.clone();
+    cx.spawn(async move |_, cx| {
+        state
+            .update(cx, |s, cx| s.set_system_appearance(appearance, cx))
+            .ok();
+    })
+    .detach();
 }

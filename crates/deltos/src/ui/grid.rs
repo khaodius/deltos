@@ -1723,8 +1723,15 @@ impl Render for GridView {
         let paint_t = t.clone();
         let visible_paint = visible.clone();
         let body = canvas(
-            move |bounds, _, _| {
-                body_bounds.set(Some(bounds));
+            move |bounds, window, _| {
+                // The rows and columns above were picked for the last frame's size. On
+                // the first frame, or when the panel grew, as when a neighbour closes,
+                // draw again at the new size instead of leaving the new space blank until
+                // something else redraws.
+                let old = body_bounds.replace(Some(bounds));
+                if old.map(|old| old.size) != Some(bounds.size) {
+                    window.request_animation_frame();
+                }
             },
             move |bounds, _, window, cx| {
                 let t = paint_t;

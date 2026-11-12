@@ -615,9 +615,15 @@ pub fn theme(cx: &App) -> &Theme {
 }
 
 /// Whether the system is in dark mode right now.
+/// Asks the platform, so call it only outside platform callbacks; observers use the
+/// appearance their window reports instead.
 pub fn system_is_dark(cx: &App) -> bool {
+    is_dark(cx.window_appearance())
+}
+
+pub fn is_dark(appearance: gpui::WindowAppearance) -> bool {
     matches!(
-        cx.window_appearance(),
+        appearance,
         gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark
     )
 }
@@ -639,6 +645,15 @@ mod tests {
 
     fn is_dark(t: &Theme) -> bool {
         Rgba::from(t.base).r < 0.5
+    }
+
+    #[test]
+    fn reads_dark_appearances() {
+        use gpui::WindowAppearance as W;
+        assert!(super::is_dark(W::Dark));
+        assert!(super::is_dark(W::VibrantDark));
+        assert!(!super::is_dark(W::Light));
+        assert!(!super::is_dark(W::VibrantLight));
     }
 
     #[test]

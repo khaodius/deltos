@@ -14,7 +14,7 @@ use deltos_settings::{ConnectionTag, PanelKind, Paths, SavedConnection, Settings
 use gpui::{App, AppContext, Context, Entity, EntityId, EventEmitter, SharedString, Task};
 
 use crate::net::Net;
-use crate::theme::{Theme, system_is_dark};
+use crate::theme::{Theme, is_dark, system_is_dark};
 
 /// The id of the built-in demo connection.
 pub const DEMO_ID: &str = "demo";
@@ -154,6 +154,10 @@ pub struct AppState {
     /// keep it in the keychain once it works.
     password_answers: HashMap<String, bool>,
     save_task: Option<Task<()>>,
+    /// Whether the system is in dark mode, as last reported. Kept here so building the
+    /// theme never asks the platform: on Wayland, gpui calls the appearance observers
+    /// while it holds its own state, and asking it again from there panics.
+    system_dark: bool,
 }
 
 impl EventEmitter<StateEvent> for AppState {}
@@ -214,9 +218,20 @@ impl AppState {
             .as_ref()
             .and_then(|name| self.themes.iter().find(|(n, _)| n == name))
             .map(|(_, t)| t);
-        let mut theme = Theme::new(a, &self.settings.editor, system_is_dark(cx), custom);
+        let mut theme = Theme::new(a, &self.settings.editor, self.system_dark, custom);
         theme.settle_fonts(a.grid_font.is_some(), cx);
         cx.set_global(theme);
+    }
+
+    /// Takes a new system appearance, read from the window that reported it, and
+    /// rebuilds the theme if it changed.
+    pub fn set_system_appearance(&mut self, appearance: gpui::WindowAppearance, cx: &mut App) {
+        let dark = is_dark(appearance);
+        if dark != self.system_dark {
+            self.system_dark = dark;
+            self.rebuild_theme(cx);
+            cx.refresh_windows();
+        }
     }
 
     pub fn rescan_themes(&mut self, cx: &mut Context<Self>) {
@@ -1095,6 +1110,7 @@ pub fn init(
             password_serial: 0,
             password_answers: HashMap::new(),
             save_task: None,
+            system_dark: system_is_dark(cx),
         };
         state.rebuild_theme(cx);
         if demo {

@@ -286,11 +286,8 @@ impl Root {
                     w.save_layout(cx);
                 });
             }),
-            cx.observe_window_appearance(window, |this: &mut Self, _, cx| {
-                this.state.update(cx, |s, cx| {
-                    s.rebuild_theme(cx);
-                    cx.refresh_windows();
-                });
+            cx.observe_window_appearance(window, |this: &mut Self, window, cx| {
+                ui::panel_window::follow_appearance(&this.state, window.appearance(), cx);
             }),
         ];
         let bounds = window.bounds();
