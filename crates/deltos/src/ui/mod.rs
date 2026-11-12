@@ -21,6 +21,7 @@ pub mod save_query;
 pub mod screen_color;
 pub mod settings;
 pub mod sidebar;
+pub mod structure;
 pub mod table;
 pub mod text_input;
 pub mod title_bar;

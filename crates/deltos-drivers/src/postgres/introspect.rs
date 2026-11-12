@@ -3,8 +3,8 @@
 use std::fmt::Write;
 
 use deltos_data::{
-    Column, Error, ForeignKey, Index, Namespace, NamespaceKind, ObjectEntry, ObjectInfo,
-    ObjectKind, ObjectRef, Result, Value, ValueKind,
+    Column, Error, ForeignKey, ForeignKeyAction, Index, Namespace, NamespaceKind, ObjectEntry,
+    ObjectInfo, ObjectKind, ObjectRef, Result, Value, ValueKind,
 };
 
 use super::decode::Decoder;
@@ -338,14 +338,15 @@ pub(super) async fn describe(
     let mut indexes = Vec::new();
     let mut index_statements = Vec::new();
     for row in index_rows {
+        let backs_constraint: bool = row.try_get(6).map_err(pg_error)?;
         indexes.push(Index {
             name: row.try_get(0).map_err(pg_error)?,
             unique: row.try_get(1).map_err(pg_error)?,
             primary: row.try_get(2).map_err(pg_error)?,
             method: row.try_get(3).map_err(pg_error)?,
             columns: row.try_get(4).map_err(pg_error)?,
+            constraint: backs_constraint,
         });
-        let backs_constraint: bool = row.try_get(6).map_err(pg_error)?;
         if !backs_constraint {
             index_statements.push(row.try_get::<_, String>(5).map_err(pg_error)?);
         }
@@ -358,7 +359,8 @@ pub(super) async fn describe(
                           JOIN pg_catalog.pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.n ORDER BY k.i), \
                     tn.nspname::text, tc.relname::text, \
                     ARRAY(SELECT a.attname::text FROM unnest(con.confkey) WITH ORDINALITY AS k(n, i) \
-                          JOIN pg_catalog.pg_attribute a ON a.attrelid = con.confrelid AND a.attnum = k.n ORDER BY k.i) \
+                          JOIN pg_catalog.pg_attribute a ON a.attrelid = con.confrelid AND a.attnum = k.n ORDER BY k.i), \
+                    con.confdeltype::text, con.confupdtype::text \
              FROM pg_catalog.pg_constraint con \
              JOIN pg_catalog.pg_class c ON c.oid = con.conrelid \
              JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
@@ -380,6 +382,8 @@ pub(super) async fn describe(
                 kind: ObjectKind::Table,
             },
             target_columns: row.try_get(4).map_err(pg_error)?,
+            on_delete: fk_action(&row.try_get::<_, String>(5).map_err(pg_error)?),
+            on_update: fk_action(&row.try_get::<_, String>(6).map_err(pg_error)?),
         });
     }
 
@@ -422,6 +426,17 @@ pub(super) async fn describe(
         comment: info.comment.clone(),
         definition,
     })
+}
+
+/// A foreign key action from its `pg_constraint` code.
+fn fk_action(code: &str) -> ForeignKeyAction {
+    match code {
+        "r" => ForeignKeyAction::Restrict,
+        "c" => ForeignKeyAction::Cascade,
+        "n" => ForeignKeyAction::SetNull,
+        "d" => ForeignKeyAction::SetDefault,
+        _ => ForeignKeyAction::NoAction,
+    }
 }
 
 /// `CREATE TABLE` with columns, constraints, indexes and comments. It covers what the

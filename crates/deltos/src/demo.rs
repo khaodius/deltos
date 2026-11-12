@@ -870,6 +870,7 @@ impl Connection for DemoConnection {
                     unique: true,
                     primary: true,
                     method: Some("btree".into()),
+                    constraint: true,
                 });
             }
             if matches!(table, Table::Orders | Table::Orders2019) {
@@ -879,6 +880,7 @@ impl Connection for DemoConnection {
                     unique: false,
                     primary: false,
                     method: Some("btree".into()),
+                    constraint: false,
                 });
             }
             let mut foreign_keys = Vec::new();
@@ -892,6 +894,8 @@ impl Connection for DemoConnection {
                         kind: ObjectKind::Table,
                     },
                     target_columns: vec!["id".into()],
+                    on_delete: deltos_data::ForeignKeyAction::Cascade,
+                    on_update: deltos_data::ForeignKeyAction::NoAction,
                 });
             }
             let definition = Some(format!(

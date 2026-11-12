@@ -4,6 +4,24 @@ Packages for every version are attached to its
 [release](https://github.com/khaodius/deltos/releases), with SHA-256 checksums and a signed
 update manifest.
 
+## 0.1.11 - 2026-11-11
+
+- **Edit table structure.** The Structure tab adds, renames, retypes and drops columns,
+  changes nullability, defaults and comments, and adds or drops indexes and foreign keys with
+  their ON DELETE and ON UPDATE actions. Changes are staged, Review SQL shows the exact
+  statements, and PostgreSQL and SQLite apply them in one transaction. SQLite rebuilds a table
+  when it cannot change a column in place, keeping its rows, indexes and triggers, or says why
+  it won't. MongoDB collections get index changes.
+- **Create, empty and drop tables.** New table in the sidebar builds a table with columns, a
+  primary key, indexes and foreign keys, with the same review. Empty table and Drop table ask
+  you to type the name first.
+- **Empty tables show their columns.** A table with no rows now shows its header and "No
+  rows" instead of loading forever.
+- **Structure changes stay safe.** On a read-only connection the structure can't be changed and
+  New, Empty and Drop table are off. On staging and production the review names the
+  connection in its color. Structure changes wait until the table's staged row edits are
+  committed or discarded.
+
 ## 0.1.10 - 2026-11-11
 
 - **Export to files.** Export a table, its filtered view or a query result to CSV, JSON

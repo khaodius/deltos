@@ -8,7 +8,7 @@ Wayland) and Windows. This page describes how the pieces fit together, and why.
 | Crate | What it holds |
 | --- | --- |
 | `deltos-data` | The contract between the UI and the drivers: `Driver`, `Connection`, `Value`, `Column`, browse and execute requests. |
-| `deltos-drivers` | PostgreSQL, MySQL/MariaDB, SQLite and MongoDB behind that contract. `available()` lists the ones a build includes. |
+| `deltos-drivers` | PostgreSQL, MySQL/MariaDB, SQLite and MongoDB behind that contract. `available()` lists the ones a build includes. `ddl` turns structure edits into each dialect's statements. |
 | `deltos-grid` | The bounded row cache behind every grid: `GridCache`, `BrowseLoader` for tables, `StreamLoader` for query results, and the streaming export with its CSV, JSON and Markdown writers. |
 | `deltos-dock` | The panel layout as plain data: split trees for the main window and each torn-off window, with every move as a method. No UI code. |
 | `deltos-settings` | `settings.toml` (with defaults, sanitizing and atomic saves), the saved layout, theme files and the keychain. |
@@ -125,6 +125,19 @@ A query result goes through a `StreamLoader` instead. It reads the result forwar
 viewport needs rows and keeps them in a temporary file, up to the spill limit (8 GB by
 default). The grid counts "N+ rows" until the stream ends. Fetch all reads the rest now,
 and Stop ends reading.
+
+## Changing structure
+
+The Structure tab (`ui::structure`) stages edits to columns, indexes and foreign keys
+against the table as last described. `deltos_drivers::ddl::plan` compares the two and
+returns the statements, or a reason it will not. It is pure, so every dialect is tested
+without a server. Review shows exactly those statements, and `Connection::apply_schema` runs
+them: in one transaction on PostgreSQL and SQLite, one by one on MySQL, which commits each
+DDL statement. SQLite cannot alter most column details in place, so the plan rebuilds the
+table: create a copy with the new shape, copy the rows, drop the old table, rename the copy,
+and recreate its indexes and triggers. Foreign key checks are off during the rebuild and
+checked before the commit. Tables the rebuild could damage (generated columns, CHECK
+constraints, WITHOUT ROWID and the like) are refused with a note.
 
 ## The demo connection
 

@@ -121,14 +121,9 @@ impl RowWriter for InsertWriter {
 
 /// The statement that empties `object`, for "Empty the table first" on import.
 pub fn truncate_statement(kind: DriverKind, object: &ObjectRef) -> String {
-    match kind {
-        DriverKind::Mongodb => format!(
-            "db.getCollection({}).deleteMany({{}})",
-            serde_json::Value::String(object.name.clone())
-        ),
-        // SQLite has no TRUNCATE; a DELETE without WHERE takes its fast path.
-        DriverKind::Sqlite => format!("DELETE FROM {}", edit::table_name(kind, object)),
-        _ => format!("TRUNCATE TABLE {}", edit::table_name(kind, object)),
+    match deltos_drivers::ddl::Flavor::of(kind, "") {
+        Some(flavor) => deltos_drivers::ddl::truncate_table(flavor, object),
+        None => format!("TRUNCATE TABLE {}", edit::table_name(kind, object)),
     }
 }
 

@@ -182,6 +182,17 @@ pub struct SshTunnel {
     pub secret: Option<String>,
 }
 
+impl Error {
+    /// The error of one statement in a series, naming the statement so the person can
+    /// tell which one failed. Cancellation and a closed connection stay as they are.
+    pub fn in_statement(self, statement: &str) -> Error {
+        match self {
+            Error::Cancelled | Error::Closed => self,
+            e => Error::Query(format!("{e}\nIn: {}", statement.trim())),
+        }
+    }
+}
+
 /// What a connection can do, so the UI offers only what works.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Capabilities {
@@ -289,6 +300,9 @@ pub struct Index {
     pub unique: bool,
     pub primary: bool,
     pub method: Option<String>,
+    /// The index exists to enforce a `PRIMARY KEY` or `UNIQUE` constraint, and goes away
+    /// with the constraint rather than on its own.
+    pub constraint: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -297,6 +311,58 @@ pub struct ForeignKey {
     pub columns: Vec<String>,
     pub target: ObjectRef,
     pub target_columns: Vec<String>,
+    pub on_delete: ForeignKeyAction,
+    pub on_update: ForeignKeyAction,
+}
+
+/// What a foreign key does to referencing rows when the referenced row is deleted or its
+/// key changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ForeignKeyAction {
+    #[default]
+    NoAction,
+    Restrict,
+    Cascade,
+    SetNull,
+    SetDefault,
+}
+
+impl ForeignKeyAction {
+    pub const ALL: [ForeignKeyAction; 5] = [
+        ForeignKeyAction::NoAction,
+        ForeignKeyAction::Restrict,
+        ForeignKeyAction::Cascade,
+        ForeignKeyAction::SetNull,
+        ForeignKeyAction::SetDefault,
+    ];
+
+    /// The words SQL uses for it: `NO ACTION`, `CASCADE` and so on.
+    pub fn sql(self) -> &'static str {
+        match self {
+            ForeignKeyAction::NoAction => "NO ACTION",
+            ForeignKeyAction::Restrict => "RESTRICT",
+            ForeignKeyAction::Cascade => "CASCADE",
+            ForeignKeyAction::SetNull => "SET NULL",
+            ForeignKeyAction::SetDefault => "SET DEFAULT",
+        }
+    }
+
+    /// Reads the words catalogs report (`CASCADE`, `set null`, `NO_ACTION`). Anything
+    /// else is taken as the default, `NO ACTION`.
+    pub fn parse(text: &str) -> ForeignKeyAction {
+        let words: String = text
+            .chars()
+            .filter(|c| c.is_ascii_alphabetic())
+            .map(|c| c.to_ascii_uppercase())
+            .collect();
+        match words.as_str() {
+            "RESTRICT" => ForeignKeyAction::Restrict,
+            "CASCADE" => ForeignKeyAction::Cascade,
+            "SETNULL" => ForeignKeyAction::SetNull,
+            "SETDEFAULT" => ForeignKeyAction::SetDefault,
+            _ => ForeignKeyAction::NoAction,
+        }
+    }
 }
 
 /// The structure of one object, for the structure tab and the right-hand info panel.
@@ -612,6 +678,33 @@ pub trait Connection: Send + Sync {
         Box::pin(async { Err(Error::Unsupported("editing rows")) })
     }
 
+    /// Runs statements that change the structure of tables, in order, stopping at the
+    /// first that fails. Databases whose DDL is transactional run them all in one
+    /// transaction, so a failure leaves nothing changed; the others commit each statement
+    /// as it runs. `namespace` is where unqualified names resolve.
+    fn apply_schema<'a>(
+        &'a self,
+        namespace: &'a [String],
+        statements: &'a [String],
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            let options = ExecuteOptions {
+                namespace: (!namespace.is_empty()).then(|| namespace.to_vec()),
+                ..ExecuteOptions::default()
+            };
+            for statement in statements {
+                let mut stream = self
+                    .execute(statement, &options)
+                    .await
+                    .map_err(|e| e.in_statement(statement))?;
+                while let Some(batch) = futures::StreamExt::next(&mut stream.batches).await {
+                    batch.map_err(|e| e.in_statement(statement))?;
+                }
+            }
+            Ok(())
+        })
+    }
+
     /// A handle that cancels what this connection is running.
     fn cancel_handle(&self) -> Option<Arc<dyn CancelHandle>> {
         None
@@ -630,4 +723,25 @@ pub trait Driver: Send + Sync {
         &'a self,
         config: &'a ConnectionConfig,
     ) -> BoxFuture<'a, Result<Arc<dyn Connection>>>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_foreign_key_actions() {
+        for action in ForeignKeyAction::ALL {
+            assert_eq!(ForeignKeyAction::parse(action.sql()), action);
+        }
+        assert_eq!(
+            ForeignKeyAction::parse("set null"),
+            ForeignKeyAction::SetNull
+        );
+        assert_eq!(
+            ForeignKeyAction::parse("NO_ACTION"),
+            ForeignKeyAction::NoAction
+        );
+        assert_eq!(ForeignKeyAction::parse("?"), ForeignKeyAction::NoAction);
+    }
 }

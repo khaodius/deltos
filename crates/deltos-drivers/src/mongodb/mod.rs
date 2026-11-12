@@ -1164,6 +1164,7 @@ fn index_of(spec: &Document) -> Option<Index> {
         columns,
         primary,
         method,
+        constraint: false,
     })
 }
 
