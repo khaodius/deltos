@@ -4,6 +4,30 @@ Packages for every version are attached to its
 [release](https://github.com/khaodius/deltos/releases), with SHA-256 checksums and a signed
 update manifest.
 
+## 0.1.20 - 2026-11-12
+
+- **Command line.** `deltos query`, `export`, `import`, `objects`, `test` and `connections`
+  work with databases without opening a window, using saved connections by name with their
+  keychain passwords and SSH tunnels, or any connection link. Queries print an aligned
+  table on a terminal and TSV, CSV, JSON, JSON Lines or Markdown elsewhere; exports write
+  any table of any size to a file or standard output, with an optional `--where`; imports
+  load CSV, TSV, JSON or SQL files. Read-only connections stay read-only, and statements
+  the app would ask about need `--yes`. `deltos help` lists every option.
+
+## 0.1.19 - 2026-11-12
+
+- **Text color.** Settings → Appearance → Text sets the color of text, the way the accent
+  is set: swatches, a hex field, the picker and its eyedropper. Light and dark mode each
+  keep their own, and secondary and faint text follow it. Default goes back to the
+  palette's color.
+
+## 0.1.18 - 2026-11-12
+
+- **Motion settings.** Settings → Appearance → Motion turns panel animations on or off and
+  tunes them: sliders for speed, smoothness (springy to no overshoot) and how far a landing
+  panel squashes, a choice of easing, and switches for the stretch while dragging and the
+  accent outline on landing. A preview plays a landing with the current settings.
+
 ## 0.1.17 - 2026-11-12
 
 - **Starts on Wayland again.** Deltos no longer aborts at start with "RefCell already

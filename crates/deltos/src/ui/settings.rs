@@ -2,8 +2,8 @@
 //! written to `settings.toml` a moment later.
 
 use deltos_settings::{
-    Appearance, DateFormat, Density, HeaderStyle, KEYBIND_ACTIONS, NullStyle, Palette, Settings,
-    TabStyle, ThemeMode, TitleBarStyle,
+    Appearance, DateFormat, Density, HeaderStyle, KEYBIND_ACTIONS, MotionEasing, NullStyle,
+    Palette, Settings, TabStyle, ThemeMode, TitleBarStyle,
 };
 use gpui::{
     AnyElement, App, AppContext, Context, Div, ElementId, Entity, FontWeight, IntoElement, Render,
@@ -17,6 +17,7 @@ use crate::theme::{
 use crate::ui::color_picker::{ColorEvent, ColorPicker};
 use crate::ui::icons::{Icon, icon};
 use crate::ui::layouts::LayoutsPage;
+use crate::ui::slider::slider;
 use crate::ui::text_input::{InputEvent, TextInput};
 use crate::ui::{ButtonStyle, MenuItem, button, field, menu, segmented, switch};
 use crate::update::{CURRENT, UpdateStatus, Updates};
@@ -84,6 +85,12 @@ const GRID_FONTS: [&str; 5] = [
     "JetBrains Mono",
 ];
 
+/// Text colors offered as swatches: dark ones for light mode, light ones for dark mode.
+const LIGHT_TEXTS: [u32; 6] = [0x000000, 0x1D1D20, 0x2B2B30, 0x1B2430, 0x2A251F, 0x1F2A22];
+const DARK_TEXTS: [u32; 8] = [
+    0xFFFFFF, 0xE6E6E6, 0xDDE3EE, 0xEEE2D8, 0xDCE8E0, 0xE9E1F0, 0xF2D99A, 0xA8E6B8,
+];
+
 const TINTS: [(&str, u32); 4] = [("Off", 0), ("Subtle", 5), ("Medium", 10), ("Strong", 18)];
 
 /// Which font a font menu sets.
@@ -100,11 +107,16 @@ pub struct SettingsPanel {
     section: Section,
     accent_hex: Entity<TextInput>,
     accent_picker: Entity<ColorPicker>,
+    /// The text color of the mode on screen: its hex field and picker.
+    text_hex: Entity<TextInput>,
+    text_picker: Entity<ColorPicker>,
     font_menu: Option<FontTarget>,
     /// The system's font families, read when a font menu first opens.
     system_fonts: Option<Vec<String>>,
     keys: Vec<(&'static str, Entity<TextInput>)>,
     theme_menu: bool,
+    /// Bumped by the motion preview's Play button, which restarts its animation.
+    motion_preview: usize,
     layouts: Entity<LayoutsPage>,
     _subs: Vec<Subscription>,
 }
@@ -133,14 +145,36 @@ impl SettingsPanel {
             })
             .collect();
         let accent_picker = cx.new(|cx| ColorPicker::new(s.appearance.accent, cx));
+        let text_now = shown_text(cx);
+        let text_hex = text_input("#E6E6E6", Some(format!("#{text_now:06X}")), cx);
+        let text_picker = cx.new(|cx| ColorPicker::new(text_now, cx));
         let mut subs = vec![cx.subscribe(&state, |this, state, e, cx| {
             if matches!(e, StateEvent::Settings | StateEvent::Update) {
                 // A swatch, the hex field or a reset moved the accent: the picker follows.
                 let accent = state.read(cx).settings.appearance.accent;
                 this.accent_picker.update(cx, |p, cx| p.set_rgb(accent, cx));
+                // The text color too, and a change of mode shows the other mode's color.
+                let text = shown_text(cx);
+                this.text_picker.update(cx, |p, cx| p.set_rgb(text, cx));
+                this.text_hex
+                    .update(cx, |i, cx| i.set_text(format!("#{text:06X}"), cx));
                 cx.notify();
             }
         })];
+        subs.push(cx.subscribe(&text_picker, |this, _, e, cx| {
+            let ColorEvent::Changed(c) = *e;
+            this.set_text_color(Some(c), cx);
+        }));
+        subs.push(cx.subscribe(&text_hex, |this, input, e, cx| {
+            if matches!(e, InputEvent::Submit | InputEvent::Cancel) {
+                let parsed = deltos_settings::parse_color(input.read(cx).text());
+                if let (InputEvent::Submit, Some(rgba)) = (e, parsed) {
+                    this.set_text_color(Some(rgba >> 8), cx);
+                }
+                let current = shown_text(cx);
+                input.update(cx, |i, cx| i.set_text(format!("#{current:06X}"), cx));
+            }
+        }));
         subs.push(cx.subscribe(&accent_picker, |this, _, e, cx| {
             let ColorEvent::Changed(c) = *e;
             this.accent_hex
@@ -195,10 +229,13 @@ impl SettingsPanel {
             section: Section::Appearance,
             accent_hex,
             accent_picker,
+            text_hex,
+            text_picker,
             font_menu: None,
             system_fonts: None,
             keys,
             theme_menu: false,
+            motion_preview: 0,
             _subs: subs,
         }
     }
@@ -216,6 +253,71 @@ impl SettingsPanel {
 
     fn set(&self, cx: &mut App, f: impl FnOnce(&mut Settings)) {
         self.state.update(cx, |s, cx| s.update_settings(cx, f));
+    }
+
+    /// Sets the text color of the mode on screen; `None` goes back to the palette's.
+    fn set_text_color(&self, c: Option<u32>, cx: &mut App) {
+        let dark = theme(cx).dark;
+        self.set(cx, move |s| {
+            if dark {
+                s.appearance.dark_text = c;
+            } else {
+                s.appearance.light_text = c;
+            }
+        });
+    }
+
+    /// The text color control: swatches for the mode on screen, the hex field, Default,
+    /// and the picker.
+    fn text_color_control(
+        &self,
+        a: &Appearance,
+        t: &Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let current = if t.dark { a.dark_text } else { a.light_text };
+        let presets: &[u32] = if t.dark { &DARK_TEXTS } else { &LIGHT_TEXTS };
+        let mut swatches = div().flex().flex_wrap().gap(px(6.)).max_w(px(240.));
+        for (i, c) in presets.iter().copied().enumerate() {
+            let w = cx.entity().downgrade();
+            swatches = swatches.child(
+                div()
+                    .id(("text-color", i))
+                    .size(px(18.))
+                    .rounded_full()
+                    .bg(color(c))
+                    .cursor_pointer()
+                    .border_2()
+                    .border_color(if current == Some(c) {
+                        t.accent
+                    } else {
+                        t.border_strong
+                    })
+                    .on_click(move |_, _, cx| {
+                        w.update(cx, |this, cx| this.set_text_color(Some(c), cx))
+                            .ok();
+                    }),
+            );
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .child(swatches)
+                    .child(div().w(px(84.)).child(field(&self.text_hex, t, window, cx)))
+                    .child(
+                        button("text-color-default", "Default", ButtonStyle::Secondary, t)
+                            .on_click(cx.listener(|this, _, _, cx| this.set_text_color(None, cx))),
+                    ),
+            )
+            .child(self.text_picker.clone())
+            .into_any_element()
     }
 
     /// The font picker for one setting: the fonts Deltos ships first, then the system's.
@@ -674,7 +776,7 @@ impl SettingsPanel {
             .into_any_element()
     }
 
-    fn appearance(&mut self, t: &Theme, window: &Window, cx: &mut Context<Self>) -> Div {
+    fn appearance(&mut self, t: &Theme, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let st = self.state.read(cx);
         let a = st.settings.appearance.clone();
         let themes: Vec<String> = st.themes.iter().map(|(n, _)| n.clone()).collect();
@@ -839,6 +941,13 @@ impl SettingsPanel {
             state.clone(),
         );
         let hex_reset = self.accent_hex.clone();
+        let motion = self.motion_rows(&a, t, window, cx);
+        let text_control = self.text_color_control(&a, t, window, cx);
+        let text_color_label = if t.dark {
+            "Text color in dark mode"
+        } else {
+            "Text color in light mode"
+        };
         group("Theme", t)
             .child(preview)
             .child(row(
@@ -954,6 +1063,12 @@ impl SettingsPanel {
             ))
             .child(gap())
             .child(heading("Text", t))
+            .child(stacked_row(
+                text_color_label,
+                Some("The color of text in this mode. Secondary and faint text follow it. Switch the mode above to set the other one."),
+                text_control,
+                t,
+            ))
             .child(row(
                 "Interface zoom",
                 None,
@@ -1125,6 +1240,9 @@ impl SettingsPanel {
                 pick(|s| s.appearance.sidebar_row_counts = !s.appearance.sidebar_row_counts),
                 t,
             ))
+            .child(gap())
+            .child(heading("Motion", t))
+            .child(motion)
             .child(
                 div().pt(px(14.)).child(
                     button(
@@ -1148,6 +1266,168 @@ impl SettingsPanel {
                     })),
                 ),
             )
+    }
+
+    /// The motion settings: on or off, speed, smoothness, squash, easing, and a preview
+    /// that plays the landing settle with them.
+    fn motion_rows(
+        &mut self,
+        a: &Appearance,
+        t: &Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let w = cx.entity().downgrade();
+        let pick = move |f: fn(&mut Settings)| {
+            let w = w.clone();
+            move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut App| {
+                w.update(cx, |this, cx| this.set(cx, f)).ok();
+            }
+        };
+        let setter = |f: fn(&mut Appearance, f32)| {
+            let state = self.state.clone();
+            move |v: f32, cx: &mut App| {
+                state.update(cx, |s, cx| {
+                    s.update_settings(cx, |st| f(&mut st.appearance, v))
+                })
+            }
+        };
+        let on = !a.reduced_motion;
+        let easings: Vec<_> = MotionEasing::ALL.iter().map(|e| (e.label(), *e)).collect();
+        let easing_state = self.state.clone();
+        let speed = slider(
+            "motion-speed",
+            a.motion_speed,
+            (0.25, 3.0, 0.05),
+            format!("{:.2}x", a.motion_speed),
+            setter(|a, v| a.motion_speed = v),
+            t,
+            window,
+            cx,
+        );
+        let smooth = slider(
+            "motion-smoothness",
+            a.motion_smoothness,
+            (0.0, 1.0, 0.05),
+            format!("{:.0}%", a.motion_smoothness * 100.0),
+            setter(|a, v| a.motion_smoothness = v),
+            t,
+            window,
+            cx,
+        );
+        let squash = slider(
+            "motion-squash",
+            a.motion_squash,
+            (0.0, 2.0, 0.05),
+            format!("{:.0}%", a.motion_squash * 100.0),
+            setter(|a, v| a.motion_squash = v),
+            t,
+            window,
+            cx,
+        );
+        // A small panel that lands with the current settings each time Play is pressed.
+        let generation = self.motion_preview;
+        let sample = crate::ui::dock::settle(
+            // The settle draws its own outline on this wrapper, so the card inside keeps
+            // its border once the outline has faded.
+            div().absolute().inset_0().child(
+                div()
+                    .size_full()
+                    .rounded(t.radius_small)
+                    .bg(t.sidebar)
+                    .border_1()
+                    .border_color(t.border_strong)
+                    .p(px(8.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(5.))
+                    .child(div().h(px(5.)).w(px(70.)).rounded_full().bg(t.text_faint))
+                    .child(div().h(px(5.)).w(px(50.)).rounded_full().bg(t.grid_line))
+                    .child(div().h(px(5.)).w(px(62.)).rounded_full().bg(t.grid_line)),
+            ),
+            on.then_some(("motion-preview", generation)),
+            t,
+        );
+        let preview = div()
+            .flex()
+            .items_center()
+            .gap(px(12.))
+            .child(div().relative().w(px(120.)).h(px(64.)).child(sample))
+            .child(
+                button("motion-play", "Play", ButtonStyle::Secondary, t).on_click(cx.listener(
+                    |this, _, _, cx| {
+                        this.motion_preview = this.motion_preview.wrapping_add(1);
+                        cx.notify();
+                    },
+                )),
+            );
+        div()
+            .flex()
+            .flex_col()
+            .child(toggle_row(
+                "Panel animations",
+                Some("Panels squash and settle as they join a window, and stretch as you drag them."),
+                ("motion-on", on),
+                pick(|s| s.appearance.reduced_motion = !s.appearance.reduced_motion),
+                t,
+            ))
+            .when(on, |el| {
+                el.child(row(
+                    "Speed",
+                    Some("How fast panels settle. Higher is quicker."),
+                    speed,
+                    t,
+                ))
+                .child(row(
+                    "Smoothness",
+                    Some("Low is springy and rings before it rests; high comes to rest without overshooting."),
+                    smooth,
+                    t,
+                ))
+                .child(row(
+                    "Squash",
+                    Some("How far a landing panel squashes and stretches. 0% only fades the outline."),
+                    squash,
+                    t,
+                ))
+                .child(row(
+                    "Easing",
+                    Some("The pace of the settle over its time."),
+                    segmented(
+                        "motion-easing",
+                        &easings,
+                        a.motion_easing,
+                        move |e, _, cx| {
+                            easing_state.update(cx, |s, cx| {
+                                s.update_settings(cx, |st| st.appearance.motion_easing = e)
+                            })
+                        },
+                        t,
+                    )
+                    .into_any_element(),
+                    t,
+                ))
+                .child(toggle_row(
+                    "Stretch while dragging",
+                    Some("A dragged panel stretches along its motion and leans toward window edges."),
+                    ("motion-stretch", a.motion_drag_stretch),
+                    pick(|s| s.appearance.motion_drag_stretch = !s.appearance.motion_drag_stretch),
+                    t,
+                ))
+                .child(toggle_row(
+                    "Landing outline",
+                    Some("An accent outline that fades as a panel settles."),
+                    ("motion-outline", a.motion_outline),
+                    pick(|s| s.appearance.motion_outline = !s.appearance.motion_outline),
+                    t,
+                ))
+                .child(row(
+                    "Preview",
+                    Some("Plays a landing with these settings."),
+                    preview.into_any_element(),
+                    t,
+                ))
+            })
     }
 
     fn data(&mut self, t: &Theme, cx: &mut Context<Self>) -> Div {
@@ -1840,6 +2120,11 @@ impl Render for SettingsPanel {
                 .child(div().max_w(px(640.)).px(px(28.)).py(px(20.)).child(body)),
         )
     }
+}
+
+/// The text color of the mode on screen as 0xRRGGBB: the setting, or the palette's.
+fn shown_text(cx: &App) -> u32 {
+    crate::theme::to_rgb(theme(cx).text)
 }
 
 #[cfg(test)]

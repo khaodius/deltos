@@ -2,6 +2,7 @@
 
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod cli;
 mod demo;
 mod history_file;
 mod import;
@@ -853,6 +854,10 @@ fn load_settings(paths: Option<&Paths>) -> Settings {
 }
 
 fn main() {
+    // `deltos query ...` and the other commands run without a window.
+    if let Some(code) = cli::run_from_args() {
+        std::process::exit(code);
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_env("DELTOS_LOG")

@@ -217,7 +217,7 @@ impl DockView {
         // A panel that just landed here settles with a squash and stretch.
         let landing = ws
             .landed
-            .filter(|(p, _)| t.motion && s.panels.contains(p))
+            .filter(|(p, _)| t.motion_style.settles() && s.panels.contains(p))
             .map(|(_, generation)| generation);
         let active_view = ws.view(active).cloned();
         let tool_header = s.panels.len() == 1 && active_view.as_ref().is_some_and(|v| v.is_tool());
@@ -589,12 +589,17 @@ impl Render for DockView {
         let viewport = window.viewport_size();
         let ghost = drag.as_ref().filter(|d| d.source == tree_id).map(|d| {
             let since = d.moved_at.elapsed().as_secs_f32();
-            let fade = if t.motion { (-since / 0.09).exp() } else { 0.0 };
-            if t.motion && fade > 0.02 {
+            let m = t.motion_style;
+            let fade = if m.stretches() {
+                (-since / m.drag_ease()).exp()
+            } else {
+                0.0
+            };
+            if m.stretches() && fade > 0.02 {
                 window.request_animation_frame();
             }
             let (mut sx, mut sy) = motion::stretch((d.velocity.0 * fade, d.velocity.1 * fade));
-            if t.motion {
+            if m.stretches() {
                 let reach = 90.0;
                 let near = |d: f32| ((reach - d) / reach).clamp(0.0, 1.0) * 0.3;
                 let (x, y) = (f32::from(d.cursor.x), f32::from(d.cursor.y));
@@ -721,22 +726,29 @@ pub fn settle(content: gpui::Div, id: Option<(&'static str, usize)>, t: &Theme) 
     let Some(id) = id else {
         return content.into_any_element();
     };
-    let (accent, radius) = (t.accent, t.radius);
+    let (accent, radius, m) = (t.accent, t.radius, t.motion_style);
+    if !m.settles() {
+        return content.into_any_element();
+    }
     content
         .with_animation(
             gpui::ElementId::NamedInteger(id.0.into(), id.1 as u64),
-            gpui::Animation::new(motion::SETTLE),
+            gpui::Animation::new(m.settle()),
             move |el, progress| {
-                let (x, y) = motion::insets(motion::squash(progress));
-                let fade = 1.0 - progress;
-                el.left(relative(x))
+                let (x, y) = motion::insets(m.squash_at(progress));
+                let fade = 1.0 - m.easing.apply(progress);
+                let el = el
+                    .left(relative(x))
                     .right(relative(x))
                     .top(relative(y))
                     .bottom(relative(y))
                     .overflow_hidden()
-                    .rounded(radius * (fade * 2.0).min(1.0))
-                    .border_2()
-                    .border_color(accent.opacity(fade))
+                    .rounded(radius * (fade * 2.0).min(1.0));
+                if m.outline {
+                    el.border_2().border_color(accent.opacity(fade))
+                } else {
+                    el
+                }
             },
         )
         .into_any_element()
