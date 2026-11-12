@@ -19,6 +19,8 @@ pub enum ItemKind {
     Keyword,
     Function,
     Method,
+    /// A saved query, which replaces what was typed with its text.
+    Snippet,
 }
 
 /// One entry of the popup.

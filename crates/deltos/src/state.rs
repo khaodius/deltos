@@ -111,7 +111,7 @@ pub struct HistoryEntry {
     pub error: Option<String>,
 }
 
-const HISTORY_LIMIT: usize = 500;
+const HISTORY_LIMIT: usize = crate::history_file::LIMIT;
 
 /// Where a connection attempt stands, for the connection list.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -683,6 +683,7 @@ impl AppState {
         if self.history.len() >= HISTORY_LIMIT {
             self.history.pop_front();
         }
+        crate::history_file::append_entry(&entry, cx);
         self.history.push_back(entry);
         cx.emit(StateEvent::History);
     }
@@ -916,7 +917,7 @@ pub fn init(
 ) -> Entity<AppState> {
     let themes = paths.as_ref().map(Paths::scan_themes).unwrap_or_default();
     serve_host_keys(cx);
-    cx.new(|cx| {
+    let state = cx.new(|cx| {
         let mut state = AppState {
             settings,
             paths,
@@ -934,5 +935,9 @@ pub fn init(
             state.open_demo(cx);
         }
         state
-    })
+    });
+    crate::history_file::start(&state, cx);
+    let paths = state.read(cx).paths.clone();
+    crate::snippets::start(paths.as_ref(), cx);
+    state
 }

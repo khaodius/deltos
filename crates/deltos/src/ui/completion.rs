@@ -201,6 +201,7 @@ fn kind_icon(kind: ItemKind) -> Option<Icon> {
         ItemKind::Collection => Icon::Collection,
         ItemKind::Schema => Icon::Schema,
         ItemKind::Function | ItemKind::Method => Icon::Function,
+        ItemKind::Snippet => Icon::Code,
         ItemKind::Keyword => return None,
     })
 }

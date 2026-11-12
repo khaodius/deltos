@@ -4,6 +4,17 @@ Packages for every version are attached to its
 [release](https://github.com/khaodius/deltos/releases), with SHA-256 checksums and a signed
 update manifest.
 
+## 0.1.9 - 2026-11-11
+
+- **History that lasts.** The last 5,000 statements you ran are kept between sessions, with
+  their connection, time, duration, rows and errors. The History panel searches them, shows
+  only the active connection's or all of them, and opens one in a new query tab with a click.
+  Entries can be copied, removed or cleared.
+- **Saved queries.** Ctrl+Shift+S in a query tab saves the query, or the selection, by name,
+  for that connection or for all of them. Saved queries are listed under Saved in the History
+  panel, where they open in a new tab, go in at the cursor, and can be renamed or deleted.
+  The editor suggests them by name, and the command palette finds them.
+
 ## 0.1.8 - 2026-11-11
 
 - **More ways to filter.** The filter bar joins its conditions with All (AND) or Any (OR) and

@@ -29,24 +29,30 @@ use gpui::{
     Subscription, Task, Window, actions, canvas, div, prelude::*, px, uniform_list,
 };
 
+use crate::lang::complete::{Item, ItemKind};
 use crate::lang::format::{self as sqlformat, Options as FormatOptions};
 use crate::lang::plan::{self, Plan, PlanSource};
 use crate::lang::{Language, lex};
 use crate::net::Net;
 use crate::safety::{self, Confirm, Environment};
+use crate::snippets;
 use crate::state::{AppState, HistoryEntry, Inspected, StateEvent};
 use crate::theme::{Theme, theme};
-use crate::ui::completion::query_completer;
+use crate::ui::completion::{ExtraItems, query_completer};
 use crate::ui::editor::{Editor, EditorEvent};
 use crate::ui::environment;
 use crate::ui::grid::{GridEvent, GridView};
 use crate::ui::icons::{Icon, icon};
+use crate::ui::save_query::{SaveBar, SaveEvent};
 use crate::ui::{
     ButtonStyle, MenuItem, Tooltip, button, dot, empty_state, icon_button, menu, plan_view,
     thousands,
 };
 
-actions!(query, [RunQuery, RunAll, ExplainQuery, FormatSql]);
+actions!(
+    query,
+    [RunQuery, RunAll, ExplainQuery, FormatSql, SaveQuery]
+);
 
 /// Rows of an open result read before the next statement on the connection closes it.
 const KEEP_ROWS: u64 = 10_000;
@@ -181,6 +187,8 @@ pub struct QueryPanel {
     picker_open: bool,
     /// What waits for the person to confirm it.
     confirm: Option<Pending>,
+    /// The bar to save the text by name, while it is open.
+    save: Option<(Entity<SaveBar>, Subscription)>,
     focus: FocusHandle,
     _subs: Vec<Subscription>,
 }
@@ -196,11 +204,24 @@ impl QueryPanel {
         let editor = cx.new(|cx| Editor::new(text, "Write a statement and press Ctrl+Enter", cx));
         let connection = connection.or_else(|| state.read(cx).active.clone());
         let connection_cell = Rc::new(RefCell::new(connection.clone()));
-        let completer = query_completer(state.clone(), connection_cell.clone(), None);
+        let saved: ExtraItems = Rc::new(|connection, cx| {
+            snippets::snippets_for(connection, cx)
+                .into_iter()
+                .map(|s| {
+                    Item::new(s.name, ItemKind::Snippet, 6)
+                        .detail("saved query")
+                        .insert(s.text)
+                })
+                .collect()
+        });
+        let completer = query_completer(state.clone(), connection_cell.clone(), Some(saved));
         editor.update(cx, |e, _| e.set_completer(completer));
         let subs = vec![
-            cx.subscribe(&editor, |_, _, e, cx| match e {
-                EditorEvent::Changed => cx.notify(),
+            cx.subscribe(&editor, |_, editor, e, cx| match e {
+                EditorEvent::Changed => {
+                    snippets::set_last_editor(&editor, cx);
+                    cx.notify()
+                }
             }),
             cx.subscribe(&state, |this, state, e, cx| {
                 if let StateEvent::Sessions | StateEvent::ActiveSession = e {
@@ -232,6 +253,7 @@ impl QueryPanel {
             bounds: Bounds::default(),
             picker_open: false,
             confirm: None,
+            save: None,
             focus: cx.focus_handle(),
             _subs: subs,
         };
@@ -823,6 +845,36 @@ impl QueryPanel {
         }
     }
 
+    // ---- saving --------------------------------------------------------------------------
+
+    /// Opens the bar that saves the selection, or the whole text, by name.
+    fn open_save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let editor = self.editor.read(cx);
+        let selection = editor.selection();
+        let text = if selection.is_empty() {
+            editor.text().trim().to_owned()
+        } else {
+            editor.text()[selection].trim().to_owned()
+        };
+        if text.is_empty() {
+            return;
+        }
+        let connection = self
+            .connection
+            .clone()
+            .map(|id| (id.clone(), self.connection_name(cx).unwrap_or(id)));
+        let bar = cx.new(|cx| SaveBar::new(text, connection, window, cx));
+        let sub = cx.subscribe_in(&bar, window, |this, _, e, window, cx| match e {
+            SaveEvent::Closed => {
+                this.save = None;
+                window.focus(&this.editor.focus_handle(cx));
+                cx.notify();
+            }
+        });
+        self.save = Some((bar, sub));
+        cx.notify();
+    }
+
     // ---- explain -------------------------------------------------------------------------
 
     /// Shows the plan of the statement at the cursor.
@@ -1256,6 +1308,10 @@ impl QueryPanel {
             "Lay out the selection or the whole text ({})",
             key_label(keys.get("format-sql"))
         );
+        let save_tip = format!(
+            "Save the selection or the whole text by name ({})",
+            key_label(keys.get("save-query"))
+        );
         div()
             .flex_none()
             .h(t.bar_height)
@@ -1275,6 +1331,14 @@ impl QueryPanel {
                         .on_click(cx.listener(|this, _, _, cx| this.stop(cx))),
                 )
             })
+            .child(
+                button("query-save", "Save", ButtonStyle::Ghost, t)
+                    .h(t.s(24.))
+                    .px(px(8.))
+                    .text_size(t.small_size)
+                    .tooltip(move |_, cx| Tooltip::view(save_tip.clone(), cx))
+                    .on_click(cx.listener(|this, _, window, cx| this.open_save(window, cx))),
+            )
             .when(sql, |el| {
                 el.child(
                     button("query-format", "Format", ButtonStyle::Ghost, t)
@@ -2098,8 +2162,11 @@ impl Focusable for QueryPanel {
 }
 
 impl Render for QueryPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx).clone();
+        if self.focus.contains_focused(window, cx) {
+            snippets::set_last_editor(&self.editor, cx);
+        }
         let toolbar = self.toolbar(&t, cx);
         let confirm = self.confirm_bar(&t, cx);
         let strip = self.tab_strip(&t, cx);
@@ -2118,6 +2185,7 @@ impl Render for QueryPanel {
             .on_action(cx.listener(|this, _: &RunAll, _, cx| this.run_all(cx)))
             .on_action(cx.listener(|this, _: &ExplainQuery, _, cx| this.explain(cx)))
             .on_action(cx.listener(|this, _: &FormatSql, _, cx| this.format(cx)))
+            .on_action(cx.listener(|this, _: &SaveQuery, window, cx| this.open_save(window, cx)))
             .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| {
                 if this.dragging_split && this.bounds.size.height > px(0.) {
                     let y = (e.position.y - this.bounds.origin.y) / this.bounds.size.height;
@@ -2146,6 +2214,7 @@ impl Render for QueryPanel {
             )
             .child(toolbar)
             .children(confirm)
+            .children(self.save.as_ref().map(|(bar, _)| bar.clone()))
             .child(
                 div()
                     .flex_grow()
