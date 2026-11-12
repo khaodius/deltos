@@ -15,12 +15,17 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 mod layout;
+mod presets;
 pub mod secrets;
 mod theme_file;
 
 pub use layout::{
     CONNECTIONS_PANEL, INSPECTOR_PANEL, OBJECTS_PANEL, PanelKind, SavedLayout, SavedPanel,
     WindowPlacement,
+};
+pub use presets::{
+    BUILT_IN_PRESETS, LastSession, LayoutPreset, PRESET_LIMIT, PresetChild, PresetNode,
+    PresetPanel, unique_name,
 };
 pub use theme_file::{COLOR_KEYS, ColorKey, ThemeBase, ThemeError, ThemeFile, parse_color};
 
@@ -37,6 +42,13 @@ pub struct Settings {
     pub keybinds: Keybinds,
     pub connections: Vec<SavedConnection>,
     pub layout: SavedLayout,
+    /// What to open again at start.
+    pub session: LastSession,
+    /// Named panel arrangements the user saved; the built-in ones are not stored. One
+    /// this version cannot read (a newer version's panel, a bad hand edit) is skipped
+    /// rather than costing the whole file.
+    #[serde(deserialize_with = "presets::lenient")]
+    pub layout_presets: Vec<LayoutPreset>,
 }
 
 /// 2: Obsidian replaced Graphite as the default dark palette.
@@ -53,6 +65,8 @@ impl Default for Settings {
             keybinds: Keybinds::default(),
             connections: Vec::new(),
             layout: SavedLayout::default(),
+            session: LastSession::default(),
+            layout_presets: Vec::new(),
         }
     }
 }
@@ -743,6 +757,7 @@ impl Settings {
             }
         }
         self.layout.sanitize();
+        presets::sanitize(&mut self.layout_presets);
     }
 
     pub fn from_toml(text: &str) -> Result<Self, Error> {

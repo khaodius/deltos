@@ -4,6 +4,15 @@ Packages for every version are attached to its
 [release](https://github.com/khaodius/deltos/releases), with SHA-256 checksums and a signed
 update manifest.
 
+## 0.1.12 - 2026-11-11
+
+- **Pick up where you left off.** Deltos reopens your tabs, query text, panel windows and the
+  connections that need no password typed, and saves query text every few seconds so a crash
+  keeps it. Settings → Workspace → Restore last session on launch turns it off.
+- **Layout presets.** Default, Focus and Query arrange the panels in one click from the layout
+  button in the title bar, the command palette or Settings, without closing a tab. Save your
+  own arrangement under a name, then rename, replace or delete it.
+
 ## 0.1.11 - 2026-11-11
 
 - **Edit table structure.** The Structure tab adds, renames, retypes and drops columns,

@@ -7,6 +7,7 @@ mod history_file;
 mod lang;
 mod net;
 mod safety;
+mod session;
 mod snippets;
 mod state;
 mod theme;
@@ -29,6 +30,7 @@ use crate::state::{AppState, StateEvent};
 use crate::theme::theme;
 use crate::ui::dock::DockView;
 use crate::ui::icons::{Assets, Icon, icon};
+use crate::ui::layouts::LayoutMenu;
 use crate::ui::palette::PaletteLayer;
 use crate::ui::palette::providers::Scope;
 use crate::ui::workspace::Workspace;
@@ -189,6 +191,7 @@ pub struct Root {
     dock: Entity<DockView>,
     updates: Entity<UpdateModel>,
     palette: Entity<PaletteLayer>,
+    layouts: Entity<LayoutMenu>,
     /// Whether the window was opened without the system title bar. Windows cannot drop or
     /// restore it on an open window, so the setting applies there from the next start.
     own_bar: bool,
@@ -279,6 +282,7 @@ impl Root {
         let focus = cx.focus_handle();
         let palette =
             cx.new(|_| PaletteLayer::new(state.clone(), workspace.clone(), focus.clone()));
+        let layouts = cx.new(|_| LayoutMenu::new(workspace.clone()));
         let s = &state.read(cx).settings;
         Self {
             own_bar: s.appearance.custom_title_bar,
@@ -288,6 +292,7 @@ impl Root {
             dock,
             updates,
             palette,
+            layouts,
             focus,
             _subs: subs,
         }
@@ -430,6 +435,7 @@ impl Root {
                     w3.update(cx, |w, cx| w.toggle(PanelKind::Inspector, cx))
                 }),
             )
+            .child(self.layouts.clone())
             .child(div().w(px(1.)).h(px(16.)).mx(px(4.)).bg(t.border))
             .child(
                 icon_button("open-settings", Icon::Settings, &t)
@@ -660,6 +666,7 @@ fn quit_or_ask(workspace: &Entity<Workspace>, window: &mut Window, cx: &mut App)
 /// Saves everything, installs a waiting update if the setting says so, and quits. The
 /// panel windows close without docking so they open again next time.
 fn quit(workspace: &Entity<Workspace>, _window: &mut Window, cx: &mut App) {
+    session::begin_quit(cx);
     workspace.update(cx, |w, cx| {
         w.save_layout(cx);
         w.close_windows_for_quit(cx);
@@ -794,6 +801,8 @@ fn main() {
         // The demo always starts from the default layout, so screenshots are stable.
         settings.layout = Default::default();
         settings.layout.main_window = None;
+    } else if !settings.session.restore {
+        settings.layout = settings.layout.without_documents();
     }
     let net = match Net::new() {
         Ok(n) => n,
@@ -822,19 +831,23 @@ fn main() {
             let state = state::init(settings, paths, demo.is_some(), cx);
             let updates = UpdateModel::init(state.clone(), cx);
             let workspace = cx.new(|cx| Workspace::new(state.clone(), cx));
+            ui::layouts::init(&workspace, cx);
             cx.on_window_closed(|cx| {
                 if !cx.windows().iter().any(|w| w.downcast::<Root>().is_some()) {
                     cx.quit();
                 }
             })
             .detach();
-            match open_main_window(state, workspace.clone(), updates, cx) {
-                Ok(_) => workspace.update(cx, |w, cx| {
-                    w.restore_windows(cx);
-                    if let Some(screen) = demo.as_deref() {
-                        w.start_demo(screen, cx);
-                    }
-                }),
+            match open_main_window(state.clone(), workspace.clone(), updates, cx) {
+                Ok(_) => {
+                    workspace.update(cx, |w, cx| {
+                        w.restore_windows(cx);
+                        if let Some(screen) = demo.as_deref() {
+                            w.start_demo(screen, cx);
+                        }
+                    });
+                    session::init(&state, &workspace, cx);
+                }
                 Err(e) => {
                     eprintln!("deltos: could not open a window: {e}");
                     cx.quit();

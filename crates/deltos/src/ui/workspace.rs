@@ -298,16 +298,29 @@ impl Workspace {
         }
     }
 
-    /// Writes the layout into the settings file (after the usual short pause).
-    pub fn save_layout(&mut self, cx: &mut Context<Self>) {
-        // Query panels keep their text across restarts.
+    /// Copies each query panel's text into the layout, so it survives a restart. Says
+    /// whether any changed.
+    pub fn sync_query_text(&mut self, cx: &App) -> bool {
+        let mut changed = false;
         for p in &mut self.layout.panels {
             if let (PanelKind::Query { text, .. }, Some(PanelView::Query(v))) =
                 (&mut p.kind, self.views.get(&p.id))
             {
-                *text = v.read(cx).text(cx);
+                // Compared in place: this runs every few seconds, and a long script
+                // is copied only when it changed.
+                let now = v.read(cx).text_ref(cx);
+                if text.as_str() != now {
+                    *text = now.to_owned();
+                    changed = true;
+                }
             }
         }
+        changed
+    }
+
+    /// Writes the layout into the settings file (after the usual short pause).
+    pub fn save_layout(&mut self, cx: &mut Context<Self>) {
+        self.sync_query_text(cx);
         let layout = self.layout.clone();
         self.state.update(cx, |s, cx| {
             s.update_settings_quietly(cx, |st| st.layout = layout)
@@ -676,6 +689,28 @@ impl Workspace {
             self.views.insert(p.id, view);
         }
         self.preview = None;
+        self.changed(cx);
+    }
+
+    /// Puts `layout` in place of the current one, as a layout preset does. Panels it
+    /// keeps keep their views, with their rows and scroll positions; panels it leaves out
+    /// close; panel windows it has no tree for close without docking.
+    pub fn replace_layout(&mut self, mut layout: SavedLayout, cx: &mut Context<Self>) {
+        layout.sanitize();
+        self.views
+            .retain(|id, _| layout.panels.iter().any(|p| p.id == *id));
+        for p in &layout.panels {
+            if !self.views.contains_key(&p.id) {
+                let view = self.create_view(p.id, &p.kind, cx);
+                self.views.insert(p.id, view);
+            }
+        }
+        self.homes.retain(|id, _| layout.dock.contains(*id));
+        if self.preview.is_some_and(|p| !layout.dock.contains(p)) {
+            self.preview = None;
+        }
+        self.layout = layout;
+        self.restore_windows(cx);
         self.changed(cx);
     }
 

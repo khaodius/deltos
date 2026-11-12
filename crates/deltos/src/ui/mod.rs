@@ -11,6 +11,7 @@ pub mod grid;
 pub mod history;
 pub mod icons;
 pub mod inspector;
+pub mod layouts;
 pub mod motion;
 pub mod palette;
 pub mod panel_window;
