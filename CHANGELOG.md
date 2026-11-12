@@ -4,6 +4,24 @@ Packages for every version are attached to its
 [release](https://github.com/khaodius/deltos/releases), with SHA-256 checksums and a signed
 update manifest.
 
+## 0.1.14 - 2026-11-11
+
+- **Import connections.** The connection list's menu imports connections from DBeaver,
+  DataGrip and the other JetBrains IDEs, and TablePlus, found in their usual places or picked
+  as a file. It shows what it found, with the ones you already have marked. Passwords stay
+  where they are; Deltos asks for each one the first time it connects.
+- **Connection links.** `deltos postgres://user@host/db` (also `mysql://`, `mariadb://`,
+  `mongodb://`, `mongodb+srv://`, `sqlite:///path` or a path to a SQLite file) opens that
+  connection: the saved one it reaches, or a new unsaved one. A password in the link is used
+  to connect and never written to the settings file. On Linux, Deltos opens these links and
+  SQLite files from the desktop.
+- **Asks for a missing password.** A connection without a password that the server turns away
+  asks for it, and can keep it in the keychain.
+- **Unsaved links stay out of the next session.** A connection opened from a link is marked
+  "not saved" in the command palette, is never reopened at the next start, and its table tabs
+  are not restored; a query tab keeps its text without the connection. A link given at start
+  stays the active connection while the last session's connections reopen.
+
 ## 0.1.13 - 2026-11-11
 
 - **Follow foreign keys.** Foreign key cells show a small arrow that opens the referenced row

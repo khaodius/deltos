@@ -62,6 +62,45 @@ every connection, and on connections tagged Staging or Production also `ALTER` a
 write. The tag's color marks the connection in the title bar, its tabs, the status bars and
 the connection list (`ui/environment.rs`).
 
+### Connection links and imports
+
+`deltos postgres://user@host:5432/db` (and `postgresql://`, `mysql://`, `mariadb://`,
+`mongodb://`, `mongodb+srv://`, `sqlite:///path`, `file:///path/app.db` or a plain path to a
+`.db`, `.sqlite`, `.sqlite3` or `.db3` file) opens that connection (`link.rs`). A link that
+reaches a saved connection (same kind, host, port and database, and the user when the link
+names one; never one behind an SSH tunnel) opens it. Anything else opens as an unsaved
+connection in `AppState::unsaved`: it shows in the connection list as "Not saved", its
+password stays in memory, and saving it from the form is the only way it reaches the
+settings file and, with Keychain on, the keychain. A connection turned away for a missing
+password (imported ones, links, connections that keep no password) raises the password
+prompt over the main window (`ui/password.rs`). Each link starts its own Deltos; there is
+no single-instance hand-off yet.
+
+On Linux the desktop entry registers the URL schemes (`MimeType=x-scheme-handler/...` in
+`packaging/linux/deltos.desktop`) and the SQLite file types, and `scripts/install.sh` and
+the packages refresh the desktop database. On Windows the installer does not register them
+yet. To do it by hand, or in the Inno Setup script later, each scheme needs these keys
+(shown for `postgres`; repeat for `postgresql`, `mysql`, `mariadb`, `mongodb` and
+`mongodb+srv`):
+
+```text
+HKEY_CURRENT_USER\Software\Classes\postgres
+    (Default)      = "URL:PostgreSQL connection"
+    URL Protocol   = ""
+HKEY_CURRENT_USER\Software\Classes\postgres\shell\open\command
+    (Default)      = "C:\Users\<you>\AppData\Local\Programs\Deltos\deltos.exe" "%1"
+```
+
+In Inno Setup that is one `[Registry]` group per scheme under `HKA\Software\Classes`, with
+`Flags: uninsdeletekey` on the scheme key.
+
+The connection list's menu imports connections from other tools (`import/`): DBeaver's
+`data-sources*.json`, the `dataSources.xml` (with `dataSources.local.xml` and
+`sshConfigs.xml` beside it) of DataGrip and the other JetBrains IDEs, and TablePlus
+connection lists. It looks in each tool's usual folders and takes a picked file too, then
+lists what it found with the duplicates (same kind, host, port, database, user and SSH
+host) and unsupported databases left out. Passwords are never imported or decrypted.
+
 The `Theme` global (`theme.rs`) is computed once per change from the appearance settings,
 the system appearance and an optional theme file (see [THEMES.md](THEMES.md)). Views copy the
 colors they need from it; nothing parses colors while drawing.

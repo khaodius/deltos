@@ -4,7 +4,9 @@
 
 mod demo;
 mod history_file;
+mod import;
 mod lang;
+mod link;
 mod net;
 mod safety;
 mod session;
@@ -195,6 +197,7 @@ pub struct Root {
     updates: Entity<UpdateModel>,
     palette: Entity<PaletteLayer>,
     layouts: Entity<LayoutMenu>,
+    password: Entity<ui::password::PasswordPrompt>,
     /// Whether the window was opened without the system title bar. Windows cannot drop or
     /// restore it on an open window, so the setting applies there from the next start.
     own_bar: bool,
@@ -212,6 +215,7 @@ impl Root {
         cx: &mut Context<Self>,
     ) -> Self {
         let dock = cx.new(|cx| DockView::new(workspace.clone(), TreeId::Main, cx));
+        let password = cx.new(|cx| ui::password::PasswordPrompt::new(state.clone(), cx));
         let subs = vec![
             cx.subscribe_in(
                 &state,
@@ -244,9 +248,13 @@ impl Root {
                         }
                         cx.notify();
                     }
-                    StateEvent::Sessions | StateEvent::ActiveSession | StateEvent::Update => {
+                    StateEvent::Sessions => {
+                        if state.read(cx).password_request.is_some() {
+                            this.password.update(cx, |p, cx| p.show(window, cx));
+                        }
                         cx.notify()
                     }
+                    StateEvent::ActiveSession | StateEvent::Update => cx.notify(),
                     _ => {}
                 },
             ),
@@ -296,6 +304,7 @@ impl Root {
             updates,
             palette,
             layouts,
+            password,
             focus,
             _subs: subs,
         }
@@ -538,9 +547,11 @@ impl Render for Root {
                 )
                 .child(self.toolbar(cx))
         });
+        let asking = self.state.read(cx).password_request.is_some();
         div()
             .id("root")
             .key_context("Workspace")
+            .relative()
             .size_full()
             .flex()
             .flex_col()
@@ -632,6 +643,20 @@ impl Render for Root {
             })
             .child(self.palette.clone())
             .child(ui::transfer::overlay(cx))
+            .when(asking, |el| {
+                el.child(
+                    div()
+                        .id("password-backdrop")
+                        .absolute()
+                        .inset_0()
+                        .occlude()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(t.base.opacity(0.6))
+                        .child(self.password.clone()),
+                )
+            })
     }
 }
 
@@ -750,6 +775,38 @@ fn open_main_window(
     Ok(handle)
 }
 
+/// Opens the connection link Deltos was started with, or says why it can't. Returns the
+/// id of the connection it opens.
+fn open_link(
+    arg: &str,
+    state: &Entity<AppState>,
+    window: gpui::WindowHandle<Root>,
+    cx: &mut App,
+) -> Option<String> {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    match link::parse(arg, &cwd) {
+        Ok(found) => Some(state.update(cx, |s, cx| s.open_link(found, cx))),
+        Err(e) => {
+            tracing::warn!("{e}");
+            window
+                .update(cx, |_, window, cx| {
+                    let answer = window.prompt(
+                        gpui::PromptLevel::Warning,
+                        "Deltos can't open this link",
+                        Some(&e),
+                        &["OK"],
+                        cx,
+                    );
+                    // The prompt only informs; its answer needs no handling.
+                    cx.background_spawn(async move { answer.await.ok() })
+                        .detach();
+                })
+                .ok();
+            None
+        }
+    }
+}
+
 /// Writes the panic message and a backtrace to `path` before the process ends, so a crash
 /// on a desktop without a terminal still leaves something to report.
 fn install_crash_log(path: std::path::PathBuf) {
@@ -799,6 +856,8 @@ fn main() {
         install_crash_log(p.crash_log());
     }
     let demo = std::env::var("DELTOS_DEMO").ok().filter(|v| !v.is_empty());
+    // `deltos postgres://...` or `deltos app.db`: a connection to open.
+    let link = link::from_args(std::env::args_os());
     let mut settings = load_settings(paths.as_ref());
     if demo.is_some() {
         // The demo always starts from the default layout, so screenshots are stable.
@@ -806,6 +865,12 @@ fn main() {
         settings.layout.main_window = None;
     } else if !settings.session.restore {
         settings.layout = settings.layout.without_documents();
+    } else {
+        // Tabs of connections opened from a link, or deleted, are not restored.
+        let layout = settings
+            .layout
+            .keeping_connections(|id| id == state::DEMO_ID || settings.connection(id).is_some());
+        settings.layout = layout;
     }
     let net = match Net::new() {
         Ok(n) => n,
@@ -842,14 +907,19 @@ fn main() {
             })
             .detach();
             match open_main_window(state.clone(), workspace.clone(), updates, cx) {
-                Ok(_) => {
+                Ok(window) => {
                     workspace.update(cx, |w, cx| {
                         w.restore_windows(cx);
                         if let Some(screen) = demo.as_deref() {
                             w.start_demo(screen, cx);
                         }
                     });
-                    session::init(&state, &workspace, cx);
+                    // A link names the connection to work on: it opens first, and the
+                    // last session's connections open around it without taking over.
+                    let linked = link
+                        .as_deref()
+                        .and_then(|arg| open_link(arg, &state, window, cx));
+                    session::init(&state, &workspace, linked, cx);
                 }
                 Err(e) => {
                     eprintln!("deltos: could not open a window: {e}");

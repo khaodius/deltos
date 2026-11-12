@@ -42,7 +42,7 @@ impl Environment {
                 read_only: s.read_only,
             });
         }
-        state.settings.connection(id).map(|c| Self {
+        state.saved_or_unsaved(id).map(|c| Self {
             name: c.name.clone(),
             kind: c.kind,
             tag: c.tag,

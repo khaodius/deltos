@@ -105,6 +105,11 @@ with a key, the ssh-agent or a password. Deltos opens the tunnel on a free local
 the host key against `~/.ssh/known_hosts`, reconnects when the link drops and closes it on
 disconnect. No OpenSSH client is needed, and a test says whether SSH or the database failed.
 
+Connections can be imported from DBeaver, DataGrip and TablePlus from the connection list's
+menu; passwords are asked for on first connect. `deltos postgres://user@host/db`, or any
+`mysql://`, `mariadb://`, `mongodb://` or `sqlite:///` link or SQLite file, opens that
+connection directly.
+
 ## Query editor
 
 The editor suggests tables, columns, keywords and functions as you type, aliases included.

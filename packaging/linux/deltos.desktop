@@ -10,3 +10,4 @@ Categories=Development;Database;
 Keywords=database;sql;postgres;postgresql;mysql;mariadb;sqlite;mongodb;query;table;
 StartupWMClass=deltos
 StartupNotify=true
+MimeType=x-scheme-handler/postgres;x-scheme-handler/postgresql;x-scheme-handler/mysql;x-scheme-handler/mariadb;x-scheme-handler/mongodb;x-scheme-handler/mongodb+srv;x-scheme-handler/sqlite;application/vnd.sqlite3;application/x-sqlite3;

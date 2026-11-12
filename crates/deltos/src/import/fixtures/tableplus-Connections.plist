@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<array>
+	<dict>
+		<key>ConnectionName</key>
+		<string>Analytics staging</string>
+		<key>DatabaseHost</key>
+		<string>pg.stage.internal</string>
+		<key>DatabaseName</key>
+		<string>analytics</string>
+		<key>DatabasePort</key>
+		<string>6432</string>
+		<key>DatabaseUser</key>
+		<string>analyst</string>
+		<key>Driver</key>
+		<string>PostgreSQL</string>
+		<key>Enviroment</key>
+		<string>staging</string>
+		<key>ID</key>
+		<string>0F0E0D0C-1234-5678-9ABC-DEF012345678</string>
+		<key>isOverSSH</key>
+		<false/>
+		<key>tLSMode</key>
+		<integer>1</integer>
+	</dict>
+	<dict>
+		<key>ConnectionName</key>
+		<string>Events</string>
+		<key>DatabaseHost</key>
+		<string>mongo.example.com</string>
+		<key>DatabaseName</key>
+		<string>events</string>
+		<key>DatabasePort</key>
+		<string>27017</string>
+		<key>DatabaseUser</key>
+		<string>reader</string>
+		<key>Driver</key>
+		<string>MongoDB</string>
+		<key>Enviroment</key>
+		<string>production</string>
+		<key>isOverSSH</key>
+		<true/>
+		<key>ServerAddress</key>
+		<string>jump.example.com</string>
+		<key>ServerPort</key>
+		<string>2222</string>
+		<key>ServerUser</key>
+		<string>ops</string>
+	</dict>
+</array>
+</plist>

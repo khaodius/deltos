@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="dataSourceStorageLocal" created-in="DB-243.21565.180">
+    <data-source name="shop@db.shop.example.com" uuid="2b7c9e1a-1f0e-4c55-9d0a-6f3c1a2b3c4d">
+      <database-info product="PostgreSQL" version="16.4" jdbc-version="4.2" driver-name="PostgreSQL JDBC Driver" driver-version="42.7.3" dbms="POSTGRES" exact-version="16.4" exact-driver-version="42.7">
+        <identifier-quote-string>&quot;</identifier-quote-string>
+      </database-info>
+      <case-sensitivity plain-identifiers="lower" quoted-identifiers="exact" />
+      <secret-storage>master_key</secret-storage>
+      <user-name>shop_admin</user-name>
+      <schema-mapping>
+        <introspection-scope>
+          <node kind="database" qname="@">
+            <node kind="schema" qname="@" />
+          </node>
+        </introspection-scope>
+      </schema-mapping>
+      <ssh-properties>
+        <enabled>true</enabled>
+        <ssh-config-id>5a6b7c8d-0000-1111-2222-333344445555</ssh-config-id>
+      </ssh-properties>
+    </data-source>
+    <data-source name="app@localhost" uuid="7d1e2f3a-4b5c-6d7e-8f90-a1b2c3d4e5f6">
+      <secret-storage>master_key</secret-storage>
+      <user-name>root</user-name>
+      <ssh-properties>
+        <enabled>true</enabled>
+        <proxy-host>jump.example.com</proxy-host>
+        <port>2200</port>
+        <user>deploy</user>
+        <auth-type>OPEN_SSH</auth-type>
+      </ssh-properties>
+    </data-source>
+  </component>
+</project>

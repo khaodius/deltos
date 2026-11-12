@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<application>
+  <component name="SshConfigs">
+    <configs>
+      <sshConfig authType="KEY_PAIR" host="bastion.example.com" id="5a6b7c8d-0000-1111-2222-333344445555" keyPath="$USER_HOME$/.ssh/id_ed25519" port="2222" nameFormat="DESCRIPTIVE" username="me" />
+    </configs>
+  </component>
+</application>
