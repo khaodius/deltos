@@ -36,6 +36,9 @@ use crate::ui::text_input::{InputEvent, TextInput};
 use crate::ui::tsv;
 use crate::ui::{MenuItem, context_menu};
 
+mod links;
+pub use links::Links;
+
 actions!(
     grid,
     [
@@ -170,6 +173,8 @@ pub enum GridEvent {
         outside: usize,
         limited: bool,
     },
+    /// The arrow of a foreign key cell was clicked.
+    FollowLink { row: u64, col: usize },
 }
 
 /// What changed several cells at once.
@@ -215,6 +220,11 @@ impl<'a> Shown<'a> {
             },
             Shown::Loading => None,
         }
+    }
+
+    /// Whether `col` shows a value that is not NULL, as a foreign key needs.
+    fn present(&self, col: usize) -> bool {
+        matches!(self.cell(col), Some((Some(v), _)) if !v.is_null())
     }
 
     fn mark(&self) -> RowMark {
@@ -361,6 +371,8 @@ pub struct GridView {
     pub pending: PendingChanges,
     /// The staged state the formatted texts were made from.
     pending_seen: u64,
+    /// The foreign keys whose cells show an arrow.
+    links: Links,
     _pump: Option<Task<()>>,
 }
 
@@ -388,7 +400,16 @@ impl GridView {
             menu_provider: None,
             pending: PendingChanges::default(),
             pending_seen: 0,
+            links: Links::default(),
             _pump: None,
+        }
+    }
+
+    /// Sets which columns form foreign keys, whose cells then show an arrow.
+    pub fn set_links(&mut self, links: Links, cx: &mut Context<Self>) {
+        if self.links != links {
+            self.links = links;
+            cx.notify();
         }
     }
 
@@ -934,6 +955,22 @@ impl GridView {
             row.min(total - 1),
             col.unwrap_or(self.columns.len().saturating_sub(1)),
         ))
+    }
+
+    /// Whether `p`, in window coordinates, is on the foreign key arrow of `cell`.
+    fn on_arrow(&self, p: Point<Pixels>, (row, col): (u64, usize), t: &Theme) -> bool {
+        let Some(body) = self.body.get() else {
+            return false;
+        };
+        let right: f32 = (0..=col).map(|c| self.width(c, t)).sum::<f32>() - self.scroll_x;
+        let x = f32::from(p.x - body.left());
+        x >= right - links::ARROW
+            && x < right
+            && self
+                .with_shown(row, |shown| {
+                    self.links.shows_with(col, |k| shown.present(k))
+                })
+                .unwrap_or(false)
     }
 
     fn select(&mut self, cell: (u64, usize), extend: bool, cx: &mut Context<Self>) {
@@ -1571,6 +1608,8 @@ struct PaintRow {
     mark: RowMark,
     /// Per visible column: the text, its style, and whether it is a staged value.
     cells: Option<Vec<(SharedString, CellKind, bool)>>,
+    /// Which visible cells show a foreign key arrow; empty when none do.
+    links: Vec<bool>,
 }
 
 const DEFAULT_TEXT: SharedString = SharedString::new_static("DEFAULT");
@@ -1639,7 +1678,7 @@ impl Render for GridView {
             // Only the visible columns are looked at, and a cell already formatted is
             // reused, so nothing is copied out of the cache. Staged changes are found by
             // the row's key without copying it.
-            let (texts, columns) = (&mut self.texts, &self.columns);
+            let (texts, columns, links) = (&mut self.texts, &self.columns, &self.links);
             each_row(
                 self.cache.as_deref(),
                 &self.pending,
@@ -1658,11 +1697,21 @@ impl Render for GridView {
                             })
                             .collect()
                     });
+                    // A key shows its arrow by the values as shown, staged ones in.
+                    let links = if links.is_empty() || matches!(shown, Shown::Loading) {
+                        Vec::new()
+                    } else {
+                        visible
+                            .iter()
+                            .map(|(c, _, _)| links.shows_with(*c, |k| shown.present(k)))
+                            .collect()
+                    };
                     rows.push(PaintRow {
                         index: i,
                         y: (i - first) as f32 * rh - offset,
                         mark: shown.mark(),
                         cells,
+                        links,
                     });
                 },
             );
@@ -1730,6 +1779,10 @@ impl Render for GridView {
                                     let Some((text, kind, _)) = cells.get(n) else {
                                         continue;
                                     };
+                                    let link = r.links.get(n).copied().unwrap_or(false);
+                                    if link {
+                                        links::paint_arrow(cell, &t, window, cx);
+                                    }
                                     if text.is_empty() {
                                         continue;
                                     }
@@ -1759,14 +1812,18 @@ impl Render for GridView {
                                         None,
                                     );
                                     let pad = px(8.);
+                                    let arrow = if link { px(links::ARROW) } else { px(0.) };
                                     let tx = if *kind == CellKind::Number {
-                                        cell.right() - pad - line.width
+                                        cell.right() - pad - arrow - line.width
                                     } else {
                                         cell.left() + pad
                                     };
                                     let clip = Bounds {
                                         origin: point(cell.left() + px(4.), cell.top()),
-                                        size: size(cell.size.width - px(8.), cell.size.height),
+                                        size: size(
+                                            cell.size.width - px(8.) - arrow,
+                                            cell.size.height,
+                                        ),
                                     };
                                     window.with_content_mask(
                                         Some(gpui::ContentMask { bounds: clip }),
@@ -2133,6 +2190,19 @@ impl Render for GridView {
                                 window.focus(&this.focus);
                                 return;
                             };
+                            if !e.modifiers.shift && this.on_arrow(e.position, cell, &t) {
+                                // The arrow follows the key; a second click of a double
+                                // click does nothing more.
+                                window.focus(&this.focus);
+                                if e.click_count == 1 {
+                                    this.select(cell, false, cx);
+                                    cx.emit(GridEvent::FollowLink {
+                                        row: cell.0,
+                                        col: cell.1,
+                                    });
+                                }
+                                return;
+                            }
                             if e.click_count >= 2 && this.editable && !e.modifiers.shift {
                                 this.drag = None;
                                 this.begin_edit(cell, window, cx);

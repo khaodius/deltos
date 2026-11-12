@@ -387,6 +387,41 @@ pub(super) async fn describe(
         });
     }
 
+    // The keys of other tables that point here, with this table's columns first.
+    let incoming_rows = session
+        .query(
+            "SELECT con.conname::text, \
+                    ARRAY(SELECT a.attname::text FROM unnest(con.confkey) WITH ORDINALITY AS k(n, i) \
+                          JOIN pg_catalog.pg_attribute a ON a.attrelid = con.confrelid AND a.attnum = k.n ORDER BY k.i), \
+                    n.nspname::text, c.relname::text, \
+                    ARRAY(SELECT a.attname::text FROM unnest(con.conkey) WITH ORDINALITY AS k(n, i) \
+                          JOIN pg_catalog.pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.n ORDER BY k.i) \
+             FROM pg_catalog.pg_constraint con \
+             JOIN pg_catalog.pg_class c ON c.oid = con.conrelid \
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             JOIN pg_catalog.pg_class tc ON tc.oid = con.confrelid \
+             JOIN pg_catalog.pg_namespace tn ON tn.oid = tc.relnamespace \
+             WHERE con.contype = 'f' AND tn.nspname = $1 AND tc.relname = $2 \
+             ORDER BY n.nspname, c.relname, con.conname",
+            &params,
+        )
+        .await?;
+    let mut referenced_by = Vec::new();
+    for row in incoming_rows {
+        referenced_by.push(ForeignKey {
+            name: row.try_get(0).map_err(pg_error)?,
+            columns: row.try_get(1).map_err(pg_error)?,
+            target: ObjectRef {
+                namespace: vec![db.to_string(), row.try_get(2).map_err(pg_error)?],
+                name: row.try_get(3).map_err(pg_error)?,
+                kind: ObjectKind::Table,
+            },
+            target_columns: row.try_get(4).map_err(pg_error)?,
+            on_delete: ForeignKeyAction::default(),
+            on_update: ForeignKeyAction::default(),
+        });
+    }
+
     let definition = match info.relkind.as_str() {
         "v" | "m" => {
             let rows = session
@@ -421,6 +456,7 @@ pub(super) async fn describe(
         columns: info.columns.iter().map(|c| c.column()).collect(),
         indexes,
         foreign_keys,
+        referenced_by,
         estimated_rows: info.estimated_rows,
         size_bytes: info.size_bytes,
         comment: info.comment.clone(),

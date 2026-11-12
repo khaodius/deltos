@@ -370,6 +370,7 @@ impl Inner {
             columns,
             indexes,
             foreign_keys: Vec::new(),
+            referenced_by: Vec::new(),
             estimated_rows: stats.count,
             size_bytes: stats.size,
             comment: None,

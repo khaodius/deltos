@@ -1,6 +1,7 @@
 //! What each table showed last in this session: its sort and its filter bar, so a table
 //! closed and opened again comes back as it was left. Kept in memory only, by connection
-//! and object.
+//! and object. Also the filters asked for a table about to be shown, such as the rows a
+//! foreign key leads to.
 
 use std::collections::HashMap;
 
@@ -49,6 +50,8 @@ type Key = (String, ObjectRef);
 #[derive(Default)]
 struct TableMemory {
     views: HashMap<Key, SavedView>,
+    /// Filters to put in place when the table is next shown.
+    requests: HashMap<Key, Vec<SavedCondition>>,
 }
 
 impl Global for TableMemory {}
@@ -72,4 +75,33 @@ pub fn recall(cx: &App, connection: &str, object: &ObjectRef) -> Option<SavedVie
         .views
         .get(&(connection.to_owned(), object.clone()))
         .cloned()
+}
+
+/// Asks the table to show only the rows matching `conditions` when it is next shown,
+/// whether it is open already or about to open.
+pub fn request(
+    cx: &mut App,
+    connection: &str,
+    object: &ObjectRef,
+    conditions: Vec<SavedCondition>,
+) {
+    let requests = &mut memory(cx).requests;
+    if requests.len() >= MAX_TABLES {
+        requests.clear();
+    }
+    requests.insert((connection.to_owned(), object.clone()), conditions);
+}
+
+/// The filters asked for the table, once.
+pub fn take_request(
+    cx: &mut App,
+    connection: &str,
+    object: &ObjectRef,
+) -> Option<Vec<SavedCondition>> {
+    if cx.try_global::<TableMemory>()?.requests.is_empty() {
+        return None;
+    }
+    memory(cx)
+        .requests
+        .remove(&(connection.to_owned(), object.clone()))
 }

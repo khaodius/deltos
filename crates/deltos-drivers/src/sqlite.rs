@@ -1150,6 +1150,7 @@ fn describe(conn: &rusqlite::Connection, object: &ObjectRef) -> Result<ObjectInf
     }
 
     let foreign_keys = foreign_keys(conn, schema, name)?;
+    let referenced_by = referenced_by(conn, schema, name)?;
     let estimated_rows = table_stats(conn, schema)
         .into_iter()
         .find(|(t, _)| t.eq_ignore_ascii_case(name))
@@ -1158,6 +1159,7 @@ fn describe(conn: &rusqlite::Connection, object: &ObjectRef) -> Result<ObjectInf
         columns,
         indexes,
         foreign_keys,
+        referenced_by,
         estimated_rows,
         size_bytes: None,
         comment: None,
@@ -1233,6 +1235,96 @@ fn foreign_keys(conn: &rusqlite::Connection, schema: &str, table: &str) -> Resul
         }
     }
     Ok(out.into_iter().map(|(_, fk)| fk).collect())
+}
+
+/// The other tables' keys that point at `table`, with its columns first. A key that names
+/// no columns points at the primary key.
+fn referenced_by(
+    conn: &rusqlite::Connection,
+    schema: &str,
+    table: &str,
+) -> Result<Vec<ForeignKey>> {
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT m.name, f.id, f.\"from\", f.\"to\" \
+             FROM {} AS m, pragma_foreign_key_list(m.name, ?1) AS f \
+             WHERE m.type = 'table' AND f.\"table\" = ?2 COLLATE NOCASE \
+             ORDER BY m.name, f.id, f.seq",
+            master(schema)
+        ))
+        .map_err(error)?;
+    let rows = stmt
+        .query_map([schema, table], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })
+        .map_err(error)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(error)?;
+    let mut key: Option<Vec<String>> = None;
+    let mut out: Vec<(i64, ForeignKey)> = Vec::new();
+    for (source, id, from, to) in rows {
+        let to = match to {
+            Some(to) => to,
+            None => {
+                if key.is_none() {
+                    let mut stmt = conn
+                        .prepare(
+                            "SELECT name FROM pragma_table_info(?1, ?2) WHERE pk > 0 ORDER BY pk",
+                        )
+                        .map_err(error)?;
+                    key = Some(
+                        stmt.query_map([table, schema], |row| row.get::<_, String>(0))
+                            .map_err(error)?
+                            .collect::<rusqlite::Result<Vec<_>>>()
+                            .map_err(error)?,
+                    );
+                }
+                let at = out
+                    .iter()
+                    .find(|(i, fk)| *i == id && fk.target.name == source)
+                    .map_or(0, |(_, fk)| fk.columns.len());
+                key.as_ref()
+                    .and_then(|k| k.get(at))
+                    .cloned()
+                    .unwrap_or_default()
+            }
+        };
+        match out
+            .iter_mut()
+            .find(|(i, fk)| *i == id && fk.target.name == source)
+        {
+            Some((_, fk)) => {
+                fk.columns.push(to);
+                fk.target_columns.push(from);
+            }
+            None => out.push((
+                id,
+                ForeignKey {
+                    name: format!("fk_{source}_{id}"),
+                    columns: vec![to],
+                    target: ObjectRef {
+                        namespace: vec![schema.to_string()],
+                        name: source,
+                        kind: ObjectKind::Table,
+                    },
+                    target_columns: vec![from],
+                    on_delete: ForeignKeyAction::default(),
+                    on_update: ForeignKeyAction::default(),
+                },
+            )),
+        }
+    }
+    // A key whose columns could not all be named cannot be followed.
+    Ok(out
+        .into_iter()
+        .map(|(_, fk)| fk)
+        .filter(|fk| !fk.columns.iter().any(String::is_empty))
+        .collect())
 }
 
 fn apply_edits(conn: &rusqlite::Connection, object: &ObjectRef, edits: &[RowEdit]) -> Result<u64> {

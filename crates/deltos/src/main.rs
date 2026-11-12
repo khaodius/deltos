@@ -168,6 +168,9 @@ pub fn rebind_keys(settings: &Settings, cx: &mut App) {
                 KeyBinding::new(keys, ui::table::FocusFilter, ctx)
             }
             "save-query" => KeyBinding::new(keys, ui::query::SaveQuery, Some("QueryPanel")),
+            "follow-reference" => {
+                KeyBinding::new(keys, ui::table::FollowReference, Some("TablePanel > Grid"))
+            }
             _ => continue,
         };
         bindings.push(binding);

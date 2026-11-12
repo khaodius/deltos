@@ -573,6 +573,7 @@ pub const KEYBIND_ACTIONS: &[(&str, &str, &str)] = &[
     ("jump-left", "ctrl-left", "Go to the first column"),
     ("jump-right", "ctrl-right", "Go to the last column"),
     ("focus-filter", "ctrl-f", "Filter rows"),
+    ("follow-reference", "ctrl-enter", "Open the referenced row"),
 ];
 
 impl Default for Keybinds {
