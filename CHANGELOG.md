@@ -4,6 +4,16 @@ Packages for every version are attached to its
 [release](https://github.com/khaodius/deltos/releases), with SHA-256 checksums and a signed
 update manifest.
 
+## 0.1.17 - 2026-11-12
+
+- **Starts on Wayland again.** Deltos no longer aborts at start with "RefCell already
+  borrowed" on Wayland desktops. The system's light or dark setting, which the desktop
+  reports as the window opens, is now taken after the window system has finished with it.
+  The same change keeps a light or dark switch while Deltos runs from crashing on X11.
+- **Wide tables fill at once.** When a panel closes and a table beside it grows, the table
+  draws its new rows and columns in the next frame instead of leaving the new space empty
+  until the pointer moves or more rows load.
+
 ## 0.1.16 - 2026-11-11
 
 - **Dark mode with Obsidian by default.** Deltos now starts in dark mode with the Obsidian
