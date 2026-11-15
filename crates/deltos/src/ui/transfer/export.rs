@@ -1,5 +1,6 @@
-//! Exporting a table, its filtered view or a query result to a file: CSV, JSON, SQL
-//! `INSERT` statements or Markdown. Rows stream from the database through
+//! Exporting a table, its filtered view, a query result or a whole database to a file:
+//! CSV, JSON, SQL `INSERT` statements or Markdown. A database goes through
+//! [`super::database`]: SQL to one file, the other formats to a folder. Rows stream from the database through
 //! [`deltos_grid::export`] one page at a time into a temporary file next to the target,
 //! which is renamed over the target when every row is written, so a cancelled or failed
 //! export never leaves half a file under the name the person chose.
@@ -44,6 +45,48 @@ pub enum Source {
     },
     /// The open result of a query tab.
     Result { loader: Arc<StreamLoader> },
+    /// Every table and collection under these namespace paths (all of them when empty),
+    /// called `label`.
+    Database {
+        under: Vec<Vec<String>>,
+        label: String,
+    },
+}
+
+impl Source {
+    fn is_database(&self) -> bool {
+        matches!(self, Source::Database { .. })
+    }
+}
+
+/// How each file's rows are written, kept apart from the dialog so a database export can
+/// make a writer per table on its own thread.
+#[derive(Debug, Clone)]
+enum WriterSpec {
+    Csv(CsvFormat),
+    Json(JsonStyle),
+    Markdown,
+    Sql {
+        kind: DriverKind,
+        rows: usize,
+        create: bool,
+    },
+}
+
+impl WriterSpec {
+    /// The writer for rows of `object`, which a SQL format needs, with its `CREATE`
+    /// statement first when asked for and known.
+    fn make(&self, object: &ObjectRef, definition: Option<String>) -> Box<dyn RowWriter> {
+        match self {
+            WriterSpec::Csv(f) => Box::new(CsvWriter::new(f.clone())),
+            WriterSpec::Json(style) => Box::new(JsonWriter::new(*style, false)),
+            WriterSpec::Markdown => Box::new(MarkdownWriter::new()),
+            WriterSpec::Sql { kind, rows, create } => Box::new(
+                InsertWriter::new(*kind, object, *rows)
+                    .with_preamble(create.then_some(definition).flatten()),
+            ),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,6 +190,14 @@ impl ExportDialog {
         let name = match &source {
             Source::Table { object, .. } => object.name.clone(),
             Source::Result { .. } => "query_result".to_owned(),
+            Source::Database { label, .. } => label.clone(),
+        };
+        // A database goes out as a SQL dump where there is SQL, else as JSON files.
+        let database = source.is_database();
+        let format = match () {
+            _ if database && edit::speaks_sql(kind) => Format::Sql,
+            _ if database => Format::Json,
+            _ => Format::Csv,
         };
         let input = |cx: &mut Context<Self>, placeholder: &str, text: String| {
             cx.new(|cx| {
@@ -158,7 +209,11 @@ impl ExportDialog {
         let null_text = input(cx, "Empty", String::new());
         let rows_per_statement = input(cx, "Rows", default_rows_per_statement(kind).to_string());
         let table_name = input(cx, "Table", name.clone());
-        let file = default_dir().join(format!("{}.csv", safe_file_name(&name)));
+        let file = match format {
+            Format::Sql if database => default_dir().join(format!("{}.sql", safe_file_name(&name))),
+            _ if database => super::database::default_folder(&default_dir(), &name),
+            _ => default_dir().join(format!("{}.csv", safe_file_name(&name))),
+        };
         let path = input(cx, "File", file.to_string_lossy().into_owned());
         let mut subs = Vec::new();
         for i in [&null_text, &rows_per_statement, &table_name, &path] {
@@ -199,13 +254,13 @@ impl ExportDialog {
             source,
             name,
             page_rows: page_rows.max(1),
-            format: Format::Csv,
+            format,
             scope,
             delimiter: b',',
             header: true,
             quote: QuoteStyle::Necessary,
             json: JsonStyle::Array,
-            create_table: false,
+            create_table: database,
             definition: None,
             null_text,
             rows_per_statement,
@@ -223,7 +278,13 @@ impl ExportDialog {
         match &self.source {
             Source::Table { object, .. } => format!("Export {}", object.name),
             Source::Result { .. } => "Export the query result".to_owned(),
+            Source::Database { label, .. } => format!("Export {label}"),
         }
+    }
+
+    /// A database in any format but SQL goes to a folder, a file per table.
+    fn to_folder(&self) -> bool {
+        self.source.is_database() && self.format != Format::Sql
     }
 
     /// Puts the format's extension on the file name, when it has one of ours.
@@ -234,7 +295,19 @@ impl ExportDialog {
             .extension()
             .and_then(|e| e.to_str())
             .is_some_and(|e| EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()));
-        if known {
+        if self.source.is_database() {
+            // The dump is a file; the other formats fill a folder of that name.
+            let new = match (self.format, known) {
+                (Format::Sql, _) => Some(path.with_extension("sql")),
+                (_, true) => Some(path.with_extension("")),
+                (_, false) => None,
+            };
+            if let Some(new) = new.filter(|n| *n != path) {
+                self.path.update(cx, |i, cx| {
+                    i.set_text(new.to_string_lossy().into_owned(), cx)
+                });
+            }
+        } else if known {
             let new = path.with_extension(self.format.extension(self.json, self.delimiter));
             self.path.update(cx, |i, cx| {
                 i.set_text(new.to_string_lossy().into_owned(), cx)
@@ -245,6 +318,10 @@ impl ExportDialog {
     }
 
     fn choose(&mut self, cx: &mut Context<Self>) {
+        if self.to_folder() {
+            self.choose_folder(cx);
+            return;
+        }
         let current = PathBuf::from(self.path.read(cx).text());
         let dir = current
             .parent()
@@ -272,17 +349,47 @@ impl ExportDialog {
         .detach();
     }
 
-    fn writer(&self, cx: &App) -> Result<Box<dyn RowWriter>, String> {
+    /// A folder for the files of a database export, with the system's picker.
+    fn choose_folder(&mut self, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Export here".into()),
+        });
+        let name = safe_file_name(&self.name);
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = paths.await else {
+                return;
+            };
+            let Some(dir) = paths.into_iter().next() else {
+                return;
+            };
+            this.update(cx, |this, cx| {
+                // A folder for this database inside the one picked.
+                let path = dir.join(name);
+                this.path.update(cx, |i, cx| {
+                    i.set_text(path.to_string_lossy().into_owned(), cx)
+                });
+                this.confirm_replace = false;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn writer_spec(&self, cx: &App) -> Result<WriterSpec, String> {
         Ok(match self.format {
-            Format::Csv => Box::new(CsvWriter::new(CsvFormat {
+            Format::Csv => WriterSpec::Csv(CsvFormat {
                 delimiter: self.delimiter,
                 header: self.header,
                 quote: self.quote,
                 null_text: self.null_text.read(cx).text().to_owned(),
                 line_end: "\r\n",
-            })),
-            Format::Json => Box::new(JsonWriter::new(self.json, false)),
-            Format::Markdown => Box::new(MarkdownWriter::new()),
+            }),
+            Format::Json => WriterSpec::Json(self.json),
+            Format::Markdown => WriterSpec::Markdown,
             Format::Sql => {
                 let rows = self.rows_per_statement.read(cx).text().trim();
                 let rows: usize = rows
@@ -290,24 +397,81 @@ impl ExportDialog {
                     .ok()
                     .filter(|n| (1..=100_000).contains(n))
                     .ok_or("Rows per INSERT needs a whole number from 1 to 100,000.")?;
-                let object = match &self.source {
-                    Source::Table { object, .. } => object.clone(),
-                    Source::Result { .. } => {
-                        let name = self.table_name.read(cx).text().trim().to_owned();
-                        if name.is_empty() {
-                            return Err("Name the table the INSERT statements go into.".into());
-                        }
-                        ObjectRef {
-                            namespace: Vec::new(),
-                            name,
-                            kind: ObjectKind::Table,
-                        }
-                    }
-                };
-                let preamble = self.create_table.then(|| self.definition.clone()).flatten();
-                Box::new(InsertWriter::new(self.kind, &object, rows).with_preamble(preamble))
+                WriterSpec::Sql {
+                    kind: self.kind,
+                    rows,
+                    create: self.create_table,
+                }
             }
         })
+    }
+
+    fn writer(&self, cx: &App) -> Result<Box<dyn RowWriter>, String> {
+        let spec = self.writer_spec(cx)?;
+        let object = match &self.source {
+            Source::Table { object, .. } => object.clone(),
+            Source::Result { .. } | Source::Database { .. } => {
+                let name = self.table_name.read(cx).text().trim().to_owned();
+                if name.is_empty() && self.format == Format::Sql {
+                    return Err("Name the table the INSERT statements go into.".into());
+                }
+                ObjectRef {
+                    namespace: Vec::new(),
+                    name,
+                    kind: ObjectKind::Table,
+                }
+            }
+        };
+        Ok(spec.make(&object, self.definition.clone()))
+    }
+
+    /// Starts the export of a whole database to `path`: the dump file, or the folder.
+    fn start_database(&mut self, under: Vec<Vec<String>>, path: PathBuf, cx: &mut Context<Self>) {
+        let spec = match self.writer_spec(cx) {
+            Ok(s) => s,
+            Err(e) => {
+                self.error = Some(e.into());
+                cx.notify();
+                return;
+            }
+        };
+        let folder = self.to_folder();
+        let extension = self.format.extension(self.json, self.delimiter);
+        let describe = self.format == Format::Sql;
+        let (conn, page_rows) = (self.connection.clone(), self.page_rows);
+        let handle = cx.global::<Net>().handle();
+        let spec_job = JobSpec {
+            title: format!("Exporting {} to {}", self.name, file_label(&path)),
+            connection: self.connection_name.clone(),
+            unit: "rows",
+            window: self.window,
+            on_done: None,
+        };
+        start_job(
+            spec_job,
+            move |progress| {
+                let tables =
+                    match handle.block_on(super::database::tables(conn.as_ref(), &under, describe))
+                    {
+                        Ok(t) => t,
+                        Err(e) => {
+                            return Outcome::failed(format!("Could not list the tables: {e}"));
+                        }
+                    };
+                let make = |t: &super::database::Table| spec.make(&t.object, t.definition.clone());
+                let target = if folder {
+                    super::database::Target::Folder {
+                        dir: &path,
+                        extension,
+                    }
+                } else {
+                    super::database::Target::File(&path)
+                };
+                super::database::run(&handle, &conn, &tables, &make, page_rows, target, &progress)
+            },
+            cx,
+        );
+        close_dialog(cx);
     }
 
     fn start(&mut self, cx: &mut Context<Self>) {
@@ -318,6 +482,40 @@ impl ExportDialog {
             return;
         }
         let path = PathBuf::from(text);
+        if let Source::Database { under, .. } = &self.source
+            && self.to_folder()
+        {
+            if path.is_file() {
+                self.error = Some("That is a file; the tables go into a folder.".into());
+                cx.notify();
+                return;
+            }
+            let filled = std::fs::read_dir(&path).is_ok_and(|mut d| d.next().is_some());
+            if filled && !self.confirm_replace {
+                self.confirm_replace = true;
+                self.error = Some(
+                    format!(
+                        "{} has files in it. Export again to write into it; files named after \
+                         the tables are replaced.",
+                        file_label(&path)
+                    )
+                    .into(),
+                );
+                cx.notify();
+                return;
+            }
+            let parent_missing = path
+                .parent()
+                .is_some_and(|p| !p.as_os_str().is_empty() && !p.is_dir());
+            if parent_missing {
+                self.error = Some("The folder it goes in does not exist.".into());
+                cx.notify();
+                return;
+            }
+            let under = under.clone();
+            self.start_database(under, path, cx);
+            return;
+        }
         if path.is_dir() {
             self.error = Some("That is a folder; add a file name.".into());
             cx.notify();
@@ -338,6 +536,11 @@ impl ExportDialog {
             cx.notify();
             return;
         }
+        if let Source::Database { under, .. } = &self.source {
+            let under = under.clone();
+            self.start_database(under, path, cx);
+            return;
+        }
         let writer = match self.writer(cx) {
             Ok(w) => w,
             Err(e) => {
@@ -352,7 +555,7 @@ impl ExportDialog {
         let expect = match (&self.source, self.scope) {
             (Source::Table { .. }, Scope::Everything) => true,
             (Source::Table { view, .. }, Scope::View) => !view.as_ref().is_some_and(narrows),
-            (Source::Result { .. }, _) => false,
+            (Source::Result { .. } | Source::Database { .. }, _) => false,
         };
         let (loader, stream, options): (Arc<dyn PageLoader>, Option<Arc<StreamLoader>>, _) =
             match &self.source {
@@ -389,6 +592,7 @@ impl ExportDialog {
                         columns: None,
                     },
                 ),
+                Source::Database { .. } => return,
             };
         let handle = cx.global::<Net>().handle();
         let spec = JobSpec {
@@ -554,7 +758,8 @@ impl ExportDialog {
                         .into_any_element(),
                     );
                 } else {
-                    let available = self.definition.is_some();
+                    let database = self.source.is_database();
+                    let available = database || self.definition.is_some();
                     rows.push(
                         option_row(
                             "CREATE first",
@@ -576,7 +781,9 @@ impl ExportDialog {
                                         .when(!available, |el| el.opacity(0.5).cursor_default()),
                                 )
                                 .child(note(
-                                    if available {
+                                    if database {
+                                        "Write each table's CREATE statement before its rows"
+                                    } else if available {
                                         "Write the table's CREATE statement before the rows"
                                     } else {
                                         "The database gave no CREATE statement for this object"
@@ -621,7 +828,7 @@ pub fn safe_file_name(name: &str) -> String {
 
 /// The temporary file an export writes before it is renamed to `path`. Each export gets
 /// its own, so two exports to the same file never write into one another.
-fn temp_path(path: &Path) -> PathBuf {
+pub(super) fn temp_path(path: &Path) -> PathBuf {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let name = path
         .file_name()
@@ -756,7 +963,7 @@ impl Render for ExportDialog {
         ));
         body = body.children(self.format_options(&t, cx, window));
         body = body.child(option_row(
-            "File",
+            if self.to_folder() { "Folder" } else { "File" },
             div()
                 .flex_1()
                 .flex()
@@ -809,6 +1016,12 @@ impl Render for ExportDialog {
                 count(loader.rows_read(), "row", "rows")
             )
             .into(),
+            Source::Database { .. } if self.to_folder() => {
+                "Every table and collection, a file each in this folder".into()
+            }
+            Source::Database { .. } => {
+                "Every table, its CREATE statement and rows, in one file".into()
+            }
         };
         div().track_focus(&self.focus).child(dialog_frame(
             self.title(),

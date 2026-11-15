@@ -4,6 +4,26 @@ Packages for every version are attached to its
 [release](https://github.com/khaodius/deltos/releases), with SHA-256 checksums and a signed
 update manifest.
 
+## 0.1.21 - 2026-11-15
+
+- **Open tables follow your SQL.** After a statement from a query tab changes data, every
+  open table of that connection reads its rows again in place, keeping the scroll
+  position, the selection and staged edits. `ALTER`, `CREATE`, `DROP` and renames also
+  describe the table again and refresh the objects list, so new columns and tables show
+  without closing anything.
+- **The editor clears after a run.** Once a run succeeds, the statements it ran are taken
+  out of the editor; other statements in it stay. A failed run keeps the text so it can be
+  fixed, and the history keeps everything. Settings → Editor → Clear the editor after a
+  run turns it off.
+- **Scroll bar in the objects panel.** The list of tables shows a scroll bar that can be
+  dragged or clicked to jump.
+- **Export a whole database.** The export button at the top of the objects panel, or
+  Export… on a database or schema, writes every table and collection: as SQL, one file
+  with each table's `CREATE` statement before its rows and tables that others refer to
+  first, so it runs back in order; as CSV, JSON or Markdown, a folder with a file per
+  table. On the command line, `deltos export <conn> --all` does the same, with
+  `--namespace` to pick a database or schema and `-o` for the file or folder.
+
 ## 0.1.20 - 2026-11-12
 
 - **Command line.** `deltos query`, `export`, `import`, `objects`, `test` and `connections`

@@ -200,6 +200,16 @@ impl TablePanel {
                     }
                     return;
                 }
+                if let StateEvent::DataChanged {
+                    connection,
+                    structure,
+                } = event
+                {
+                    if *connection == this.connection {
+                        this.changed_elsewhere(*structure, cx);
+                    }
+                    return;
+                }
                 if let StateEvent::Sessions = event {
                     // A connection opened again (after an SSH tunnel came back, or a
                     // reconnect) has a new handle; load from that one.
@@ -464,6 +474,25 @@ impl TablePanel {
             }
             Request::Discard => {}
         }
+    }
+
+    /// A statement from a query tab changed something on this table's connection. The
+    /// rows are read again where they are, keeping the scroll position, the selection and
+    /// staged changes (which are keyed by primary key). A change of structure, such as an
+    /// `ALTER`, describes the table again as if it had just been opened, since its columns
+    /// may differ.
+    fn changed_elsewhere(&mut self, structure: bool, cx: &mut Context<Self>) {
+        if self.loader.is_none() {
+            return;
+        }
+        if structure {
+            self.loader = None;
+            self.attach(cx);
+            return;
+        }
+        self.forget_count(cx);
+        self.reload(cx);
+        self.refresh_inspector(cx);
     }
 
     /// Reads the rows again where they are, keeping the selection, after a commit.
