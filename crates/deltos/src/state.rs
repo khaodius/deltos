@@ -35,6 +35,13 @@ pub enum StateEvent {
         request: crate::ui::table::Request,
     },
     History,
+    /// A statement run from a query tab changed what is stored on `connection`. Open
+    /// tables of that connection read their rows again; `structure` says that objects
+    /// may have been created, altered or dropped, so they describe themselves again too.
+    DataChanged {
+        connection: String,
+        structure: bool,
+    },
     /// The updater has something new to show.
     Update,
     /// A view asks the workspace to open or show a panel.
@@ -781,6 +788,31 @@ impl AppState {
             .ok();
         })
         .detach();
+    }
+
+    /// Says that a statement changed data on connection `id`, so whatever shows it reads
+    /// it again. A change of `structure` also lists the objects again, in the namespaces
+    /// already listed.
+    pub fn data_changed(&mut self, id: &str, structure: bool, cx: &mut Context<Self>) {
+        if structure {
+            let listed: Vec<Vec<String>> = self
+                .session(id)
+                .map(|s| {
+                    s.namespaces
+                        .iter()
+                        .filter(|n| n.objects.is_some())
+                        .map(|n| n.namespace.path.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+            for path in listed {
+                self.load_objects(id, &path, cx);
+            }
+        }
+        cx.emit(StateEvent::DataChanged {
+            connection: id.to_owned(),
+            structure,
+        });
     }
 
     pub fn load_objects(&mut self, id: &str, path: &[String], cx: &mut Context<Self>) {

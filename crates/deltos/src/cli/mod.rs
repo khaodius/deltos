@@ -57,6 +57,7 @@ Commands:
   objects <conn> [namespace] [--json]  list namespaces, or the objects in one
   query <conn> [-e SQL]... [-f FILE]   run statements and print their results
   export <conn> <table> [-o FILE]      write a table, view or collection's rows
+  export <conn> --all [-o FILE|DIR]    write every table of the database
   import <conn> <FILE> [--into TABLE]  load a CSV, TSV, JSON or SQL file
   help, version
 
@@ -81,6 +82,12 @@ Export:
   -o, --output FILE      the file to write; it is replaced only when the export
                          finishes. Without it rows go to standard output
   --where CONDITION      only rows matching this condition, in the database's syntax
+  --all                  every table and collection instead of one; --namespace
+                         narrows it to a database or schema. SQL is one dump file
+                         (or standard output) with each CREATE statement before its
+                         rows, tables that others refer to first; the other formats
+                         write a file per table into the -o folder. Default: sql,
+                         or json for MongoDB
 
 Import:
   --into TABLE           the table or collection for CSV and JSON rows; a SQL file
@@ -511,9 +518,13 @@ fn query(args: &Args, settings: &Settings) -> Done {
 // ---- export and import ----------------------------------------------------------------
 
 fn export(args: &Args, settings: &Settings) -> Done {
-    args.only_flags(&["accept-host-key"]).map_err(Fail::usage)?;
+    args.only_flags(&["accept-host-key", "all"])
+        .map_err(Fail::usage)?;
     args.only_values(&["format", "output", "namespace", "where"])
         .map_err(Fail::usage)?;
+    if args.flag("all") {
+        return export_all(args, settings);
+    }
     let target = target_of(args, settings)?;
     let spec = args
         .positional
@@ -566,6 +577,128 @@ fn export(args: &Args, settings: &Settings) -> Done {
             match written {
                 Ok(n) => {
                     eprintln!("Exported {}", count(n, "row", "rows"));
+                    Ok(())
+                }
+                Err(e) if is_broken_pipe(&e.to_string()) => Ok(()),
+                Err(e) => Err(Fail::from(format!("export failed: {e}"))),
+            }
+        }
+    }
+}
+
+/// `export --all`: every table and collection, as a SQL dump or a folder of files.
+fn export_all(args: &Args, settings: &Settings) -> Done {
+    use crate::ui::transfer::database;
+    if args.positional.len() > 1 {
+        return Err(Fail::usage(
+            "--all exports every table: leave out the table name",
+        ));
+    }
+    if args.value("where").is_some() {
+        return Err(Fail::usage("--where is for one table, not --all"));
+    }
+    let target = target_of(args, settings)?;
+    let output = args.value("output").map(PathBuf::from);
+    let fallback = if crate::ui::edit::speaks_sql(target.kind) {
+        Format::Sql
+    } else {
+        Format::Json
+    };
+    // A folder has no extension to go by, so only a file name picks the format.
+    let named = output
+        .as_deref()
+        .filter(|p| !p.is_dir() && p.extension().is_some());
+    let format = Format::pick(args.value("format"), named, fallback).map_err(Fail::usage)?;
+    let extension = match format {
+        Format::Table => {
+            return Err(Fail::usage(
+                "export writes csv, tsv, json, jsonl, md or sql",
+            ));
+        }
+        Format::Sql if !crate::ui::edit::speaks_sql(target.kind) => {
+            return Err(Fail::usage(format!(
+                "{} has no INSERT statements: use --format json",
+                target.kind.label()
+            )));
+        }
+        Format::Csv => "csv",
+        Format::Tsv => "tsv",
+        Format::Json => "json",
+        Format::JsonLines => "jsonl",
+        Format::Markdown => "md",
+        Format::Sql => "sql",
+    };
+    let one_file = format == Format::Sql;
+    if !one_file && output.is_none() {
+        return Err(Fail::usage(
+            "a file per table needs a folder: give -o DIR, or use --format sql",
+        ));
+    }
+    if !one_file && output.as_deref().is_some_and(Path::is_file) {
+        return Err(Fail::usage(
+            "-o names a file; a file per table needs a folder",
+        ));
+    }
+    let net = runtime()?;
+    let open = connect(args, &target, &net)?;
+    let h = net.handle();
+    let under: Vec<Vec<String>> = args
+        .value("namespace")
+        .map(|n| vec![args::path(n)])
+        .unwrap_or_default();
+    let tables = h
+        .block_on(database::tables(open.conn.as_ref(), &under, one_file))
+        .map_err(|e| Fail::from(format!("could not list the tables: {e}")))?;
+    if tables.is_empty() {
+        return Err(Fail::from("there are no tables to export"));
+    }
+    let kind = target.kind;
+    let make = |t: &database::Table| -> Box<dyn deltos_grid::RowWriter> {
+        if format == Format::Sql {
+            return Box::new(
+                crate::ui::transfer::sql::InsertWriter::new(
+                    kind,
+                    &t.object,
+                    crate::ui::transfer::sql::default_rows_per_statement(kind),
+                )
+                .with_preamble(t.definition.clone()),
+            );
+        }
+        match format.writer(kind, Some(&t.object)) {
+            Ok(w) => w,
+            // Every format but SQL has a writer for any table.
+            Err(_) => Box::new(deltos_grid::CsvWriter::new(
+                deltos_grid::CsvFormat::default(),
+            )),
+        }
+    };
+    let page_rows = ExportOptions::default().page_rows;
+    let progress = Progress::default();
+    match output {
+        Some(path) => {
+            let target = if one_file {
+                database::Target::File(&path)
+            } else {
+                database::Target::Folder {
+                    dir: &path,
+                    extension,
+                }
+            };
+            let outcome = with_progress(&progress, "rows", || {
+                database::run(&h, &open.conn, &tables, &make, page_rows, target, &progress)
+            });
+            report(outcome)
+        }
+        None => {
+            let stdout = std::io::stdout().lock();
+            match database::write_all(&h, &open.conn, &tables, &make, page_rows, stdout, &progress)
+            {
+                Ok(n) => {
+                    eprintln!(
+                        "Exported {} and {}",
+                        count(tables.len() as u64, "table", "tables"),
+                        count(n, "row", "rows")
+                    );
                     Ok(())
                 }
                 Err(e) if is_broken_pipe(&e.to_string()) => Ok(()),

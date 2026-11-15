@@ -193,6 +193,13 @@ pub struct QueryPanel {
     picker_open: bool,
     /// What waits for the person to confirm it.
     confirm: Option<Pending>,
+    /// A statement of the run changed data, and whether it changed structure too: told to
+    /// the open tables of the connection when the run ends.
+    changed: Option<bool>,
+    /// What to take out of the editor when the run succeeds: the text that ran, and a
+    /// hash of the whole text when it started, so an editor typed in meanwhile is left as
+    /// it is.
+    clear: Option<(std::ops::Range<usize>, u64)>,
     /// The bar to save the text by name, while it is open.
     save: Option<(Entity<SaveBar>, Subscription)>,
     focus: FocusHandle,
@@ -266,6 +273,8 @@ impl QueryPanel {
             bounds: Bounds::default(),
             picker_open: false,
             confirm: None,
+            changed: None,
+            clear: None,
             save: None,
             focus: cx.focus_handle(),
             _subs: subs,
@@ -331,17 +340,76 @@ impl QueryPanel {
 
     /// Runs the selection, or the statement the cursor is in.
     pub fn run_current(&mut self, cx: &mut Context<Self>) {
-        let statement = self.editor.read(cx).statement_at_cursor();
+        let e = self.editor.read(cx);
+        let statement = e.statement_at_cursor();
+        let range = e.current_statement();
         if !statement.is_empty() {
+            self.clear = range.and_then(|r| self.clear_target(r, cx));
             self.run_statements(vec![statement], cx);
         }
     }
 
     /// Runs every statement of the editor (or of the selection) in order.
     pub fn run_all(&mut self, cx: &mut Context<Self>) {
-        let statements = self.editor.read(cx).all_statements();
+        let e = self.editor.read(cx);
+        let statements = e.all_statements();
+        let range = if e.selection().is_empty() {
+            0..e.text().len()
+        } else {
+            e.selection()
+        };
         if !statements.is_empty() {
+            self.clear = self.clear_target(range, cx);
             self.run_statements(statements, cx);
+        }
+    }
+
+    /// `range` of the editor, to take out once it has run, when the setting asks for it.
+    fn clear_target(
+        &self,
+        range: std::ops::Range<usize>,
+        cx: &App,
+    ) -> Option<(std::ops::Range<usize>, u64)> {
+        if !self.state.read(cx).settings.editor.clear_after_run {
+            return None;
+        }
+        Some((range, text_hash(self.editor.read(cx).text())))
+    }
+
+    /// The run stopped, at its end or before it. Tables showing what it changed read
+    /// again, and a run that went through every statement takes its text out of the
+    /// editor, unless the editor was typed in meanwhile. A run held at the confirm bar
+    /// keeps that for when it goes on.
+    fn run_ended(&mut self, end: RunEnd, cx: &mut Context<Self>) {
+        if let (Some(structure), Some(id)) = (self.changed.take(), self.connection.clone()) {
+            self.state
+                .update(cx, |s, cx| s.data_changed(&id, structure, cx));
+        }
+        match end {
+            RunEnd::Held => {}
+            RunEnd::Stopped => self.clear = None,
+            RunEnd::Done => {
+                if let Some((range, hash)) = self.clear.take()
+                    && text_hash(self.editor.read(cx).text()) == hash
+                {
+                    self.editor.update(cx, |e, cx| e.remove_ran(range, cx));
+                }
+            }
+        }
+    }
+
+    /// Notes what a statement that succeeded may have changed.
+    fn note_change(&mut self, statement: &str, cx: &App) {
+        let Some(kind) = self
+            .connection
+            .as_deref()
+            .and_then(|id| self.state.read(cx).session(id))
+            .map(|s| s.kind)
+        else {
+            return;
+        };
+        if let Some(structure) = change_of(statement, kind) {
+            self.changed = Some(self.changed.unwrap_or(false) || structure);
         }
     }
 
@@ -436,36 +504,41 @@ impl QueryPanel {
         self.confirm = None;
         let many = statements.len() > 1;
         let task = cx.spawn(async move |this, cx| {
-            for (index, statement) in statements.iter().enumerate().skip(from) {
-                let statement = statement.clone();
-                if index > from {
-                    let held = this
-                        .update(cx, |this, cx| this.hold(&statements, index, cx))
-                        .unwrap_or(true);
-                    if held {
-                        return;
+            let end = async {
+                for (index, statement) in statements.iter().enumerate().skip(from) {
+                    let statement = statement.clone();
+                    if index > from {
+                        let held = this
+                            .update(cx, |this, cx| this.hold(&statements, index, cx))
+                            .unwrap_or(true);
+                        if held {
+                            return RunEnd::Held;
+                        }
+                    }
+                    if close_open_results(&this, cx).await.is_none() {
+                        return RunEnd::Stopped;
+                    }
+                    let Ok(Some((job, started))) = this.update(cx, |this, cx| {
+                        this.start_statement(index, many, &statement, cx)
+                    }) else {
+                        return RunEnd::Stopped;
+                    };
+                    let result = job
+                        .await
+                        .unwrap_or_else(|| Err("The request was cancelled.".into()));
+                    let go_on = this
+                        .update(cx, |this, cx| {
+                            this.statement_done(started, statement, result, cx)
+                        })
+                        .unwrap_or(false);
+                    if !go_on {
+                        return RunEnd::Stopped;
                     }
                 }
-                if close_open_results(&this, cx).await.is_none() {
-                    return;
-                }
-                let Ok(Some((job, started))) = this.update(cx, |this, cx| {
-                    this.start_statement(index, many, &statement, cx)
-                }) else {
-                    return;
-                };
-                let result = job
-                    .await
-                    .unwrap_or_else(|| Err("The request was cancelled.".into()));
-                let go_on = this
-                    .update(cx, |this, cx| {
-                        this.statement_done(started, statement, result, cx)
-                    })
-                    .unwrap_or(false);
-                if !go_on {
-                    return;
-                }
+                RunEnd::Done
             }
+            .await;
+            this.update(cx, |this, cx| this.run_ended(end, cx)).ok();
         });
         self.batch = Some(task);
         cx.notify();
@@ -600,6 +673,7 @@ impl QueryPanel {
         let config = self.cache_config(cx);
         let (rows, error) = match result {
             Ok(loader) => {
+                self.note_change(&statement, cx);
                 let loader = Arc::new(loader);
                 let rows = loader
                     .affected()
@@ -2397,9 +2471,64 @@ impl Render for QueryPanel {
     }
 }
 
+/// How a run stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunEnd {
+    /// Every statement ran.
+    Done,
+    /// It waits at the confirm bar before a statement, to go on from there.
+    Held,
+    /// A statement failed or was cancelled, or the tab went away.
+    Stopped,
+}
+
+/// What `statement`, which succeeded, may have changed: `None` when it only reads,
+/// `Some(true)` when it can have created, altered, renamed or dropped objects, and
+/// `Some(false)` when it changed rows only.
+fn change_of(statement: &str, kind: DriverKind) -> Option<bool> {
+    let a = classify::assess(statement, kind);
+    if a.is_read_only() {
+        return None;
+    }
+    let verb = a.what.split_whitespace().next().unwrap_or("");
+    let structure = matches!(a.risk, classify::Risk::Alter | classify::Risk::Remove)
+        && !verb.eq_ignore_ascii_case("TRUNCATE")
+        || ["CREATE", "RENAME", "COMMENT"]
+            .iter()
+            .any(|v| verb.eq_ignore_ascii_case(v));
+    Some(structure)
+}
+
+fn text_hash(text: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut h);
+    h.finish()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn writes_refresh_tables_and_structure_changes_redescribe_them() {
+        let pg = DriverKind::Postgres;
+        assert_eq!(change_of("SELECT * FROM t", pg), None);
+        assert_eq!(
+            change_of("UPDATE t SET a = 1 WHERE id = 2", pg),
+            Some(false)
+        );
+        assert_eq!(change_of("INSERT INTO t VALUES (1)", pg), Some(false));
+        assert_eq!(change_of("DELETE FROM t", pg), Some(false));
+        assert_eq!(change_of("TRUNCATE t", pg), Some(false));
+        assert_eq!(change_of("ALTER TABLE t ADD COLUMN b int", pg), Some(true));
+        assert_eq!(change_of("CREATE TABLE u (id int)", pg), Some(true));
+        assert_eq!(change_of("DROP TABLE u", pg), Some(true));
+        let mongo = DriverKind::Mongodb;
+        assert_eq!(change_of("db.users.find({})", mongo), None);
+        assert_eq!(change_of("db.users.insertOne({a: 1})", mongo), Some(false));
+        assert_eq!(change_of("db.users.drop()", mongo), Some(true));
+    }
     use deltos_settings::ConnectionTag;
 
     #[test]

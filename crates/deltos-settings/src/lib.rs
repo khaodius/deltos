@@ -531,6 +531,9 @@ pub struct Editor {
     pub autocomplete: bool,
     /// Format SQL writes keywords in uppercase.
     pub format_uppercase: bool,
+    /// Empties the editor once everything it ran has succeeded. A run that fails keeps
+    /// the text, so it can be fixed and run again.
+    pub clear_after_run: bool,
 }
 
 impl Default for Editor {
@@ -544,6 +547,7 @@ impl Default for Editor {
             highlight: true,
             autocomplete: true,
             format_uppercase: true,
+            clear_after_run: true,
         }
     }
 }

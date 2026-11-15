@@ -23,6 +23,7 @@ pub mod query;
 pub mod references;
 pub mod save_query;
 pub mod screen_color;
+pub mod scrollbar;
 pub mod settings;
 pub mod sidebar;
 pub mod slider;

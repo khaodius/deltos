@@ -8,6 +8,7 @@
 //! [`Progress`] that the host polls a few times a second while anything runs, so a job
 //! never redraws the window per row.
 
+pub mod database;
 pub mod export;
 pub mod import;
 pub mod read;

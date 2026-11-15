@@ -327,6 +327,30 @@ impl Editor {
         self.replace(range, new, cx);
     }
 
+    /// Takes out `range`, text that has run, with the semicolon and white space that end
+    /// it. When only white space and semicolons are left, the editor is emptied.
+    pub fn remove_ran(&mut self, range: Range<usize>, cx: &mut Context<Self>) {
+        let end = range.end.min(self.text.len());
+        let start = range.start.min(end);
+        if !self.text.is_char_boundary(start) || !self.text.is_char_boundary(end) {
+            return;
+        }
+        let rest = &self.text[end..];
+        let tail = rest
+            .char_indices()
+            .find(|&(_, c)| !(c.is_whitespace() || c == ';'))
+            .map_or(rest.len(), |(i, _)| i);
+        let left = self.text[..start].trim();
+        let right = self.text[end + tail..].trim();
+        let empty = |t: &str| t.chars().all(|c| c.is_whitespace() || c == ';');
+        if empty(left) && empty(right) {
+            self.set_text(String::new(), cx);
+        } else {
+            self.completion = None;
+            self.replace(start..end + tail, "", cx);
+        }
+    }
+
     /// Types `new` over the selection.
     pub fn insert_at_cursor(&mut self, new: &str, cx: &mut Context<Self>) {
         let range = self.selected.clone();

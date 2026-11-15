@@ -9,15 +9,18 @@ use deltos_data::{ObjectKind, ObjectRef};
 use deltos_settings::PanelKind;
 use gpui::{
     Context, Entity, Focusable, FontWeight, IntoElement, MouseButton, Render, SharedString,
-    Subscription, Window, div, prelude::*, px, uniform_list,
+    Subscription, UniformListScrollHandle, Window, div, prelude::*, px, uniform_list,
 };
 
 use crate::state::{AppState, StateEvent};
 use crate::theme::theme;
 use crate::ui::edit;
 use crate::ui::icons::{Icon, icon};
+use crate::ui::scrollbar::Scrollbar;
 use crate::ui::text_input::{InputEvent, TextInput};
-use crate::ui::{ButtonStyle, MenuItem, button, compact_count, context_menu, empty_state};
+use crate::ui::{
+    ButtonStyle, MenuItem, Tooltip, button, compact_count, context_menu, empty_state, icon_button,
+};
 
 #[derive(Clone)]
 enum Row {
@@ -41,6 +44,8 @@ pub struct ObjectsPanel {
     selected: Option<ObjectRef>,
     /// An open right-click menu: where, and over which row.
     context: Option<(gpui::Point<gpui::Pixels>, Row)>,
+    list_scroll: UniformListScrollHandle,
+    scrollbar: Scrollbar,
     _subs: Vec<Subscription>,
 }
 
@@ -70,11 +75,15 @@ impl ObjectsPanel {
                 }
             }),
         ];
+        let list_scroll = UniformListScrollHandle::new();
+        let scrollbar = Scrollbar::new(list_scroll.0.borrow().base_handle.clone());
         Self {
             state,
             search,
             selected: None,
             context: None,
+            list_scroll,
+            scrollbar,
             _subs: subs,
         }
     }
@@ -223,6 +232,21 @@ impl ObjectsPanel {
                         })),
                     ));
                 }
+                let (c5, n5, p5) = (conn.clone(), safety.connection_name(), path.clone());
+                items.push(MenuItem::new("Export…", move |window, cx| {
+                    let source = crate::ui::transfer::export::Source::Database {
+                        under: vec![p5.clone()],
+                        label: p5.last().cloned().unwrap_or_else(|| "database".into()),
+                    };
+                    crate::ui::transfer::export::open(
+                        c5.clone(),
+                        n5.clone(),
+                        source,
+                        page_rows,
+                        window,
+                        cx,
+                    );
+                }));
                 items.push(MenuItem::separator());
                 items.push(MenuItem::new(
                     "Copy name",
@@ -232,6 +256,30 @@ impl ObjectsPanel {
             Row::Note(_) => {}
         }
         items
+    }
+
+    /// Opens the export dialog for everything the list shows: every namespace of the
+    /// active connection.
+    fn export_everything(&self, window: &mut Window, cx: &mut gpui::App) {
+        let s = self.state.read(cx);
+        let Some(session) = s.active_session() else {
+            return;
+        };
+        let under: Vec<Vec<String>> = session
+            .namespaces
+            .iter()
+            .map(|n| n.namespace.path.clone())
+            .collect();
+        // Named after the database when the list is one database's, else the connection.
+        let first = under.first().and_then(|p| p.first());
+        let label = match first {
+            Some(db) if under.iter().all(|p| p.first() == Some(db)) => db.clone(),
+            _ => session.name.clone(),
+        };
+        let (conn, page_rows) = (session.conn.clone(), s.settings.data.page_size);
+        let name = crate::ui::transfer::Safety::of(s, &session.id).connection_name();
+        let source = crate::ui::transfer::export::Source::Database { under, label };
+        crate::ui::transfer::export::open(conn, name, source, page_rows, window, cx);
     }
 
     fn rows(&self, cx: &gpui::App) -> Vec<Row> {
@@ -316,6 +364,23 @@ impl Render for ObjectsPanel {
                 .child(icon(Icon::Search).size(px(13.)).text_color(t.text_faint))
                 .child(self.search.clone()),
         );
+        let search = if session.is_some() {
+            div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .pr(px(8.))
+                .child(search.flex_1().min_w_0().pr(px(4.)))
+                .child(
+                    icon_button("export-database", Icon::Export, &t)
+                        .tooltip(|_, cx| Tooltip::view("Export the database", cx))
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.export_everything(window, cx)),
+                        ),
+                )
+        } else {
+            search
+        };
         let Some((session_id, loading, error)) = session else {
             let state = self.state.clone();
             return div()
@@ -498,8 +563,15 @@ impl Render for ObjectsPanel {
                 })
                 .collect()
         })
-        .flex_1()
+        .track_scroll(self.list_scroll.clone())
+        .size_full()
         .pb(px(8.));
+        let list = div()
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .child(list)
+            .child(self.scrollbar.element(t.text_faint));
         div()
             .size_full()
             .flex()

@@ -1628,6 +1628,13 @@ impl SettingsPanel {
                 pick(|s| s.editor.format_uppercase = !s.editor.format_uppercase),
                 t,
             ))
+            .child(toggle_row(
+                "Clear the editor after a run",
+                Some("Empty the query once it runs without an error. A failed run keeps the text so it can be fixed. The history keeps every statement."),
+                ("clear-after-run", e.clear_after_run),
+                pick(|s| s.editor.clear_after_run = !s.editor.clear_after_run),
+                t,
+            ))
     }
 
     fn updates(&mut self, t: &Theme, cx: &mut Context<Self>) -> Div {
