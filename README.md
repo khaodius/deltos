@@ -32,7 +32,7 @@ the same everywhere.
 
 ## Panels
 
-![Opening a table from the command palette, typing into cells, editing a field in the inspector, reviewing the SQL a commit would run, then popping the inspector out into its own window and docking it back](docs/images/panels.gif)
+![Editing a total, which marks the row in light blue, then pressing Ctrl+G on a user_id cell to open the graph on that column, zooming out across the schemas, clicking products to fly to it, and pressing Esc to return to the orders table where it was](docs/images/panels.gif)
 
 Every part of the window is a panel: connections, the object sidebar, tables, queries,
 results, the inspector, history and settings. Drag a tab to split a pane or join another

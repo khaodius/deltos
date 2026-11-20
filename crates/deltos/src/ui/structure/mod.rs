@@ -898,7 +898,7 @@ impl StructureView {
                 let change = change_of(entry, &self.table.indexes);
                 let droppable = editable && !ix.primary;
                 let tag = if ix.primary {
-                    Some(("PRIMARY", t.warning))
+                    Some(("PRIMARY", t.key))
                 } else if ix.unique {
                     Some(("UNIQUE", t.syntax_keyword))
                 } else {

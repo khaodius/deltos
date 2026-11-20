@@ -16,6 +16,9 @@ update manifest.
   where it was looking on each connection across restarts.
 - **MongoDB relations in the graph.** Fields named after another collection (`user_id`,
   `authorId`, `tag_ids`) are drawn as dashed lines to it.
+- **Light blue instead of yellow.** Primary keys and staged edits (the row mark, the edited
+  cell, the inspector's changed fields and the pending count) are light blue. Warnings stay
+  yellow.
 
 ## 0.2.1 - 2026-11-20
 

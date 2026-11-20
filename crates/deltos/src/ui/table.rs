@@ -2044,8 +2044,8 @@ impl TablePanel {
                         .items_center()
                         .gap(px(6.))
                         .font_weight(FontWeight::MEDIUM)
-                        .text_color(t.warning)
-                        .child(crate::ui::dot(t.warning, 6.))
+                        .text_color(t.changed)
+                        .child(crate::ui::dot(t.changed, 6.))
                         .child(format!(
                             "{} {}",
                             thousands(pending as u64),

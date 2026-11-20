@@ -58,6 +58,9 @@ pub struct Theme {
     pub warning: Hsla,
     /// Primary key marks: the key icon in headers and the inspector, key dots in the graph.
     pub key: Hsla,
+    /// Staged edits not yet committed: the changed cell, the row's bar, the inspector field
+    /// and the change count. Light blue, so the warning yellow stays for real warnings.
+    pub changed: Hsla,
     pub success: Hsla,
     /// Behind a grid cell or inspector field with a staged change.
     pub staged_change: Hsla,
@@ -475,6 +478,7 @@ impl Theme {
             danger: hsla(if dark { 0xff6961 } else { 0xd93025 }),
             warning: hsla(if dark { 0xffb340 } else { 0xb86e00 }),
             key: hsla(if dark { 0x7cc7ff } else { 0x1f8fd6 }),
+            changed: hsla(if dark { 0x7cc7ff } else { 0x1f8fd6 }),
             success: hsla(if dark { 0x5fd38a } else { 0x1e8e3e }),
             // Set from the warning, danger and success colors below, after a theme file.
             staged_change: Hsla::default(),
@@ -527,7 +531,7 @@ impl Theme {
         if let Some(custom) = custom {
             theme.apply(custom);
         }
-        theme.staged_change = with_alpha(theme.warning, if dark { 0.20 } else { 0.16 });
+        theme.staged_change = with_alpha(theme.changed, if dark { 0.20 } else { 0.16 });
         theme.staged_delete = with_alpha(theme.danger, if dark { 0.18 } else { 0.11 });
         theme.staged_insert = with_alpha(theme.success, if dark { 0.16 } else { 0.11 });
         theme

@@ -1865,7 +1865,7 @@ impl Render for GridView {
                         }
                         // A staged row carries a bar at its left edge, in its color.
                         let bar = match r.mark {
-                            RowMark::Changed => Some(t.warning),
+                            RowMark::Changed => Some(t.changed),
                             RowMark::Deleted => Some(t.danger),
                             RowMark::Inserted => Some(t.success),
                             RowMark::None => None,
