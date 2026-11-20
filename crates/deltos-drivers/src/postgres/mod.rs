@@ -406,6 +406,7 @@ impl Connection for PostgresConnection {
             edit_rows: true,
             cancel: true,
             language: "sql",
+            documents: false,
         }
     }
 
