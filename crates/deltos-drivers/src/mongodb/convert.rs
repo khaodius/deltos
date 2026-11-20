@@ -281,7 +281,7 @@ pub(crate) fn parse_uuid(text: &str) -> Option<Bson> {
     }))
 }
 
-fn uuid_text(binary: &Binary) -> Option<String> {
+pub(crate) fn uuid_text(binary: &Binary) -> Option<String> {
     if binary.subtype != BinarySubtype::Uuid || binary.bytes.len() != 16 {
         return None;
     }

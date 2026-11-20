@@ -13,6 +13,11 @@
 //! - a bare command document, such as `{"ping": 1}`
 //! - `.explain(verbosity)` after `find`, `aggregate`, `count` or `distinct`, or before them
 //!   as `db.orders.explain().find(...)`
+//! - `findOneAndUpdate`, `findOneAndReplace`, `findOneAndDelete`
+//! - indexes: `createIndex`, `createIndexes`, `dropIndex`, `dropIndexes`, `getIndexes`
+//! - `renameCollection`, `stats`, `db.createCollection`, `db.createView`, `db.dropDatabase`,
+//!   `db.stats()`, `db.serverStatus()`, `db.currentOp()`, `db.getUsers()`, `db.version()`
+//! - `show dbs`, `show databases`, `show collections`
 //!
 //! Values are relaxed JSON: unquoted keys, single quotes, trailing commas, comments,
 //! `ObjectId("...")`, `ISODate("...")`, `new Date(...)`, `NumberLong`, `NumberInt`,
@@ -41,6 +46,8 @@ pub enum Command {
     ListCollections {
         database: Option<String>,
     },
+    /// `show dbs`: every database the user may see, with its size.
+    ListDatabases,
     Collection {
         database: Option<String>,
         collection: String,
@@ -89,6 +96,11 @@ pub enum Operation {
         many: bool,
     },
     Drop,
+    /// `renameCollection(to, dropTarget)`, within the same database.
+    Rename {
+        to: String,
+        drop_target: bool,
+    },
 }
 
 /// The second argument of an update: modifiers, or an aggregation pipeline.
@@ -135,7 +147,9 @@ type Parsed<T> = Result<T, ParseError>;
 pub fn parse(input: &str) -> Parsed<Command> {
     let mut p = Parser::new(input);
     p.skip_space();
-    let command = if p.peek() == Some(b'{') {
+    let command = if let Some(command) = p.show()? {
+        command
+    } else if p.peek() == Some(b'{') {
         let command = p.document(0)?;
         Command::Run {
             database: None,
@@ -280,6 +294,33 @@ impl<'a> Parser<'a> {
     // -----------------------------------------------------------------------------------
     // Statements.
 
+    /// `show dbs`, `show databases`, `show collections`.
+    fn show(&mut self) -> Parsed<Option<Command>> {
+        let start = self.pos;
+        if !self.keyword("show") {
+            return Ok(None);
+        }
+        self.skip_space();
+        let at = self.pos;
+        let command = match self.identifier() {
+            Some("dbs" | "databases") => Command::ListDatabases,
+            Some("collections" | "tables") => Command::ListCollections { database: None },
+            Some(other) => {
+                return Err(at_error(
+                    at,
+                    &format!(
+                        "show {other} is not supported here; try show dbs or show collections"
+                    ),
+                ));
+            }
+            None => {
+                self.pos = start;
+                return Ok(None);
+            }
+        };
+        Ok(Some(command))
+    }
+
     fn statement(&mut self) -> Parsed<Command> {
         if !self.keyword("db") {
             return Err(self.error("expected a statement starting with db. or a command document"));
@@ -314,6 +355,17 @@ impl<'a> Parser<'a> {
                         "getCollectionNames" | "getCollectionInfos" => {
                             self.arguments()?;
                             return Ok(Command::ListCollections { database });
+                        }
+                        "createCollection" | "createView" | "dropDatabase" | "stats"
+                        | "serverStatus" | "hostInfo" | "currentOp" | "getUsers" | "getRoles"
+                        | "version" => {
+                            let args = self.arguments()?;
+                            let (admin, command) = database_command(&name, args, at)?;
+                            return Ok(Command::Run {
+                                database,
+                                admin,
+                                command,
+                            });
                         }
                         "runCommand" | "adminCommand" => {
                             let mut args = self.arguments()?;
@@ -371,10 +423,20 @@ impl<'a> Parser<'a> {
                 collection.push_str(&name);
                 continue;
             }
-            let args = self.arguments()?;
+            let mut args = self.arguments()?;
             if name == "explain" && explain.is_none() {
                 explain = Some((verbosity(args, at)?, at));
                 continue;
+            }
+            if explain.is_none()
+                && let Some(command) = collection_command(&name, &collection, &mut args, at)?
+            {
+                self.skip_space();
+                return Ok(Command::Run {
+                    database,
+                    admin: false,
+                    command,
+                });
             }
             let operation = self.operation(&name, args, at)?;
             if let Some(trailing) = self.trailing_explain()? {
@@ -499,6 +561,10 @@ impl<'a> Parser<'a> {
                 many: name != "deleteOne",
             },
             "drop" => Operation::Drop,
+            "renameCollection" => Operation::Rename {
+                to: take_string(&mut args, 0, "the new collection name", at)?,
+                drop_target: matches!(args.get(1), Some(Bson::Boolean(true))),
+            },
             other => return Err(at_error(at, &format!("{other}() is not supported here"))),
         };
         self.skip_space();
@@ -1073,6 +1139,259 @@ fn extended(doc: Document) -> Bson {
     Bson::try_from(json).unwrap_or(Bson::Document(doc))
 }
 
+/// Database methods that are one command: `(admin, command)`.
+fn database_command(name: &str, mut args: Vec<Bson>, at: usize) -> Parsed<(bool, Document)> {
+    let mut command = Document::new();
+    let admin = match name {
+        "createCollection" => {
+            command.insert(
+                "create",
+                take_string(&mut args, 0, "a collection name", at)?,
+            );
+            if let Some(options) = take_document(&mut args, 1, at)? {
+                command.extend(options);
+            }
+            false
+        }
+        "createView" => {
+            command.insert("create", take_string(&mut args, 0, "a view name", at)?);
+            command.insert(
+                "viewOn",
+                take_string(&mut args, 1, "the source collection", at)?,
+            );
+            let pipeline = match args.get_mut(2).map(std::mem::take) {
+                Some(Bson::Array(stages)) => documents(stages, at)?,
+                Some(Bson::Document(stage)) => vec![stage],
+                None => Vec::new(),
+                Some(_) => return Err(at_error(at, "createView needs an array of stages")),
+            };
+            command.insert("pipeline", pipeline);
+            if let Some(options) = take_document(&mut args, 3, at)? {
+                command.extend(options);
+            }
+            false
+        }
+        "dropDatabase" => {
+            command.insert("dropDatabase", 1);
+            false
+        }
+        "stats" => {
+            command.insert("dbStats", 1);
+            if let Some(scale @ (Bson::Int32(_) | Bson::Int64(_) | Bson::Double(_))) =
+                args.first_mut().map(std::mem::take)
+            {
+                command.insert("scale", scale);
+            }
+            false
+        }
+        "serverStatus" => {
+            command.insert("serverStatus", 1);
+            true
+        }
+        "hostInfo" => {
+            command.insert("hostInfo", 1);
+            true
+        }
+        "currentOp" => {
+            command.insert("currentOp", 1);
+            if let Some(filter) = take_document(&mut args, 0, at)? {
+                command.extend(filter);
+            }
+            true
+        }
+        "getUsers" => {
+            command.insert("usersInfo", 1);
+            false
+        }
+        "getRoles" => {
+            command.insert("rolesInfo", 1);
+            false
+        }
+        "version" => {
+            command.insert("buildInfo", 1);
+            true
+        }
+        other => return Err(at_error(at, &format!("db.{other}() is not supported here"))),
+    };
+    Ok((admin, command))
+}
+
+/// Collection methods that are one database command, or `None` for an operation.
+fn collection_command(
+    name: &str,
+    collection: &str,
+    args: &mut [Bson],
+    at: usize,
+) -> Parsed<Option<Document>> {
+    let command = match name {
+        "createIndex" | "ensureIndex" => {
+            let key = take_document(args, 0, at)?.ok_or_else(|| {
+                at_error(at, "createIndex needs the index keys, such as {name: 1}")
+            })?;
+            let options = take_document(args, 1, at)?.unwrap_or_default();
+            doc_with(
+                "createIndexes",
+                collection,
+                [(
+                    "indexes",
+                    Bson::Array(vec![Bson::Document(index_spec(key, options, at)?)]),
+                )],
+            )
+        }
+        "createIndexes" => {
+            let keys = match args.first_mut().map(std::mem::take) {
+                Some(Bson::Array(keys)) => documents(keys, at)?,
+                _ => return Err(at_error(at, "createIndexes needs an array of index keys")),
+            };
+            if keys.is_empty() {
+                return Err(at_error(at, "createIndexes needs at least one index"));
+            }
+            let options = take_document(args, 1, at)?.unwrap_or_default();
+            let specs = keys
+                .into_iter()
+                .map(|key| index_spec(key, options.clone(), at).map(Bson::Document))
+                .collect::<Parsed<Vec<_>>>()?;
+            doc_with(
+                "createIndexes",
+                collection,
+                [("indexes", Bson::Array(specs))],
+            )
+        }
+        "dropIndex" | "dropIndexes" => {
+            let index = match args.first_mut().map(std::mem::take) {
+                Some(index @ (Bson::String(_) | Bson::Document(_) | Bson::Array(_))) => index,
+                None if name == "dropIndexes" => Bson::String("*".to_owned()),
+                _ => {
+                    return Err(at_error(
+                        at,
+                        "dropIndex needs an index name in quotes or its keys",
+                    ));
+                }
+            };
+            doc_with("dropIndexes", collection, [("index", index)])
+        }
+        "getIndexes" | "getIndexSpecs" | "getIndices" => doc_with("listIndexes", collection, []),
+        "stats" => doc_with("collStats", collection, []),
+        "findOneAndUpdate" | "findOneAndReplace" | "findOneAndDelete" | "findAndModify" => {
+            find_and_modify(name, collection, args, at)?
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(command))
+}
+
+fn doc_with<const N: usize>(name: &str, collection: &str, rest: [(&str, Bson); N]) -> Document {
+    let mut doc = Document::new();
+    doc.insert(name, collection);
+    for (k, v) in rest {
+        doc.insert(k, v);
+    }
+    doc
+}
+
+/// An index for `createIndexes`: its keys, the options, and the name the shell would
+/// give it (`a_1_b_-1`) when the options name none.
+fn index_spec(key: Document, options: Document, at: usize) -> Parsed<Document> {
+    if key.is_empty() {
+        return Err(at_error(at, "an index needs at least one key"));
+    }
+    let name = match options.get("name") {
+        Some(Bson::String(name)) => name.clone(),
+        _ => key
+            .iter()
+            .map(|(field, direction)| {
+                let direction = match direction {
+                    Bson::Int32(n) => n.to_string(),
+                    Bson::Int64(n) => n.to_string(),
+                    Bson::Double(f) if f.fract() == 0.0 => format!("{}", *f as i64),
+                    Bson::Double(f) => f.to_string(),
+                    Bson::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                format!("{field}_{direction}")
+            })
+            .collect::<Vec<_>>()
+            .join("_"),
+    };
+    let mut spec = Document::new();
+    spec.insert("key", key);
+    spec.insert("name", name);
+    for (k, v) in options {
+        if k != "name" {
+            spec.insert(k, v);
+        }
+    }
+    Ok(spec)
+}
+
+/// `findOneAndUpdate(filter, update, options)` and its kin as a `findAndModify` command.
+fn find_and_modify(name: &str, collection: &str, args: &mut [Bson], at: usize) -> Parsed<Document> {
+    let mut command = Document::new();
+    command.insert("findAndModify", collection);
+    if name == "findAndModify" {
+        // The old form: one document with query, update, remove, new and the rest.
+        let spec = take_document(args, 0, at)?
+            .ok_or_else(|| at_error(at, "findAndModify needs a document of options"))?;
+        command.extend(spec);
+        return Ok(command);
+    }
+    command.insert("query", take_document(args, 0, at)?.unwrap_or_default());
+    let options_at = if name == "findOneAndDelete" {
+        command.insert("remove", true);
+        1
+    } else {
+        let change = match args.get_mut(1).map(std::mem::take) {
+            Some(Bson::Document(doc)) => Bson::Document(doc),
+            Some(Bson::Array(stages)) if name == "findOneAndUpdate" => Bson::Array(
+                documents(stages, at)?
+                    .into_iter()
+                    .map(Bson::Document)
+                    .collect(),
+            ),
+            _ => {
+                return Err(at_error(
+                    at,
+                    if name == "findOneAndUpdate" {
+                        "findOneAndUpdate needs a document of changes such as {$set: {...}}"
+                    } else {
+                        "findOneAndReplace needs a replacement document"
+                    },
+                ));
+            }
+        };
+        if name == "findOneAndReplace"
+            && let Bson::Document(doc) = &change
+            && doc.keys().any(|k| k.starts_with('$'))
+        {
+            return Err(at_error(
+                at,
+                "a replacement document cannot hold update operators such as $set",
+            ));
+        }
+        command.insert("update", change);
+        2
+    };
+    if let Some(options) = take_document(args, options_at, at)? {
+        for (k, v) in options {
+            match k.as_str() {
+                "returnDocument" => {
+                    command.insert("new", matches!(&v, Bson::String(s) if s == "after"));
+                }
+                "returnNewDocument" | "new" => {
+                    command.insert("new", matches!(v, Bson::Boolean(true)));
+                }
+                "projection" | "fields" => {
+                    command.insert("fields", v);
+                }
+                _ => {
+                    command.insert(k, v);
+                }
+            }
+        }
+    }
+    Ok(command)
+}
+
 fn documents(items: Vec<Bson>, at: usize) -> Parsed<Vec<Document>> {
     items
         .into_iter()
@@ -1179,6 +1498,117 @@ mod tests {
             parse("db.getCollectionNames()"),
             Ok(Command::ListCollections { database: None })
         );
+    }
+
+    fn run(input: &str) -> (Option<String>, bool, Document) {
+        match parse(input) {
+            Ok(Command::Run {
+                database,
+                admin,
+                command,
+            }) => (database, admin, command),
+            other => panic!("{input}: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_index_methods() {
+        let (_, _, c) = run("db.orders.createIndex({status: 1, created: -1}, {unique: true})");
+        assert_eq!(
+            c,
+            doc! { "createIndexes": "orders", "indexes": [
+                { "key": { "status": 1, "created": -1 }, "name": "status_1_created_-1", "unique": true }
+            ] }
+        );
+        let (_, _, c) = run("db.orders.createIndex({loc: '2dsphere'}, {name: 'where'})");
+        assert_eq!(
+            c.get_array("indexes").unwrap()[0],
+            Bson::Document(doc! { "key": { "loc": "2dsphere" }, "name": "where" })
+        );
+        let (_, _, c) = run("db.orders.createIndexes([{a: 1}, {b: 'text'}])");
+        assert_eq!(c.get_array("indexes").unwrap().len(), 2);
+        assert!(parse("db.orders.createIndex({})").is_err());
+        assert!(parse("db.orders.createIndexes([])").is_err());
+        let (_, _, c) = run("db.orders.dropIndex('status_1')");
+        assert_eq!(c, doc! { "dropIndexes": "orders", "index": "status_1" });
+        let (_, _, c) = run("db.orders.dropIndexes()");
+        assert_eq!(c, doc! { "dropIndexes": "orders", "index": "*" });
+        assert!(parse("db.orders.dropIndex()").is_err());
+        let (_, _, c) = run("db.getSiblingDB('shop').orders.getIndexes()");
+        assert_eq!(c, doc! { "listIndexes": "orders" });
+        let (db, _, c) = run("db.getSiblingDB('shop').orders.stats()");
+        assert_eq!(
+            (db.as_deref(), c),
+            (Some("shop"), doc! { "collStats": "orders" })
+        );
+    }
+
+    #[test]
+    fn parses_find_and_modify() {
+        let (_, _, c) = run(
+            "db.orders.findOneAndUpdate({_id: 1}, {$inc: {n: 1}}, {returnDocument: 'after', upsert: true, projection: {n: 1}})",
+        );
+        assert_eq!(
+            c,
+            doc! { "findAndModify": "orders", "query": { "_id": 1 }, "update": { "$inc": { "n": 1 } },
+            "new": true, "upsert": true, "fields": { "n": 1 } }
+        );
+        let (_, _, c) = run("db.orders.findOneAndDelete({a: 1}, {sort: {b: -1}})");
+        assert_eq!(
+            c,
+            doc! { "findAndModify": "orders", "query": { "a": 1 }, "remove": true, "sort": { "b": -1 } }
+        );
+        let (_, _, c) = run("db.orders.findOneAndReplace({a: 1}, {a: 2})");
+        assert_eq!(c.get_document("update").unwrap(), &doc! { "a": 2 });
+        assert!(parse("db.orders.findOneAndReplace({a: 1}, {$set: {a: 2}})").is_err());
+        assert!(parse("db.orders.findOneAndUpdate({a: 1})").is_err());
+        let (_, _, c) = run("db.orders.findOneAndUpdate({}, [{$set: {a: 1}}])");
+        assert!(c.get_array("update").is_ok());
+    }
+
+    #[test]
+    fn parses_database_methods() {
+        let (_, admin, c) = run("db.createCollection('logs', {capped: true, size: 4096})");
+        assert!(!admin);
+        assert_eq!(c, doc! { "create": "logs", "capped": true, "size": 4096 });
+        let (_, _, c) = run("db.createView('open', 'orders', [{$match: {status: 'open'}}])");
+        assert_eq!(
+            c,
+            doc! { "create": "open", "viewOn": "orders", "pipeline": [{ "$match": { "status": "open" } }] }
+        );
+        assert_eq!(run("db.dropDatabase()").2, doc! { "dropDatabase": 1 });
+        assert_eq!(run("db.stats()").2, doc! { "dbStats": 1 });
+        assert_eq!(
+            run("db.stats(1024)").2,
+            doc! { "dbStats": 1, "scale": 1024 }
+        );
+        let (_, admin, c) = run("db.serverStatus()");
+        assert!(admin);
+        assert_eq!(c, doc! { "serverStatus": 1 });
+        assert_eq!(run("db.version()").2, doc! { "buildInfo": 1 });
+        assert_eq!(run("db.getUsers()").2, doc! { "usersInfo": 1 });
+        assert_eq!(parse("show dbs;"), Ok(Command::ListDatabases));
+        assert_eq!(
+            parse("  show collections"),
+            Ok(Command::ListCollections { database: None })
+        );
+        assert!(parse("show profile").is_err());
+        assert_eq!(
+            parse("db.orders.renameCollection('orders_old', true)"),
+            Ok(Command::Collection {
+                database: None,
+                collection: "orders".into(),
+                operation: Operation::Rename {
+                    to: "orders_old".into(),
+                    drop_target: true
+                },
+            })
+        );
+        // A collection named like a method still works through getCollection.
+        assert!(matches!(
+            parse("db.getCollection('stats').find()"),
+            Ok(Command::Collection { .. })
+        ));
     }
 
     #[test]

@@ -535,3 +535,154 @@ async fn filter_operators_keep_the_right_documents() {
     assert_eq!(ks(any, true).await, [1, 6]);
     fx.cleanup().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reads_replaces_and_inserts_whole_documents() {
+    let Some(fx) = Fixture::new("documents").await else {
+        return;
+    };
+    let name = &fx.object.name;
+    fx.run(&format!(
+        "db.getCollection('{name}').insertOne({{_id: ObjectId('65a1b2c3d4e5f60718293a4b'), n: NumberLong(7), f: 1.0, tags: ['a'], address: {{city: 'Oslo'}}}})"
+    ))
+    .await;
+    let key = vec![("_id".to_string(), Value::text("65a1b2c3d4e5f60718293a4b"))];
+    let text = fx
+        .conn
+        .document(&fx.object, &key)
+        .await
+        .expect("document")
+        .expect("found");
+    assert!(
+        text.contains("ObjectId(\"65a1b2c3d4e5f60718293a4b\")"),
+        "{text}"
+    );
+    assert!(text.contains("NumberLong(\"7\")"), "{text}");
+    assert!(text.contains("f: 1.0"), "{text}");
+
+    // Without _id the document keeps its own; with another _id it is refused.
+    fx.conn
+        .replace_document(
+            &fx.object,
+            &key,
+            "{n: 8, address: {city: 'Bergen', zip: '5003'}}",
+        )
+        .await
+        .expect("replace");
+    let text = fx.conn.document(&fx.object, &key).await.unwrap().unwrap();
+    assert!(text.contains("Bergen") && !text.contains("tags"), "{text}");
+    assert!(
+        text.trim_start().starts_with("{\n  _id: ObjectId"),
+        "{text}"
+    );
+    let moved = fx
+        .conn
+        .replace_document(&fx.object, &key, "{_id: 5, n: 1}")
+        .await;
+    assert!(moved.is_err());
+    let broken = fx.conn.replace_document(&fx.object, &key, "{n: ").await;
+    assert!(broken.is_err_and(|e| e.to_string().contains("line 1")));
+
+    let new_key = fx
+        .conn
+        .insert_document(
+            &fx.object,
+            "{_id: 'k2', items: [{sku: 'p', qty: 1}, {sku: 'q'}]}",
+        )
+        .await
+        .expect("insert");
+    assert_eq!(new_key, vec![("_id".to_string(), Value::text("k2"))]);
+    assert!(
+        fx.conn
+            .document(&fx.object, &new_key)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let gone = vec![("_id".to_string(), Value::text("nope"))];
+    assert_eq!(fx.conn.document(&fx.object, &gone).await.unwrap(), None);
+
+    let schema = fx.conn.schema(&fx.object, 100).await.expect("schema");
+    assert_eq!(schema.sampled, 2);
+    assert!(!schema.declared);
+    assert!(schema.fields[0].key);
+    assert_eq!(schema.field("address.city").map(|f| f.present), Some(1));
+    let qty = schema.field("items.qty").expect("items.qty");
+    assert_eq!((qty.present, qty.of), (1, 2));
+    fx.cleanup().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn manages_indexes_and_collections() {
+    let Some(fx) = Fixture::new("indexes").await else {
+        return;
+    };
+    let name = &fx.object.name;
+    fx.run(&format!("db.createCollection('{name}')")).await;
+    let (_, _, _) = fx
+        .run(&format!(
+            "db.getCollection('{name}').createIndex({{status: 1, created: -1}}, {{unique: true}})"
+        ))
+        .await;
+    let (columns, rows, _) = fx
+        .run(&format!("db.getCollection('{name}').getIndexes()"))
+        .await;
+    let at = columns
+        .iter()
+        .position(|c| c == "name")
+        .expect("name column");
+    let names: Vec<_> = rows.iter().map(|r| r[at].clone()).collect();
+    assert!(
+        names.contains(&Value::text("status_1_created_-1")),
+        "{names:?}"
+    );
+    fx.run(&format!(
+        "db.getCollection('{name}').dropIndex('status_1_created_-1')"
+    ))
+    .await;
+    let (_, rows, _) = fx
+        .run(&format!("db.getCollection('{name}').getIndexes()"))
+        .await;
+    assert_eq!(rows.len(), 1);
+
+    fx.run(&format!(
+        "db.getCollection('{name}').insertOne({{_id: 1, n: 1}})"
+    ))
+    .await;
+    let (columns, rows, _) = fx
+        .run(&format!(
+            "db.getCollection('{name}').findOneAndUpdate({{_id: 1}}, {{$inc: {{n: 1}}}}, {{returnDocument: 'after'}})"
+        ))
+        .await;
+    let n = columns.iter().position(|c| c == "n").expect("n");
+    assert_eq!(rows[0][n], Value::Int(2));
+    let (_, rows, affected) = fx
+        .run(&format!(
+            "db.getCollection('{name}').findOneAndDelete({{_id: 99}})"
+        ))
+        .await;
+    assert!(rows.is_empty());
+    assert_eq!(affected, Some(0));
+
+    let (columns, rows, _) = fx.run("show dbs").await;
+    assert_eq!(columns.first().map(String::as_str), Some("name"));
+    assert!(!rows.is_empty());
+    let (_, rows, _) = fx.run(&format!("db.getCollection('{name}').stats()")).await;
+    assert_eq!(rows.len(), 1);
+
+    let renamed = format!("{name}_renamed");
+    fx.run(&format!(
+        "db.getCollection('{name}').renameCollection('{renamed}')"
+    ))
+    .await;
+    let objects = fx
+        .conn
+        .objects(&fx.object.namespace)
+        .await
+        .expect("objects");
+    assert!(objects.iter().any(|o| o.object.name == renamed));
+    assert!(!objects.iter().any(|o| o.object.name == *name));
+    fx.run(&format!("db.getCollection('{renamed}').drop()"))
+        .await;
+    fx.cleanup().await;
+}

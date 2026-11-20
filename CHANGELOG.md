@@ -4,6 +4,31 @@ Packages for every version are attached to its
 [release](https://github.com/khaodius/deltos/releases), with SHA-256 checksums and a signed
 update manifest.
 
+## 0.2.1 - 2026-11-20
+
+- **Documents view for MongoDB.** A collection's tab has a Documents view beside Data:
+  a line per document on the left, following the filters and sort, and the selected
+  document whole on the right, written as the shell writes it (`ObjectId(…)`,
+  `ISODate(…)`, `NumberLong(…)`, `NumberDecimal(…)`), with every field and its exact type.
+  Edit it there and Save replaces the document in one write, so removing a line removes
+  the field. New inserts a document typed the same way, and the trash button deletes one.
+  Saves ask for the same confirmation a query would on that connection, and read-only
+  connections refuse them.
+- **Schema view for MongoDB.** The Schema view samples 100, 1,000 or 10,000 random
+  documents and shows every field path as a tree: embedded documents and documents inside
+  arrays nest under their field, each with the types it held and how often it is there.
+  Copy turns the sample into a `$jsonSchema` validator.
+- **More of the shell.** The query editor runs `createIndex`, `createIndexes`,
+  `dropIndex`, `dropIndexes`, `getIndexes`, `findOneAndUpdate`, `findOneAndReplace`,
+  `findOneAndDelete`, `renameCollection` and `stats()` on a collection, and
+  `db.createCollection`, `db.createView`, `db.dropDatabase`, `db.stats()`,
+  `db.serverStatus()`, `db.currentOp()`, `db.getUsers()` and `db.version()`, plus
+  `show dbs` and `show collections`. Dropping an index or a database asks first, like
+  `drop`.
+- **MongoDB connection options in the form.** SRV (`mongodb+srv://`), auth source, replica
+  set and CA file have fields of their own, so an Atlas or replica set URL pasted into the
+  form splits into the fields instead of staying a URL.
+
 ## 0.1.21 - 2026-11-15
 
 - **Open tables follow your SQL.** After a statement from a query tab changes data, every

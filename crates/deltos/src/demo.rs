@@ -988,6 +988,7 @@ impl Connection for DemoConnection {
             edit_rows: true,
             cancel: false,
             language: "sql",
+            documents: false,
         }
     }
 

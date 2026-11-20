@@ -13,8 +13,8 @@ use std::sync::Arc;
 
 use deltos_data::{
     BrowsePage, BrowseRequest, CancelHandle, Capabilities, Connection, ConnectionConfig,
-    DriverKind, Error, ExecuteOptions, Namespace, ObjectEntry, ObjectInfo, ObjectRef, Result,
-    RowEdit, RowStream,
+    DriverKind, Error, ExecuteOptions, Namespace, ObjectEntry, ObjectInfo, ObjectRef, ObjectSchema,
+    Result, RowEdit, RowStream, Value,
 };
 use deltos_drivers::classify::{self, Risk};
 use deltos_settings::{ConnectionTag, Data};
@@ -236,6 +236,39 @@ impl Connection for ReadOnly {
         })
     }
 
+    fn schema<'a>(
+        &'a self,
+        object: &'a ObjectRef,
+        sample: u32,
+    ) -> BoxFuture<'a, Result<ObjectSchema>> {
+        self.inner.schema(object, sample)
+    }
+
+    fn document<'a>(
+        &'a self,
+        object: &'a ObjectRef,
+        key: &'a [(String, Value)],
+    ) -> BoxFuture<'a, Result<Option<String>>> {
+        self.inner.document(object, key)
+    }
+
+    fn replace_document<'a>(
+        &'a self,
+        _object: &'a ObjectRef,
+        _key: &'a [(String, Value)],
+        _text: &'a str,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async { Err(read_only_documents()) })
+    }
+
+    fn insert_document<'a>(
+        &'a self,
+        _object: &'a ObjectRef,
+        _text: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<(String, Value)>>> {
+        Box::pin(async { Err(read_only_documents()) })
+    }
+
     fn cancel_handle(&self) -> Option<Arc<dyn CancelHandle>> {
         self.inner.cancel_handle()
     }
@@ -243,6 +276,12 @@ impl Connection for ReadOnly {
     fn close(&self) -> BoxFuture<'_, ()> {
         self.inner.close()
     }
+}
+
+fn read_only_documents() -> Error {
+    Error::Query(
+        "Read-only connection: documents can't be changed. Turn off Read-only in the connection's settings to change them.".into(),
+    )
 }
 
 impl ReadOnly {
@@ -370,6 +409,10 @@ mod tests {
         ));
         let refused = schema.err().map(|e| e.to_string());
         assert!(refused.is_some_and(|e| e.starts_with("Read-only connection")));
+        let replace = futures::executor::block_on(conn.replace_document(&object(), &[], "{}"));
+        assert!(replace.is_err_and(|e| e.to_string().starts_with("Read-only connection")));
+        let insert = futures::executor::block_on(conn.insert_document(&object(), "{}"));
+        assert!(insert.is_err_and(|e| e.to_string().starts_with("Read-only connection")));
         // Only the reads reach the server.
         assert_eq!(
             *inner.ran.lock(),

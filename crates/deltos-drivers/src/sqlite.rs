@@ -178,6 +178,7 @@ impl Connection for SqliteConnection {
             edit_rows: true,
             cancel: true,
             language: "sql",
+            documents: false,
         }
     }
 
