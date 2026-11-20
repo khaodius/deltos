@@ -1470,7 +1470,7 @@ impl GridView {
                         }),
                     )
                     .when(column.primary_key.is_some(), |el| {
-                        el.child(icon(Icon::Key).size(px(11.)).text_color(t.warning))
+                        el.child(icon(Icon::Key).size(px(11.)).text_color(t.key))
                     })
                     .child(
                         div()

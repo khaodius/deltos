@@ -466,7 +466,7 @@ fn field_header(
                 .child(column.name.clone()),
         )
         .when(column.primary_key.is_some(), |el| {
-            el.child(icon(Icon::Key).size(px(10.)).text_color(t.warning))
+            el.child(icon(Icon::Key).size(px(10.)).text_color(t.key))
         })
         .child(div().flex_1())
         .when(can_null, |el| {

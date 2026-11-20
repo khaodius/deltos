@@ -1506,7 +1506,7 @@ fn paint(
                             window.paint_quad(
                                 fill(
                                     p.bounds(&Rect::new(x, mid - r, r * 2.0, r * 2.0)),
-                                    if c.key { t.warning } else { t.syntax_keyword },
+                                    if c.key { t.key } else { t.syntax_keyword },
                                 )
                                 .corner_radii(px(r * zoom)),
                             );

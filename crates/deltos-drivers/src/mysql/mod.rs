@@ -155,6 +155,7 @@ impl Connection for MysqlConnection {
             edit_rows: true,
             cancel: true,
             language: "sql",
+            documents: false,
         }
     }
 

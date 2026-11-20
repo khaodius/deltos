@@ -23,8 +23,10 @@ use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 
+mod schema;
 mod value;
 
+pub use schema::{ObjectSchema, SchemaField, SchemaType};
 pub use value::{Value, ValueKind};
 
 /// Every error a driver returns. Messages are shown to the person as they are, so they
@@ -204,6 +206,9 @@ pub struct Capabilities {
     pub cancel: bool,
     /// The query language, for the editor: `sql`, `mongo` and so on.
     pub language: &'static str,
+    /// Whole records can be read and written as text through [`Connection::document`],
+    /// [`Connection::replace_document`] and [`Connection::insert_document`].
+    pub documents: bool,
 }
 
 /// A database, schema or keyspace. `path` locates it, outermost first: for Postgres
@@ -708,6 +713,54 @@ pub trait Connection: Send + Sync {
             }
             Ok(())
         })
+    }
+
+    /// The tree of `object`'s fields. A document database reads up to `sample` records
+    /// to find them; the default is the declared columns from [`Connection::describe`].
+    fn schema<'a>(
+        &'a self,
+        object: &'a ObjectRef,
+        sample: u32,
+    ) -> BoxFuture<'a, Result<ObjectSchema>> {
+        let _ = sample;
+        Box::pin(async move {
+            let info = self.describe(object).await?;
+            Ok(ObjectSchema::declared(&info.columns, info.estimated_rows))
+        })
+    }
+
+    /// One whole record of a document database, located by `key` as for a
+    /// [`RowEdit`], written in the database's own language so it reads back with
+    /// [`Connection::replace_document`]. `None` when no record has that key.
+    fn document<'a>(
+        &'a self,
+        object: &'a ObjectRef,
+        key: &'a [(String, Value)],
+    ) -> BoxFuture<'a, Result<Option<String>>> {
+        let _ = (object, key);
+        Box::pin(async { Err(Error::Unsupported("reading whole documents")) })
+    }
+
+    /// Replaces the record `key` locates with the document in `text`. The new document
+    /// keeps the record's key; one that names another key is refused.
+    fn replace_document<'a>(
+        &'a self,
+        object: &'a ObjectRef,
+        key: &'a [(String, Value)],
+        text: &'a str,
+    ) -> BoxFuture<'a, Result<()>> {
+        let _ = (object, key, text);
+        Box::pin(async { Err(Error::Unsupported("replacing whole documents")) })
+    }
+
+    /// Inserts the document in `text` and returns its key, as the key of a [`RowEdit`].
+    fn insert_document<'a>(
+        &'a self,
+        object: &'a ObjectRef,
+        text: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<(String, Value)>>> {
+        let _ = (object, text);
+        Box::pin(async { Err(Error::Unsupported("inserting whole documents")) })
     }
 
     /// A handle that cancels what this connection is running.

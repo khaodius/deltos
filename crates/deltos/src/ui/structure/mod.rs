@@ -690,7 +690,7 @@ impl StructureView {
             .items_center()
             .justify_center()
             .when_some(def.primary_key, |el, _| {
-                el.child(icon(Icon::Key).size(px(11.)).text_color(t.warning))
+                el.child(icon(Icon::Key).size(px(11.)).text_color(t.key))
             })
             .when(self.create, |el| {
                 el.cursor_pointer()

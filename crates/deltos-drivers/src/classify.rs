@@ -643,7 +643,7 @@ pub fn assess_mongo(text: &str) -> Assessment {
         return Assessment::read();
     };
     match command {
-        Command::ListCollections { .. } => Assessment::read(),
+        Command::ListCollections { .. } | Command::ListDatabases => Assessment::read(),
         Command::Run { command, .. } => mongo_command(&command),
         // `explain()` with `executionStats` runs the operation, so it is judged the same.
         Command::Collection { operation, .. } | Command::Explain { operation, .. } => {
@@ -672,6 +672,10 @@ pub fn assess_mongo(text: &str) -> Assessment {
                 }
                 Operation::Delete { .. } => Assessment::new(Risk::Write, "delete"),
                 Operation::Drop => Assessment::new(Risk::Remove, "drop"),
+                Operation::Rename { drop_target, .. } if drop_target => {
+                    Assessment::new(Risk::Remove, "renameCollection with dropTarget")
+                }
+                Operation::Rename { .. } => Assessment::new(Risk::Alter, "renameCollection"),
             }
         }
     }
@@ -1148,6 +1152,23 @@ mod tests {
         assert_eq!(m("db.orders.deleteMany({})"), Risk::Unbounded);
         assert_eq!(m("db.orders.deleteOne({})"), Risk::Write);
         assert_eq!(m("db.orders.drop()"), Risk::Remove);
+        assert_eq!(m("show dbs"), Risk::Read);
+        assert_eq!(m("show collections"), Risk::Read);
+        assert_eq!(m("db.orders.getIndexes()"), Risk::Read);
+        assert_eq!(m("db.orders.stats()"), Risk::Read);
+        assert_eq!(m("db.stats()"), Risk::Read);
+        assert_eq!(m("db.orders.createIndex({a: 1})"), Risk::Write);
+        assert_eq!(m("db.orders.dropIndex('a_1')"), Risk::Remove);
+        assert_eq!(m("db.orders.dropIndexes()"), Risk::Remove);
+        assert_eq!(m("db.createCollection('x')"), Risk::Write);
+        assert_eq!(m("db.dropDatabase()"), Risk::Remove);
+        assert_eq!(m("db.orders.renameCollection('o2')"), Risk::Alter);
+        assert_eq!(m("db.orders.renameCollection('o2', true)"), Risk::Remove);
+        assert_eq!(
+            m("db.orders.findOneAndUpdate({a: 1}, {$set: {b: 2}})"),
+            Risk::Write
+        );
+        assert_eq!(m("db.orders.findOneAndDelete({a: 1})"), Risk::Write);
         assert_eq!(m("{ping: 1}"), Risk::Read);
         assert_eq!(m("db.runCommand({listCollections: 1})"), Risk::Read);
         assert_eq!(m("db.runCommand({dropDatabase: 1})"), Risk::Remove);

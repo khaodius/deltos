@@ -39,7 +39,8 @@ use bson::{Bson, Document, doc};
 use deltos_data::{
     BrowsePage, BrowseRequest, CancelHandle, Capabilities, Column, Connection, ConnectionConfig,
     Driver, DriverKind, Error, ExecuteOptions, Index, Namespace, NamespaceKind, ObjectEntry,
-    ObjectInfo, ObjectKind, ObjectRef, Result, Row, RowBatch, RowEdit, RowStream, TlsMode, Value,
+    ObjectInfo, ObjectKind, ObjectRef, ObjectSchema, Result, Row, RowBatch, RowEdit, RowStream,
+    TlsMode, Value,
 };
 use futures::future::BoxFuture;
 use futures::{StreamExt, TryStreamExt};
@@ -52,6 +53,8 @@ use tokio::sync::{mpsc, watch};
 use crate::{runtime, util};
 
 mod convert;
+mod infer;
+pub mod print;
 mod query;
 mod shape;
 pub mod shell;
@@ -538,11 +541,41 @@ impl Inner {
                         .await?;
                     stream_cursor(&self.rt, cursor, batch, op).await
                 } else {
+                    let name = command.keys().next().cloned().unwrap_or_default();
                     let reply = op
                         .run(async { db.run_command(command).await.map_err(mongo_error) })
                         .await?;
-                    Ok(documents_stream(vec![reply], batch))
+                    Ok(command_reply(&name, reply, batch))
                 }
+            }
+            Command::ListDatabases => {
+                let reply = op
+                    .run(async {
+                        self.client
+                            .database("admin")
+                            .run_command(doc! { "listDatabases": 1, "authorizedDatabases": true })
+                            .await
+                            .map_err(mongo_error)
+                    })
+                    .await?;
+                let docs = reply
+                    .get_array("databases")
+                    .map(|list| {
+                        list.iter()
+                            .filter_map(|d| d.as_document())
+                            .map(|d| {
+                                let mut out = Document::new();
+                                for key in ["name", "sizeOnDisk", "empty"] {
+                                    if let Some(v) = d.get(key) {
+                                        out.insert(key, v.clone());
+                                    }
+                                }
+                                out
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Ok(documents_stream(docs, batch))
             }
             Command::ListCollections { database } => {
                 let db = in_db(database)?;
@@ -800,6 +833,28 @@ impl Inner {
                     .await?;
                 Ok(RowStream::affected(Some(result.deleted_count)))
             }
+            Operation::Rename { to, drop_target } => {
+                let db_name = db.name().to_string();
+                let command = doc! {
+                    "renameCollection": format!("{db_name}.{name}"),
+                    "to": format!("{db_name}.{to}"),
+                    "dropTarget": drop_target,
+                };
+                op.run(async {
+                    self.client
+                        .database("admin")
+                        .run_command(command)
+                        .await
+                        .map_err(mongo_error)
+                })
+                .await?;
+                if let Ok(mut shapes) = self.shapes.lock() {
+                    shapes.remove(&(db_name, name.clone()));
+                }
+                let mut stream = RowStream::affected(None);
+                stream.messages.push(format!("Renamed {name} to {to}."));
+                Ok(stream)
+            }
             Operation::Drop => {
                 op.run(async { collection.drop().await.map_err(mongo_error) })
                     .await?;
@@ -900,6 +955,141 @@ impl Inner {
         }
     }
 
+    /// The field tree of a random sample of up to `sample` documents.
+    async fn schema(&self, object: &ObjectRef, sample: u32, op: &mut Op) -> Result<ObjectSchema> {
+        let db = self.database(&object.namespace)?;
+        let size = i64::from(sample.clamp(1, 100_000));
+        let command = doc! {
+            "aggregate": &object.name,
+            "pipeline": [{ "$sample": { "size": size } }],
+            "cursor": { "batchSize": size.min(1000) },
+            "comment": &op.tag,
+        };
+        let tag = Bson::String(op.tag.clone());
+        let mut cursor = op
+            .run(async {
+                db.run_cursor_command(command)
+                    .comment(tag)
+                    .await
+                    .map_err(mongo_error)
+            })
+            .await?;
+        let mut inference = infer::Inference::new();
+        while inference.sampled() < size as u64 {
+            match op
+                .run(async { cursor.try_next().await.map_err(mongo_error) })
+                .await?
+            {
+                Some(doc) => inference.add(&doc),
+                None => break,
+            }
+        }
+        drop(cursor);
+        let total = if object.kind == ObjectKind::View {
+            None
+        } else {
+            collection_stats(&db, &object.name).await.count
+        };
+        Ok(inference.finish(total))
+    }
+
+    /// The document `key` names, as indented shell text.
+    async fn document(
+        &self,
+        object: &ObjectRef,
+        key: &[(String, Value)],
+    ) -> Result<Option<String>> {
+        let collection = self.collection(object)?;
+        let kind_target = |name: &str| {
+            self.with_shape(object, |shape| shape.kind(name))
+                .map_or(Target::Any, Target::for_kind)
+        };
+        match locate(&collection, key, &kind_target).await {
+            Ok(doc) => Ok(Some(print::pretty_document(&doc))),
+            Err(_) if !key.is_empty() => {
+                // Gone, or the key matched more than one: tell them apart.
+                let mut filter = Document::new();
+                for (name, value) in key {
+                    if name == "_id" {
+                        filter.insert("_id", doc! { "$in": convert::key_candidates(value) });
+                    }
+                }
+                let n = collection
+                    .count_documents(filter)
+                    .limit(2)
+                    .await
+                    .map_err(mongo_error)?;
+                if n == 0 {
+                    Ok(None)
+                } else {
+                    Err(Error::Query(
+                        "The key matches more than one document.".to_string(),
+                    ))
+                }
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Replaces the document `key` names with `text`, keeping its `_id`.
+    async fn replace_document(
+        &self,
+        object: &ObjectRef,
+        key: &[(String, Value)],
+        text: &str,
+    ) -> Result<()> {
+        let collection = self.collection(object)?;
+        let mut replacement = parse_document_text(text)?;
+        let kind_target = |name: &str| {
+            self.with_shape(object, |shape| shape.kind(name))
+                .map_or(Target::Any, Target::for_kind)
+        };
+        let current = locate(&collection, key, &kind_target).await?;
+        let id = current.get("_id").cloned().unwrap_or(Bson::Null);
+        match replacement.get("_id") {
+            None => {
+                // Keep `_id` first, where the server would put it anyway.
+                let mut with_id = doc! { "_id": id.clone() };
+                with_id.extend(std::mem::take(&mut replacement));
+                replacement = with_id;
+            }
+            Some(new) if *new == id => {}
+            Some(_) => {
+                return Err(Error::Query(
+                    "The _id of a document cannot be changed; insert a copy instead.".to_string(),
+                ));
+            }
+        }
+        let result = collection
+            .replace_one(doc! { "_id": id }, replacement.clone())
+            .await
+            .map_err(mongo_error)?;
+        if result.matched_count != 1 {
+            return Err(gone());
+        }
+        self.with_shape(object, |shape| shape.add(&replacement));
+        Ok(())
+    }
+
+    /// Inserts `text` and returns its `_id` as a key.
+    async fn insert_document(
+        &self,
+        object: &ObjectRef,
+        text: &str,
+    ) -> Result<Vec<(String, Value)>> {
+        let collection = self.collection(object)?;
+        let document = parse_document_text(text)?;
+        let result = collection
+            .insert_one(document.clone())
+            .await
+            .map_err(mongo_error)?;
+        self.with_shape(object, |shape| shape.add(&document));
+        Ok(vec![(
+            "_id".to_string(),
+            convert::to_value(result.inserted_id),
+        )])
+    }
+
     async fn cancel(&self) {
         let tags: Vec<String> = self
             .running
@@ -979,6 +1169,17 @@ async fn locate(
         _ => Err(Error::Query(
             "The key matches more than one document, so nothing was changed.".to_string(),
         )),
+    }
+}
+
+/// A document typed by the person: shell syntax or extended JSON.
+fn parse_document_text(text: &str) -> Result<Document> {
+    match shell::parse_value(text) {
+        Ok(Bson::Document(doc)) => Ok(doc),
+        Ok(_) => Err(Error::Query(
+            "A document must be an object in braces, such as { name: \"x\" }.".to_string(),
+        )),
+        Err(e) => Err(Error::Query(e.describe(text))),
     }
 }
 
@@ -1096,6 +1297,57 @@ fn documents_stream(docs: Vec<Document>, batch: u32) -> RowStream {
         batches: Box::pin(futures::stream::iter(batches)),
         affected: None,
         messages: Vec::new(),
+    }
+}
+
+/// The reply of a command as rows. Most show as the one reply document; `findAndModify`
+/// shows the document it found, and `collStats`-like replies stay whole.
+fn command_reply(name: &str, reply: Document, batch: u32) -> RowStream {
+    match name {
+        "findAndModify" | "findandmodify" => {
+            let mut stream = match reply.get("value") {
+                Some(Bson::Document(found)) => documents_stream(vec![found.clone()], batch),
+                _ => {
+                    let mut stream = RowStream::affected(Some(0));
+                    stream.messages.push("No document matched.".to_string());
+                    stream
+                }
+            };
+            if let Ok(last) = reply.get_document("lastErrorObject")
+                && let Some(id) = last.get("upserted")
+            {
+                stream.messages.push(format!(
+                    "Inserted a document with _id {}.",
+                    convert::json_text(id.clone())
+                ));
+            }
+            stream
+        }
+        "createIndexes" => {
+            let mut stream = RowStream::affected(None);
+            let before = reply.get("numIndexesBefore").and_then(as_u64);
+            let after = reply.get("numIndexesAfter").and_then(as_u64);
+            stream.messages.push(match (before, after) {
+                (Some(b), Some(a)) if a > b => format!(
+                    "Created {} index{}.",
+                    a - b,
+                    if a - b == 1 { "" } else { "es" }
+                ),
+                _ => "The index already exists.".to_string(),
+            });
+            stream
+        }
+        "dropIndexes" => {
+            let mut stream = RowStream::affected(None);
+            stream.messages.push("Dropped the index.".to_string());
+            stream
+        }
+        "create" => {
+            let mut stream = RowStream::affected(None);
+            stream.messages.push("Created.".to_string());
+            stream
+        }
+        _ => documents_stream(vec![reply], batch),
     }
 }
 
@@ -1467,6 +1719,7 @@ impl Connection for MongoConnection {
             edit_rows: true,
             cancel: true,
             language: "mongo",
+            documents: true,
         }
     }
 
@@ -1535,6 +1788,50 @@ impl Connection for MongoConnection {
         let object = object.clone();
         let edits = edits.to_vec();
         self.spawn(|inner| async move { inner.apply_edits(&object, &edits).await })
+    }
+
+    fn schema<'a>(
+        &'a self,
+        object: &'a ObjectRef,
+        sample: u32,
+    ) -> BoxFuture<'a, Result<ObjectSchema>> {
+        let object = object.clone();
+        self.spawn(|inner| async move {
+            let mut op = Op::start(&inner);
+            inner.schema(&object, sample, &mut op).await
+        })
+    }
+
+    fn document<'a>(
+        &'a self,
+        object: &'a ObjectRef,
+        key: &'a [(String, Value)],
+    ) -> BoxFuture<'a, Result<Option<String>>> {
+        let object = object.clone();
+        let key = key.to_vec();
+        self.spawn(|inner| async move { inner.document(&object, &key).await })
+    }
+
+    fn replace_document<'a>(
+        &'a self,
+        object: &'a ObjectRef,
+        key: &'a [(String, Value)],
+        text: &'a str,
+    ) -> BoxFuture<'a, Result<()>> {
+        let object = object.clone();
+        let key = key.to_vec();
+        let text = text.to_string();
+        self.spawn(|inner| async move { inner.replace_document(&object, &key, &text).await })
+    }
+
+    fn insert_document<'a>(
+        &'a self,
+        object: &'a ObjectRef,
+        text: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<(String, Value)>>> {
+        let object = object.clone();
+        let text = text.to_string();
+        self.spawn(|inner| async move { inner.insert_document(&object, &text).await })
     }
 
     fn cancel_handle(&self) -> Option<Arc<dyn CancelHandle>> {
