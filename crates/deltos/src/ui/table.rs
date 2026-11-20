@@ -29,10 +29,12 @@ use crate::net::Net;
 use crate::state::{AppState, Inspected, RowSource, StateEvent};
 use crate::tasks::{self, CacheFollower, TaskOutcome};
 use crate::theme::{Theme, theme};
+use crate::ui::documents::DocumentsView;
 use crate::ui::edit;
 use crate::ui::grid::{Batch, CellInput, GridEvent, GridView, MenuTarget, RowRef};
 use crate::ui::icons::Icon;
 use crate::ui::pending::RowMark;
+use crate::ui::schema_view::SchemaView;
 use crate::ui::structure::{StructureEvent, StructureView};
 use crate::ui::{
     ButtonStyle, Tooltip, button, empty_state, icon_button, menu, segmented, thousands,
@@ -124,6 +126,10 @@ struct Review {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
     Data,
+    /// Document databases: a line per document beside the selected one, whole.
+    Documents,
+    /// Document databases: the field tree of a sample.
+    Schema,
     Structure,
 }
 
@@ -161,6 +167,8 @@ pub struct TablePanel {
     /// The status bar's import and export menu is open.
     transfer_menu: bool,
     structure: Option<Entity<StructureView>>,
+    documents: Option<Entity<DocumentsView>>,
+    schema: Option<Entity<SchemaView>>,
     /// Loads and counts, in the task list.
     loading: CacheFollower,
     _subs: Vec<Subscription>,
@@ -274,6 +282,8 @@ impl TablePanel {
             review_focus: cx.focus_handle(),
             transfer_menu: false,
             structure: None,
+            documents: None,
+            schema: None,
             loading: CacheFollower::default(),
             _subs: subs,
         };
@@ -1926,7 +1936,7 @@ impl TablePanel {
             .text_color(t.text_muted)
             .child(segmented(
                 "table-mode",
-                &[("Data", Mode::Data), ("Structure", Mode::Structure)],
+                &self.modes(cx),
                 mode,
                 {
                     let weak = cx.entity().downgrade();
@@ -2113,6 +2123,50 @@ impl TablePanel {
 
     /// The structure view, made on first show. It edits the table's columns, indexes and
     /// keys; see [`crate::ui::structure`].
+    /// The views this table offers: Documents and Schema where the database stores
+    /// whole documents.
+    fn modes(&self, cx: &App) -> Vec<(&'static str, Mode)> {
+        let documents = self.object.kind.has_rows()
+            && self
+                .connection(cx)
+                .is_some_and(|c| c.capabilities().documents);
+        if documents {
+            vec![
+                ("Data", Mode::Data),
+                ("Documents", Mode::Documents),
+                ("Schema", Mode::Schema),
+                ("Structure", Mode::Structure),
+            ]
+        } else {
+            vec![("Data", Mode::Data), ("Structure", Mode::Structure)]
+        }
+    }
+
+    fn documents_view(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let view = self.documents.get_or_insert_with(|| {
+            let (state, connection, object, grid) = (
+                self.state.clone(),
+                self.connection.clone(),
+                self.object.clone(),
+                self.grid.clone(),
+            );
+            cx.new(|cx| DocumentsView::new(state, connection, object, grid, cx))
+        });
+        view.clone().into_any_element()
+    }
+
+    fn schema_view(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let view = self.schema.get_or_insert_with(|| {
+            let (state, connection, object) = (
+                self.state.clone(),
+                self.connection.clone(),
+                self.object.clone(),
+            );
+            cx.new(|cx| SchemaView::new(state, connection, object, cx))
+        });
+        view.clone().into_any_element()
+    }
+
     fn structure(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if self.structure.is_none() {
             let (state, connection, object) = (
@@ -2450,12 +2504,17 @@ impl Render for TablePanel {
                 )
                 .into_any_element();
         }
+        if !self.modes(cx).iter().any(|(_, m)| *m == self.mode) {
+            self.mode = Mode::Data;
+        }
         let body = match self.mode {
             Mode::Data => self.grid.clone().into_any_element(),
+            Mode::Documents => self.documents_view(cx),
+            Mode::Schema => self.schema_view(cx),
             Mode::Structure => self.structure(window, cx),
         };
-        let filters =
-            (self.filters.open && self.mode == Mode::Data).then(|| self.filter_bar(&t, window, cx));
+        let filters = (self.filters.open && matches!(self.mode, Mode::Data | Mode::Documents))
+            .then(|| self.filter_bar(&t, window, cx));
         let confirm = self.confirm_delete.clone().map(|rows| {
             let n = rows.len();
             div()

@@ -63,7 +63,18 @@ struct Form {
     ssh_user: Entity<TextInput>,
     ssh_key: Entity<TextInput>,
     ssh_secret: Entity<TextInput>,
+    /// MongoDB: the `authSource`, `replicaSet` and `tlsCAFile` URL options, and whether
+    /// the host is an SRV record (`mongodb+srv://`).
+    mongo_auth_source: Entity<TextInput>,
+    mongo_replica_set: Entity<TextInput>,
+    mongo_ca_file: Entity<TextInput>,
+    mongo_srv: bool,
+    /// Driver options of the selected connection that no field shows, kept as they are.
+    other_options: Vec<(String, String)>,
 }
+
+/// The MongoDB URL options the form has fields for, as the driver spells them.
+const MONGO_OPTIONS: [&str; 3] = ["authSource", "replicaSet", "tlsCAFile"];
 
 pub struct ConnectionsPanel {
     state: Entity<AppState>,
@@ -115,6 +126,11 @@ impl ConnectionsPanel {
             ssh_user: input("From ~/.ssh/config, or your login", cx),
             ssh_key: input("IdentityFile from ~/.ssh/config, or ~/.ssh/id_ed25519", cx),
             ssh_secret: cx.new(|cx| TextInput::new("Key passphrase, if it has one", cx).masked()),
+            mongo_auth_source: input("The database, or admin", cx),
+            mongo_replica_set: input("Found by the driver", cx),
+            mongo_ca_file: input("System certificates", cx),
+            mongo_srv: false,
+            other_options: Vec::new(),
         };
         let mut subs = vec![cx.subscribe(&state, |_, _, e, cx| {
             if matches!(
@@ -134,6 +150,9 @@ impl ConnectionsPanel {
             &form.ssh_user,
             &form.ssh_key,
             &form.ssh_secret,
+            &form.mongo_auth_source,
+            &form.mongo_replica_set,
+            &form.mongo_ca_file,
         ] {
             subs.push(cx.subscribe(input, |this, _, e, cx| match e {
                 InputEvent::Submit => this.save(true, cx),
@@ -279,6 +298,7 @@ impl ConnectionsPanel {
         }
         self.set_field(Field::Database, config.database.clone(), cx);
         self.form.tls = config.tls;
+        self.set_options(kind, &config.options, text, cx);
         if lossless {
             self.set_field(Field::Url, String::new(), cx);
             self.notice = Some("Filled in from the URL.".into());
@@ -422,6 +442,8 @@ impl ConnectionsPanel {
             .update(cx, |i, cx| i.set_masked(true, cx));
         self.set_ssh_auth(ssh.auth, cx);
         self.describe_ssh_host(cx);
+        let srv_url = c.config.url.as_deref().unwrap_or("");
+        self.set_options(c.kind, &c.config.options, srv_url, cx);
         self.form.tag = c.tag;
         self.form.tls = c.config.tls;
         self.form.save_password = c.save_password;
@@ -444,6 +466,35 @@ impl ConnectionsPanel {
         self.notice = None;
         self.menu = None;
         cx.notify();
+    }
+
+    /// Shows driver `options` in the fields that hold them and keeps the rest. `url` is
+    /// the connection URL, if any, which says whether the host is an SRV record.
+    fn set_options(
+        &mut self,
+        kind: DriverKind,
+        options: &[(String, String)],
+        url: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let mongo = kind == DriverKind::Mongodb;
+        let (known, other) = split_options(kind, options);
+        for (input, key) in [
+            (&self.form.mongo_auth_source, "authSource"),
+            (&self.form.mongo_replica_set, "replicaSet"),
+            (&self.form.mongo_ca_file, "tlsCAFile"),
+        ] {
+            let value = known
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default();
+            input.update(cx, |i, cx| i.set_text(value, cx));
+        }
+        self.form.mongo_srv = mongo
+            && (url.trim().to_ascii_lowercase().starts_with("mongodb+srv")
+                || known.iter().any(|(k, v)| k == "srv" && v == "true"));
+        self.form.other_options = other;
     }
 
     /// The name a connection gets when the Name field is left empty.
@@ -503,6 +554,22 @@ impl ConnectionsPanel {
             name = self.auto_name(cx);
         }
         let password = f.password.read(cx).text().to_owned();
+        let mut options = f.other_options.clone();
+        if f.kind == DriverKind::Mongodb {
+            for (input, key) in [
+                (&f.mongo_auth_source, "authSource"),
+                (&f.mongo_replica_set, "replicaSet"),
+                (&f.mongo_ca_file, "tlsCAFile"),
+            ] {
+                let value = text(input);
+                if !value.is_empty() {
+                    options.push((key.to_owned(), value));
+                }
+            }
+            if f.mongo_srv {
+                options.push(("srv".to_owned(), "true".to_owned()));
+            }
+        }
         let settings = &self.state.read(cx).settings;
         let id = match &self.selected {
             Some(Selected::Saved(id)) => id.clone(),
@@ -520,7 +587,7 @@ impl ConnectionsPanel {
                 database,
                 tls: f.tls,
                 url,
-                options: Vec::new(),
+                options,
                 ssh: SshTunnel {
                     enabled: tunnel,
                     host: text(&f.ssh_host),
@@ -1116,6 +1183,8 @@ impl ConnectionsPanel {
         let kind_tiles = self.kind_tiles(t, cx);
         let f = &self.form;
         let sqlite = f.kind == DriverKind::Sqlite;
+        let mongo = f.kind == DriverKind::Mongodb;
+        let mongo_srv = f.mongo_srv;
         let row = |label: &'static str, content: AnyElement| {
             div()
                 .flex()
@@ -1424,6 +1493,45 @@ impl ConnectionsPanel {
                     .when(!sqlite, |el| {
                         el.child(row("TLS", div().flex().child(tls).into_any_element()))
                     })
+                    .when(mongo, |el| {
+                        el.child(row(
+                            "SRV",
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.))
+                                .child(switch("mongo-srv", mongo_srv, t).on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.form.mongo_srv = !this.form.mongo_srv;
+                                        this.edited(cx);
+                                    },
+                                )))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .text_size(t.small_size)
+                                        .text_color(t.text_muted)
+                                        .whitespace_normal()
+                                        .child(
+                                            "The host is a DNS seed list (mongodb+srv), as Atlas gives.",
+                                        ),
+                                )
+                                .into_any_element(),
+                        ))
+                        .child(row(
+                            "Auth source",
+                            field(&f.mongo_auth_source, t, window, cx).into_any_element(),
+                        ))
+                        .child(row(
+                            "Replica set",
+                            field(&f.mongo_replica_set, t, window, cx).into_any_element(),
+                        ))
+                        .child(row(
+                            "CA file",
+                            field(&f.mongo_ca_file, t, window, cx).into_any_element(),
+                        ))
+                    })
                     .when(!sqlite, |el| el.child(ssh_section))
                     .when(saved_id.is_some() && !unsaved, |el| {
                         el.child(row(
@@ -1543,7 +1651,35 @@ fn url_fits_fields(kind: DriverKind, url: &str, config: &ConnectionConfig) -> bo
         .map(|(_, rest)| rest.split(['/', '?']).next().unwrap_or(""))
         .unwrap_or("");
     let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
-    config.options.is_empty() && !host.contains(',') && !lower.starts_with("mongodb+srv")
+    // MongoDB's common options and SRV have fields of their own.
+    let (_, other) = split_options(kind, &config.options);
+    let srv = lower.starts_with("mongodb+srv");
+    other.is_empty() && !host.contains(',') && (!srv || kind == DriverKind::Mongodb)
+}
+
+/// `options` split into the ones the form has fields for, by their canonical names, and
+/// the rest. URL option names are case-insensitive to the driver.
+fn split_options(
+    kind: DriverKind,
+    options: &[(String, String)],
+) -> (Vec<(String, String)>, Vec<(String, String)>) {
+    let mut known = Vec::new();
+    let mut other = Vec::new();
+    for (key, value) in options {
+        let name = (kind == DriverKind::Mongodb)
+            .then(|| {
+                MONGO_OPTIONS
+                    .iter()
+                    .chain(&["srv"])
+                    .find(|k| k.eq_ignore_ascii_case(key))
+            })
+            .flatten();
+        match name {
+            Some(name) => known.push(((*name).to_owned(), value.clone())),
+            None => other.push((key.clone(), value.clone())),
+        }
+    }
+    (known, other)
 }
 
 /// A URL for display, with any password left out.
@@ -1761,7 +1897,22 @@ mod tests {
         assert!(fits("postgres://u@h/db?sslmode=require"));
         assert!(!fits("postgres://u@h/db?application_name=x"));
         assert!(!fits("mongodb://a:1,b:2/app"));
-        assert!(!fits("mongodb+srv://u@cluster0.example.net/app"));
+        // MongoDB's SRV switch and common options have fields.
+        assert!(fits("mongodb+srv://u@cluster0.example.net/app"));
+        assert!(fits(
+            "mongodb://u@h/app?authSource=admin&replicaSet=rs0&tlsCAFile=/etc/ca.pem"
+        ));
+        assert!(fits("mongodb://u@h/app?authsource=admin"));
+        assert!(!fits("mongodb://u@h/app?readPreference=secondary"));
+        let (known, other) = split_options(
+            DriverKind::Mongodb,
+            &[
+                ("AUTHSOURCE".into(), "admin".into()),
+                ("w".into(), "majority".into()),
+            ],
+        );
+        assert_eq!(known, vec![("authSource".to_owned(), "admin".to_owned())]);
+        assert_eq!(other, vec![("w".to_owned(), "majority".to_owned())]);
     }
 
     #[test]

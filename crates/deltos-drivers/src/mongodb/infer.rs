@@ -61,7 +61,7 @@ impl Counts {
             })
             .collect();
         // Stable, so ties keep first-seen order.
-        types.sort_by(|a, b| b.count.cmp(&a.count));
+        types.sort_by_key(|t| std::cmp::Reverse(t.count));
         types
     }
 }
