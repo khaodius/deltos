@@ -28,6 +28,7 @@ pub enum Icon {
     Eyedropper,
     Filter,
     Function,
+    Graph,
     Grid,
     History,
     Key,
@@ -61,7 +62,7 @@ pub enum Icon {
 }
 
 impl Icon {
-    pub const ALL: [Icon; 47] = [
+    pub const ALL: [Icon; 48] = [
         Self::Logo,
         Self::Activity,
         Self::Check,
@@ -79,6 +80,7 @@ impl Icon {
         Self::Eyedropper,
         Self::Filter,
         Self::Function,
+        Self::Graph,
         Self::Grid,
         Self::History,
         Self::Key,
@@ -130,6 +132,7 @@ impl Icon {
             Self::Eyedropper => "eyedropper",
             Self::Filter => "filter",
             Self::Function => "function",
+            Self::Graph => "graph",
             Self::Grid => "grid",
             Self::History => "history",
             Self::Key => "key",
@@ -186,6 +189,7 @@ impl Icon {
             Self::Eyedropper => include_bytes!("../../../../assets/ui-icons/eyedropper.svg"),
             Self::Filter => include_bytes!("../../../../assets/ui-icons/filter.svg"),
             Self::Function => include_bytes!("../../../../assets/ui-icons/function.svg"),
+            Self::Graph => include_bytes!("../../../../assets/ui-icons/graph.svg"),
             Self::Grid => include_bytes!("../../../../assets/ui-icons/grid.svg"),
             Self::History => include_bytes!("../../../../assets/ui-icons/history.svg"),
             Self::Key => include_bytes!("../../../../assets/ui-icons/key.svg"),

@@ -19,6 +19,7 @@ async-channel.workspace = true
 deltos-data.workspace = true
 deltos-dock.workspace = true
 deltos-drivers.workspace = true
+deltos-graph.workspace = true
 deltos-grid.workspace = true
 deltos-settings.workspace = true
 deltos-ssh.workspace = true

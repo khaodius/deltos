@@ -4,7 +4,7 @@ members = ["crates/*"]
 default-members = ["crates/*"]
 
 [workspace.package]
-version = "0.1.21"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.88"
 license = "Apache-2.0"
@@ -16,6 +16,7 @@ publish = false
 deltos-data = { path = "crates/deltos-data" }
 deltos-dock = { path = "crates/deltos-dock" }
 deltos-drivers = { path = "crates/deltos-drivers" }
+deltos-graph = { path = "crates/deltos-graph" }
 deltos-grid = { path = "crates/deltos-grid" }
 deltos-settings = { path = "crates/deltos-settings" }
 deltos-ssh = { path = "crates/deltos-ssh" }

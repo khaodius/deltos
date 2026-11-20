@@ -298,6 +298,29 @@ impl TablePanel {
         self.object.name.clone().into()
     }
 
+    /// Where this table is, for the graph: the column of the selected cell, or the table.
+    pub fn graph_focus(&self, cx: &App) -> deltos_graph::Focus {
+        let grid = self.grid.read(cx);
+        let column = grid
+            .selection
+            .and_then(|s| grid.columns().get(s.head.1))
+            .map(|c| c.name.clone());
+        match column {
+            Some(column) => deltos_graph::Focus::Column {
+                object: self.object.clone(),
+                column,
+            },
+            None => deltos_graph::Focus::Object {
+                object: self.object.clone(),
+            },
+        }
+    }
+
+    /// Where the keyboard goes when the table is shown again: its grid.
+    pub fn focus_handle(&self, cx: &App) -> gpui::FocusHandle {
+        gpui::Focusable::focus_handle(self.grid.read(cx), cx)
+    }
+
     pub fn connection_id(&self) -> &str {
         &self.connection
     }
@@ -1792,11 +1815,14 @@ impl TablePanel {
                     }
                 }
                 items.push(MenuItem::separator());
+                items.push(self.graph_item(Some(name.clone())));
                 items.push(
                     MenuItem::new("Reload", run(Box::new(|t, cx| t.refresh(cx)))).detail("Ctrl+R"),
                 );
             }
             MenuTarget::Header(_) => {
+                items.push(self.graph_item(Some(name.clone())));
+                items.push(MenuItem::separator());
                 let current = self
                     .sort
                     .first()
@@ -1848,6 +1874,28 @@ impl TablePanel {
             }
         }
         items
+    }
+
+    /// "Show in graph", on `column` or the whole table.
+    fn graph_item(&self, column: Option<String>) -> crate::ui::MenuItem {
+        let (state, connection) = (self.state.clone(), self.connection.clone());
+        let object = self.object.clone();
+        let label = match &column {
+            Some(c) => format!("Show {c} in the graph"),
+            None => "Show in the graph".to_owned(),
+        };
+        crate::ui::MenuItem::new(label, move |_, cx| {
+            let focus = match column.clone() {
+                Some(column) => deltos_graph::Focus::Column {
+                    object: object.clone(),
+                    column,
+                },
+                None => deltos_graph::Focus::Object {
+                    object: object.clone(),
+                },
+            };
+            state.update(cx, |s, cx| s.show_in_graph(&connection, focus, cx));
+        })
     }
 
     pub fn refresh(&mut self, cx: &mut Context<Self>) {

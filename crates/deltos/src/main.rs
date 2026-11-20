@@ -75,6 +75,7 @@ actions!(
         ResetLayout,
         CommandPalette,
         ToggleTasks,
+        ToggleGraph,
     ]
 );
 
@@ -109,6 +110,7 @@ pub fn rebind_keys(settings: &Settings, cx: &mut App) {
             "reset-layout" => KeyBinding::new(keys, ResetLayout, ctx),
             "command-palette" | "command-palette-alt" => KeyBinding::new(keys, CommandPalette, ctx),
             "toggle-tasks" => KeyBinding::new(keys, ToggleTasks, ctx),
+            "toggle-graph" => KeyBinding::new(keys, ToggleGraph, ctx),
             "run-query" => KeyBinding::new(keys, ui::query::RunQuery, Some("QueryPanel")),
             // The inspector passes these on to the table its row came from.
             "commit-changes" => {
@@ -615,6 +617,16 @@ impl Render for Root {
                 this.workspace
                     .update(cx, |w, cx| w.toggle(PanelKind::Tasks, cx))
             }))
+            .on_action(cx.listener(|this, _: &ToggleGraph, window, cx| {
+                let back = this.workspace.update(cx, |w, cx| w.toggle_graph(cx));
+                let focus = back.and_then(|p| {
+                    let w = this.workspace.read(cx);
+                    w.view(p).and_then(|v| v.focus_handle(cx))
+                });
+                if let Some(f) = focus {
+                    window.focus(&f);
+                }
+            }))
             .on_action(cx.listener(|this, _: &OpenSettings, _, cx| {
                 this.workspace
                     .update(cx, |w, cx| w.open(PanelKind::Settings, true, cx))
@@ -706,6 +718,7 @@ fn quit_or_ask(workspace: &Entity<Workspace>, window: &mut Window, cx: &mut App)
 fn quit(workspace: &Entity<Workspace>, _window: &mut Window, cx: &mut App) {
     session::begin_quit(cx);
     workspace.update(cx, |w, cx| {
+        w.save_graph(cx);
         w.save_layout(cx);
         w.close_windows_for_quit(cx);
     });

@@ -40,6 +40,21 @@ stack. Pull it past the window's edge and it becomes a window of its own, which 
 the pointer until you let go. Drop that window on the main one, or hold it there, and it docks again. The
 layout is saved and comes back on the next start.
 
+## Graph
+
+The graph shows the whole connection on one plane: every database or schema as an area,
+every table, view and collection as a card with its columns, and a line for each foreign
+key. MongoDB collections get lines too, read from field names such as `user_id`,
+`authorId` or `tag_ids`. It is off until you open it: press `Ctrl+G`, use the graph button
+at the top of the objects panel, or pick Show in the graph on a database, schema, table or
+column header. It opens zoomed in on where you were, the column or table in front or the
+one picked in the sidebar, and from there you zoom out with the wheel and click through:
+click a table to fly to it, click a linked column twice to follow it to the table it
+points at, double-click to open a table. `Esc`, `Ctrl+G` or Back return to the tab you came
+from, scrolled where you left it. The graph is a panel like the others, so it docks, splits
+and tears off into its own window. Where it was looking is saved per connection, so it
+comes back to the same spot after a restart, even when tables were added around it.
+
 Deltos reopens your last session on launch: tabs, query text, panel windows and the
 connections that need no password. Layout presets arrange the panels in one click: Default,
 Focus, Query, or any arrangement you save under a name.
@@ -234,6 +249,8 @@ publisher the first time.
 | Settings                    | `Ctrl+,`           |
 | Zoom in / out / reset       | `Ctrl+=` / `Ctrl+-` / `Ctrl+0` |
 | Reset the panel layout      | `Ctrl+Shift+0`     |
+| Graph / back to the regular view | `Ctrl+G`, `Esc` in the graph |
+| Graph: zoom, show everything, pan | wheel or `+` `-`, `0`, drag or arrows |
 | Edit the selected cell      | `Enter` or `F2`, or double-click |
 | Save / cancel an edit       | `Enter`, `Tab` or click elsewhere / `Esc` |
 | Commit / review / discard staged changes | `Ctrl+S` / `Ctrl+Shift+S` / `Ctrl+Shift+Z` |

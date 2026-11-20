@@ -42,6 +42,8 @@ pub struct ObjectsPanel {
     state: Entity<AppState>,
     search: Entity<TextInput>,
     selected: Option<ObjectRef>,
+    /// The namespace or object picked last, which the graph opens on.
+    picked: Option<deltos_graph::Focus>,
     /// An open right-click menu: where, and over which row.
     context: Option<(gpui::Point<gpui::Pixels>, Row)>,
     list_scroll: UniformListScrollHandle,
@@ -81,6 +83,7 @@ impl ObjectsPanel {
             state,
             search,
             selected: None,
+            picked: None,
             context: None,
             list_scroll,
             scrollbar,
@@ -92,11 +95,19 @@ impl ObjectsPanel {
         window.focus(&self.search.focus_handle(cx));
     }
 
+    /// The namespace or object picked last, for the graph to open on.
+    pub fn graph_focus(&self) -> Option<deltos_graph::Focus> {
+        self.picked.clone()
+    }
+
     fn open(&mut self, object: ObjectRef, pin: bool, cx: &mut Context<Self>) {
         let Some(connection) = self.state.read(cx).active.clone() else {
             return;
         };
         self.selected = Some(object.clone());
+        self.picked = Some(deltos_graph::Focus::Object {
+            object: object.clone(),
+        });
         if !object.kind.has_rows() {
             cx.notify();
             return;
@@ -141,6 +152,15 @@ impl ObjectsPanel {
                 let browsable = object.kind.has_rows();
                 items.push(MenuItem::new("Open", open(false)).enabled(browsable));
                 items.push(MenuItem::new("Open in a new tab", open(true)).enabled(browsable));
+                if browsable {
+                    let (state, sid, object) = (this.clone(), sid.clone(), object.clone());
+                    items.push(MenuItem::new("Show in the graph", move |_, cx| {
+                        let focus = deltos_graph::Focus::Object {
+                            object: object.clone(),
+                        };
+                        state.update(cx, |s, cx| s.show_in_graph(&sid, focus, cx));
+                    }));
+                }
                 let qualified = if edit::speaks_sql(kind) {
                     edit::table_name(kind, object)
                 } else {
@@ -202,6 +222,11 @@ impl ObjectsPanel {
                 let (state, s2, p2) = (this.clone(), sid.clone(), path.clone());
                 items.push(MenuItem::new("Reload", move |_, cx| {
                     state.update(cx, |s, cx| s.load_objects(&s2, &p2, cx))
+                }));
+                let (state, s6, p6) = (this.clone(), sid.clone(), path.clone());
+                items.push(MenuItem::new("Show in the graph", move |_, cx| {
+                    let focus = deltos_graph::Focus::Namespace { path: p6.clone() };
+                    state.update(cx, |s, cx| s.show_in_graph(&s6, focus, cx));
                 }));
                 // A PostgreSQL database holds schemas; tables go in those.
                 if edit::speaks_sql(kind)
@@ -371,6 +396,12 @@ impl Render for ObjectsPanel {
                 .items_center()
                 .pr(px(8.))
                 .child(search.flex_1().min_w_0().pr(px(4.)))
+                .child({
+                    let state = self.state.clone();
+                    icon_button("toggle-graph", Icon::Graph, &t)
+                        .tooltip(|_, cx| Tooltip::view("Show or hide the graph", cx))
+                        .on_click(move |_, _, cx| state.update(cx, |s, cx| s.toggle_graph(cx)))
+                })
                 .child(
                     icon_button("export-database", Icon::Export, &t)
                         .tooltip(|_, cx| Tooltip::view("Export the database", cx))
@@ -458,10 +489,17 @@ impl Render for ObjectsPanel {
                         } => {
                             let (state, sid, path) =
                                 (state.clone(), session_id.clone(), path.clone());
+                            let pick = this.clone();
                             base.cursor_pointer()
                                 .text_color(t.text_muted)
                                 .hover(|s| s.bg(t.hover))
                                 .on_click(move |_, _, cx| {
+                                    pick.update(cx, |p, _| {
+                                        p.picked = Some(deltos_graph::Focus::Namespace {
+                                            path: path.clone(),
+                                        });
+                                    })
+                                    .ok();
                                     state.update(cx, |s, cx| s.toggle_namespace(&sid, &path, cx))
                                 })
                                 .on_mouse_down(MouseButton::Right, {

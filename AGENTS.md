@@ -33,6 +33,7 @@ A Cargo workspace. Everything is Rust, and the UI is [GPUI](https://www.gpui.rs)
 | `crates/deltos-data` | The driver contract every database driver implements: connections, schema, queries, row streams and `Value`. Change it with care; every driver follows it |
 | `crates/deltos-drivers` | The drivers: PostgreSQL, MySQL and MariaDB, SQLite and MongoDB. Integration tests run against live servers in CI when the `DELTOS_TEST_*_URL` variables are set, and skip otherwise |
 | `crates/deltos-grid` | The bounded row cache and on-disk spill store behind the table view, which is what keeps memory flat on huge tables |
+| `crates/deltos-graph` | The graph view's model: where every namespace and object sits, the camera, saved views and the relation sources (foreign keys, MongoDB references). No UI code |
 | `crates/deltos-dock` | The dock layout model: splits, tabs and floating panel windows, serialized so a layout survives restarts |
 | `crates/deltos-ssh` | SSH tunnels on russh: `~/.ssh/config` lookup, `known_hosts` checks, key, agent and password sign-in, the local forward and its reconnects. Its end-to-end test runs an SSH server in the test process |
 | `crates/deltos-settings` | `Settings` and its TOML file. Serde defaults must keep old files loading |

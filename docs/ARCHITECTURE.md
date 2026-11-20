@@ -10,6 +10,7 @@ Wayland) and Windows. This page describes how the pieces fit together, and why.
 | `deltos-data` | The contract between the UI and the drivers: `Driver`, `Connection`, `Value`, `Column`, browse and execute requests. |
 | `deltos-drivers` | PostgreSQL, MySQL/MariaDB, SQLite and MongoDB behind that contract. `available()` lists the ones a build includes. `ddl` turns structure edits into each dialect's statements. |
 | `deltos-grid` | The bounded row cache behind every grid: `GridCache`, `BrowseLoader` for tables, `StreamLoader` for query results, and the streaming export with its CSV, JSON and Markdown writers. |
+| `deltos-graph` | The graph view as plain data: the layout of namespaces and objects on one plane, the camera, views saved relative to the object at their middle, and `RelationSource`, which says how objects relate for each kind of database. |
 | `deltos-dock` | The panel layout as plain data: split trees for the main window and each torn-off window, with every move as a method. No UI code. |
 | `deltos-settings` | `settings.toml` (with defaults, sanitizing and atomic saves), the saved layout, theme files and the keychain. |
 | `deltos-updater` | Checking, verifying and installing signed releases. |
@@ -146,6 +147,34 @@ Two GPUI details shape this code:
 The layout, including each panel window's bounds, is saved in `settings.toml` and restored
 at start.
 
+## The graph
+
+`ui::graph::GraphPanel` draws the active connection on one plane, from what the driver
+contract already returns: `namespaces`, `objects` and `describe`. `deltos-graph` lays every
+namespace out as a grid of fixed-size cells, one object per cell, so positions never depend
+on how many columns an object turns out to have. Describing objects as they scroll into view
+therefore never moves anything, and the object under the pointer or the objects in view are
+found by dividing by the cell size rather than by a search.
+
+- **What is described.** Only cards in view, four at a time, and only once the zoom shows
+  columns (or when few cards are in view). Up to 4,000 descriptions are kept per connection.
+  Namespaces nobody has listed yet are listed three at a time.
+- **Relations.** `deltos_graph::for_kind` picks a `RelationSource` per kind of database:
+  declared foreign keys (both those an object holds and, where the database reports them,
+  those pointing at it) for SQL; for MongoDB also references read from field names
+  (`user_id`, `authorId`, `tag_ids` to `users`, `authors`, `tags`), drawn dashed. Another
+  kind of database plugs in by returning its own source.
+- **Drawing.** One canvas. Text is left out once it would be smaller than 5.5 px, and font
+  sizes are rounded to half pixels so the text system's line cache serves most frames while
+  zooming. At most 8,000 lines are drawn per frame.
+- **Opening and going back.** The workspace remembers the document in front when the graph
+  opens (`GraphMemory::return_to` in the settings). Back, `Esc` and `Ctrl+G` show that panel
+  again; it is the same entity, so its scroll position and selection are as they were. A
+  graph opened as a tab beside it closes, as a toggle would; one docked elsewhere stays.
+- **Remembering.** The camera is saved per connection as an offset from the object (or
+  namespace) at its middle, 700 ms after it stops and on quitting, so it lands on the same
+  object after a restart even when tables were added or dropped around it.
+
 ## Showing large tables
 
 A table panel builds a `BrowseLoader` and a `GridCache` from the data settings: rows per
@@ -193,6 +222,7 @@ and imports are off. Other screens:
 - `DELTOS_DEMO=query`: a query tab that runs at once.
 - `DELTOS_DEMO=wide`: the 300 column table.
 - `DELTOS_DEMO=popout`: the inspector in its own window.
+- `DELTOS_DEMO=graph`: the graph, opened on the `orders` table's `user_id` column.
 
 The demo starts from the default layout and never writes settings.
 
