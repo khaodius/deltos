@@ -12,6 +12,7 @@ publish.workspace = true
 [dependencies]
 deltos-data.workspace = true
 deltos-dock.workspace = true
+deltos-graph.workspace = true
 directories.workspace = true
 keyring = { version = "3.6", default-features = false, features = ["apple-native", "windows-native", "async-secret-service", "tokio", "crypto-rust"] }
 serde.workspace = true

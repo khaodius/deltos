@@ -450,7 +450,7 @@ fn schema_line(line: &Line, t: &Theme) -> gpui::Stateful<gpui::Div> {
                     },
                 ))
                 .when(line.key, |el| {
-                    el.child(icon(Icon::Key).size(px(11.)).text_color(t.warning))
+                    el.child(icon(Icon::Key).size(px(11.)).text_color(t.key))
                 })
                 .child(
                     div()

@@ -49,6 +49,13 @@ pub enum StateEvent {
         kind: PanelKind,
         pin: bool,
     },
+    /// A view asks the workspace to show a place on a connection in the graph.
+    ShowInGraph {
+        connection: String,
+        focus: deltos_graph::Focus,
+    },
+    /// Shows the graph on where the person is, or goes back from it.
+    ToggleGraph,
 }
 
 /// One namespace in a connection's object tree, with its objects once they are listed.
@@ -180,6 +187,24 @@ impl AppState {
 
     pub fn active_session(&self) -> Option<&Session> {
         self.active.as_deref().and_then(|id| self.session(id))
+    }
+
+    /// Asks the workspace to show `focus` on `connection` in the graph.
+    pub fn show_in_graph(
+        &mut self,
+        connection: &str,
+        focus: deltos_graph::Focus,
+        cx: &mut Context<Self>,
+    ) {
+        cx.emit(StateEvent::ShowInGraph {
+            connection: connection.to_owned(),
+            focus,
+        });
+    }
+
+    /// Asks the workspace to show the graph on where the person is, or to go back.
+    pub fn toggle_graph(&mut self, cx: &mut Context<Self>) {
+        cx.emit(StateEvent::ToggleGraph);
     }
 
     /// Asks the workspace to open `kind`, or show it if it is open.

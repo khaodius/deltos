@@ -33,6 +33,10 @@ pub enum PanelKind {
     Settings,
     /// Long-running work: statements, table loads and counts, with a way to stop them.
     Tasks,
+    /// The active connection's namespaces and objects on one plane, with the relations
+    /// between them. Where it looks is kept in [`crate::GraphMemory`], not here, so it
+    /// survives the panel being closed.
+    Graph,
 }
 
 impl PanelKind {
@@ -55,6 +59,7 @@ impl PanelKind {
                 | PanelKind::History
                 | PanelKind::Settings
                 | PanelKind::Tasks
+                | PanelKind::Graph
         )
     }
 }
@@ -241,6 +246,19 @@ mod tests {
         assert_eq!(toml::from_str::<SavedPanel>(&text).unwrap(), p);
         assert!(PanelKind::Tasks.is_singleton());
         assert!(!PanelKind::Tasks.is_document());
+    }
+
+    #[test]
+    fn the_graph_is_a_document_kept_once() {
+        let p = SavedPanel {
+            id: PanelId(31),
+            kind: PanelKind::Graph,
+        };
+        let text = toml::to_string(&p).unwrap();
+        assert!(text.contains("type = \"graph\""));
+        assert_eq!(toml::from_str::<SavedPanel>(&text).unwrap(), p);
+        assert!(PanelKind::Graph.is_singleton());
+        assert!(PanelKind::Graph.is_document());
     }
 
     #[test]

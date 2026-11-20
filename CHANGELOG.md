@@ -4,6 +4,22 @@ Packages for every version are attached to its
 [release](https://github.com/khaodius/deltos/releases), with SHA-256 checksums and a signed
 update manifest.
 
+## 0.2.2 - 2026-11-20
+
+- **Graph view.** A new panel shows the connection's databases and schemas as areas, its
+  tables, views and collections as cards with their columns, and foreign keys as lines.
+  It is off until opened with `Ctrl+G`, the graph button on the objects panel, or Show in
+  the graph on a database, schema, table or column header, and it opens zoomed in on where
+  you were. Zoom out with the wheel, click a table to fly to it, click a linked column
+  twice to follow it, double-click to open the table. `Esc` or Back returns to the tab you
+  came from as you left it. It docks, splits and tears off like any panel, and remembers
+  where it was looking on each connection across restarts.
+- **MongoDB relations in the graph.** Fields named after another collection (`user_id`,
+  `authorId`, `tag_ids`) are drawn as dashed lines to it.
+- **Light blue instead of yellow.** Primary keys and staged edits (the row mark, the edited
+  cell, the inspector's changed fields and the pending count) are light blue. Warnings stay
+  yellow.
+
 ## 0.2.1 - 2026-11-20
 
 - **Documents view for MongoDB.** A collection's tab has a Documents view beside Data:

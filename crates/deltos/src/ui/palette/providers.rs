@@ -257,6 +257,7 @@ const ACTIONS: &[(&str, ActionCtor)] = &[
     ("toggle-sidebar", || Box::new(crate::ToggleSidebar)),
     ("toggle-inspector", || Box::new(crate::ToggleInspector)),
     ("toggle-tasks", || Box::new(crate::ToggleTasks)),
+    ("toggle-graph", || Box::new(crate::ToggleGraph)),
     ("settings", || Box::new(crate::OpenSettings)),
     ("zoom-in", || Box::new(crate::ZoomIn)),
     ("zoom-out", || Box::new(crate::ZoomOut)),

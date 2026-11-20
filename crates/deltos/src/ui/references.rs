@@ -511,7 +511,7 @@ fn field(
                         .child(column.name.clone()),
                 )
                 .when(column.primary_key.is_some(), |el| {
-                    el.child(icon(Icon::Key).size(px(10.)).text_color(t.warning))
+                    el.child(icon(Icon::Key).size(px(10.)).text_color(t.key))
                 })
                 .children(arrow)
                 .child(div().flex_1())

@@ -462,11 +462,11 @@ fn field_header(
         .child(
             div()
                 .font_weight(FontWeight::MEDIUM)
-                .text_color(if staged { t.warning } else { t.text_muted })
+                .text_color(if staged { t.changed } else { t.text_muted })
                 .child(column.name.clone()),
         )
         .when(column.primary_key.is_some(), |el| {
-            el.child(icon(Icon::Key).size(px(10.)).text_color(t.warning))
+            el.child(icon(Icon::Key).size(px(10.)).text_color(t.key))
         })
         .child(div().flex_1())
         .when(can_null, |el| {
@@ -550,7 +550,7 @@ impl Render for InspectorPanel {
                 .rounded(t.radius_small)
                 .bg(tint.unwrap_or(t.input))
                 .border_1()
-                .border_color(if staged { t.warning } else { t.border })
+                .border_color(if staged { t.changed } else { t.border })
                 .font_family(t.mono_font.clone())
                 .text_size(t.mono_size)
                 .text_color(if null { t.text_faint } else { t.text });
@@ -655,7 +655,7 @@ impl Render for InspectorPanel {
             _ => format!("row {}", thousands(row.row + 1)).into(),
         };
         let status: Option<(SharedString, gpui::Hsla)> = match mark {
-            RowMark::Changed => Some(("changed".into(), t.warning)),
+            RowMark::Changed => Some(("changed".into(), t.changed)),
             RowMark::Deleted => Some(("to be deleted".into(), t.danger)),
             RowMark::Inserted => Some(("not committed".into(), t.success)),
             RowMark::None => None,

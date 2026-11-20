@@ -14,11 +14,13 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+mod graph;
 mod layout;
 mod presets;
 pub mod secrets;
 mod theme_file;
 
+pub use graph::{GRAPH_VIEWS_KEPT, GraphMemory, GraphPlace};
 pub use layout::{
     CONNECTIONS_PANEL, INSPECTOR_PANEL, OBJECTS_PANEL, PanelKind, SavedLayout, SavedPanel,
     WindowPlacement,
@@ -49,6 +51,8 @@ pub struct Settings {
     /// rather than costing the whole file.
     #[serde(deserialize_with = "presets::lenient")]
     pub layout_presets: Vec<LayoutPreset>,
+    /// Where the graph view looked last.
+    pub graph: GraphMemory,
 }
 
 /// 2: Obsidian replaced Graphite as the default dark palette.
@@ -68,6 +72,7 @@ impl Default for Settings {
             layout: SavedLayout::default(),
             session: LastSession::default(),
             layout_presets: Vec::new(),
+            graph: GraphMemory::default(),
         }
     }
 }
@@ -624,6 +629,7 @@ pub const KEYBIND_ACTIONS: &[(&str, &str, &str)] = &[
     ("add-row", "ctrl-shift-n", "Add a row"),
     ("command-palette", "ctrl-k", "Command palette"),
     ("toggle-tasks", "ctrl-shift-a", "Show or hide the tasks"),
+    ("toggle-graph", "ctrl-g", "Show or hide the graph"),
     (
         "command-palette-alt",
         "ctrl-shift-p",
@@ -838,6 +844,7 @@ impl Settings {
         }
         self.layout.sanitize();
         presets::sanitize(&mut self.layout_presets);
+        self.graph.sanitize();
     }
 
     pub fn from_toml(text: &str) -> Result<Self, Error> {

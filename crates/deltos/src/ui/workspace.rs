@@ -34,6 +34,7 @@ use gpui::{
 
 use crate::state::{AppState, StateEvent};
 use crate::ui::connections::ConnectionsPanel;
+use crate::ui::graph::GraphPanel;
 use crate::ui::history::HistoryPanel;
 use crate::ui::icons::Icon;
 use crate::ui::inspector::InspectorPanel;
@@ -65,6 +66,7 @@ pub enum PanelView {
     Query(Entity<QueryPanel>),
     Settings(Entity<SettingsPanel>),
     Tasks(Entity<TasksPanel>),
+    Graph(Entity<GraphPanel>),
 }
 
 impl PanelView {
@@ -79,6 +81,7 @@ impl PanelView {
             PanelView::Query(v) => AnyView::from(v.clone()).cached(full),
             PanelView::Settings(v) => AnyView::from(v.clone()).cached(full),
             PanelView::Tasks(v) => AnyView::from(v.clone()).cached(full),
+            PanelView::Graph(v) => AnyView::from(v.clone()).cached(full),
         }
     }
 
@@ -92,6 +95,7 @@ impl PanelView {
             PanelView::Query(v) => v.read(cx).title(),
             PanelView::Settings(_) => "Settings".into(),
             PanelView::Tasks(_) => "Tasks".into(),
+            PanelView::Graph(_) => "Graph".into(),
         }
     }
 
@@ -105,6 +109,7 @@ impl PanelView {
             PanelView::Query(_) => Icon::Code,
             PanelView::Settings(_) => Icon::Settings,
             PanelView::Tasks(_) => Icon::Activity,
+            PanelView::Graph(_) => Icon::Graph,
         }
     }
 
@@ -113,6 +118,18 @@ impl PanelView {
         match self {
             PanelView::Table(v) => Some(v.read(cx).connection_id().to_owned()),
             PanelView::Query(v) => v.read(cx).connection_id().map(str::to_owned),
+            PanelView::Graph(v) => v.read(cx).connection_id().map(str::to_owned),
+            _ => None,
+        }
+    }
+
+    /// Where the keyboard goes when the panel comes back to the front.
+    pub fn focus_handle(&self, cx: &App) -> Option<gpui::FocusHandle> {
+        use gpui::Focusable;
+        match self {
+            PanelView::Table(v) => Some(v.read(cx).focus_handle(cx)),
+            PanelView::Query(v) => Some(v.read(cx).focus_handle(cx)),
+            PanelView::Graph(v) => Some(v.read(cx).focus_handle(cx)),
             _ => None,
         }
     }
@@ -247,10 +264,15 @@ impl Workspace {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let mut layout = state.read(cx).settings.layout.clone();
         layout.sanitize();
-        let subs = vec![cx.subscribe(&state, |this, _, event, cx| {
-            if let StateEvent::Open { kind, pin } = event {
-                this.open(kind.clone(), *pin, cx);
+        let subs = vec![cx.subscribe(&state, |this, _, event, cx| match event {
+            StateEvent::Open { kind, pin } => this.open(kind.clone(), *pin, cx),
+            StateEvent::ShowInGraph { connection, focus } => {
+                this.show_in_graph(Some((connection.clone(), focus.clone())), cx)
             }
+            StateEvent::ToggleGraph => {
+                this.toggle_graph(cx);
+            }
+            _ => {}
         })];
         let mut this = Self {
             state,
@@ -304,6 +326,10 @@ impl Workspace {
             }
             PanelKind::Settings => PanelView::Settings(cx.new(|cx| SettingsPanel::new(state, cx))),
             PanelKind::Tasks => PanelView::Tasks(cx.new(TasksPanel::new)),
+            PanelKind::Graph => {
+                let workspace = cx.entity().downgrade();
+                PanelView::Graph(cx.new(|cx| GraphPanel::new(state, workspace, cx)))
+            }
         }
     }
 
@@ -608,6 +634,124 @@ impl Workspace {
         }
     }
 
+    // ---- the graph view ---------------------------------------------------------------
+
+    /// The graph panel, when it is open.
+    pub fn graph(&self) -> Option<(PanelId, Entity<GraphPanel>)> {
+        self.views.iter().find_map(|(id, v)| match v {
+            PanelView::Graph(g) => Some((*id, g.clone())),
+            _ => None,
+        })
+    }
+
+    /// Whether the graph is the panel in front of the documents.
+    fn graph_in_front(&self) -> bool {
+        self.graph()
+            .is_some_and(|(id, _)| self.active_document() == Some(id))
+    }
+
+    /// Where the person is in the regular view: the column or table in front, else the
+    /// object or namespace picked in the objects panel, else the whole connection.
+    fn graph_context(&self, cx: &App) -> Option<(String, deltos_graph::Focus)> {
+        let active = self
+            .active_document()
+            .filter(|p| self.graph().is_none_or(|(g, _)| g != *p));
+        if let Some(PanelView::Table(t)) = active.and_then(|p| self.views.get(&p)) {
+            let t = t.read(cx);
+            return Some((t.connection_id().to_owned(), t.graph_focus(cx)));
+        }
+        let connection = self.state.read(cx).active.clone()?;
+        let picked = self.views.values().find_map(|v| match v {
+            PanelView::Objects(o) => o.read(cx).graph_focus(),
+            _ => None,
+        });
+        Some((connection, picked.unwrap_or(deltos_graph::Focus::Overview)))
+    }
+
+    /// Opens the graph on `at` (a connection and a place on it), or on where the person
+    /// is in the regular view, and remembers which panel to go back to.
+    pub fn show_in_graph(
+        &mut self,
+        at: Option<(String, deltos_graph::Focus)>,
+        cx: &mut Context<Self>,
+    ) {
+        let at = at.or_else(|| self.graph_context(cx));
+        let from = self
+            .active_document()
+            .filter(|p| self.graph().is_none_or(|(g, _)| g != *p));
+        if let Some(from) = from {
+            self.state.update(cx, |s, cx| {
+                s.update_settings_quietly(cx, |st| st.graph.return_to = Some(from))
+            });
+        }
+        self.open(PanelKind::Graph, true, cx);
+        if let (Some((connection, focus)), Some((_, graph))) = (at, self.graph()) {
+            graph.update(cx, |g, cx| g.show(&connection, focus, cx));
+        }
+    }
+
+    /// Shows the graph, or goes back to the regular view when the graph is in front.
+    /// Returns the panel gone back to.
+    pub fn toggle_graph(&mut self, cx: &mut Context<Self>) -> Option<PanelId> {
+        if self.graph_in_front() {
+            self.graph_back(cx)
+        } else {
+            self.show_in_graph(None, cx);
+            None
+        }
+    }
+
+    /// The panel Back returns to: the one the graph was opened from while it is still
+    /// open, else the document shown last.
+    fn graph_return(&self, cx: &App) -> Option<PanelId> {
+        let graph = self.graph().map(|(id, _)| id);
+        let saved = self.state.read(cx).settings.graph.return_to;
+        saved
+            .filter(|p| Some(*p) != graph && self.layout.dock.contains(*p))
+            .or_else(|| {
+                self.layout.dock.panels().into_iter().find(|p| {
+                    Some(*p) != graph && self.views.get(p).is_some_and(PanelView::is_document)
+                })
+            })
+    }
+
+    /// The title of the panel Back returns to.
+    pub fn graph_return_title(&self, cx: &App) -> Option<SharedString> {
+        let p = self.graph_return(cx)?;
+        self.views.get(&p).map(|v| v.title(cx))
+    }
+
+    /// Back to the regular view, where the person was. A graph opened as a tab beside
+    /// that panel closes, as a toggle would; one the person placed elsewhere stays.
+    /// Returns the panel shown.
+    pub fn graph_back(&mut self, cx: &mut Context<Self>) -> Option<PanelId> {
+        let (graph_id, graph) = self.graph()?;
+        graph.update(cx, |g, cx| g.save_now(cx));
+        let back = self.graph_return(cx);
+        let beside = back.is_some_and(|b| {
+            self.layout
+                .dock
+                .stack_of(b)
+                .is_some_and(|s| s.panels.contains(&graph_id))
+        });
+        if beside || back.is_none() {
+            self.close(graph_id, cx);
+        }
+        // The panel is the same entity it was, so its scroll position, selection and
+        // loaded rows are as the person left them.
+        if let Some(b) = back {
+            self.show(b, cx);
+        }
+        back
+    }
+
+    /// Saves where the graph is looking, for quitting.
+    pub fn save_graph(&mut self, cx: &mut Context<Self>) {
+        if let Some((_, g)) = self.graph() {
+            g.update(cx, |g, cx| g.save_now(cx));
+        }
+    }
+
     /// Shows the object sidebar and puts the cursor in its search field.
     pub fn focus_object_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.is_open(&PanelKind::Objects) {
@@ -625,7 +769,8 @@ impl Workspace {
     /// `DELTOS_DEMO`: opens the demo connection and a screen to look at. `settings` opens
     /// Settings, `connections` the connection list, `wide` the 300 column table, `query`
     /// a query tab that runs at once, `popout` the big table with the inspector in its own
-    /// window; anything else opens the 50 million row table.
+    /// window, `graph` the graph on the orders table's `user_id` column; anything else
+    /// opens the 50 million row table.
     pub fn start_demo(&mut self, screen: &str, cx: &mut Context<Self>) {
         self.state.update(cx, |s, cx| s.open_demo(cx));
         let object =
@@ -652,7 +797,21 @@ impl Workspace {
             },
         };
         let run = matches!(kind, PanelKind::Query { .. });
+        let graph = match &kind {
+            PanelKind::Table { connection, object } if screen == "graph" => Some((
+                connection.clone(),
+                deltos_graph::Focus::Column {
+                    object: object.clone(),
+                    column: "user_id".into(),
+                },
+            )),
+            _ => None,
+        };
         self.open(kind, true, cx);
+        if let Some(at) = graph {
+            // The table, then the graph on its user_id column, as from its column menu.
+            self.show_in_graph(Some(at), cx);
+        }
         if screen == "popout" {
             // A torn-off inspector, to see a floating panel window.
             self.pop_out(deltos_settings::INSPECTOR_PANEL, None, false, cx);
