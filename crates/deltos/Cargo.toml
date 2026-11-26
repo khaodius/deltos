@@ -25,6 +25,7 @@ deltos-settings.workspace = true
 deltos-ssh.workspace = true
 deltos-updater.workspace = true
 futures.workspace = true
+flate2 = "1"
 gpui.workspace = true
 parking_lot.workspace = true
 serde.workspace = true

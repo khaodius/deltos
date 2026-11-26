@@ -149,7 +149,8 @@ pub struct ExportDialog {
     _subs: Vec<Subscription>,
 }
 
-/// Opens the export dialog over `window`.
+/// Opens the export dialog over `window`. A table or database gets the dump dialog,
+/// laid out as Adminer's export; a query result gets this one.
 pub fn open(
     connection: Arc<dyn Connection>,
     connection_name: Option<String>,
@@ -158,6 +159,26 @@ pub fn open(
     window: &mut Window,
     cx: &mut App,
 ) {
+    let target = match &source {
+        Source::Table {
+            object,
+            view,
+            columns,
+        } => Some(super::dump_dialog::Target::Table {
+            object: object.clone(),
+            view: view.clone(),
+            columns: columns.clone(),
+        }),
+        Source::Database { under, label } => Some(super::dump_dialog::Target::Database {
+            under: under.clone(),
+            label: label.clone(),
+        }),
+        Source::Result { .. } => None,
+    };
+    if let Some(target) = target {
+        super::dump_dialog::open(connection, connection_name, target, page_rows, window, cx);
+        return;
+    }
     let id = window.window_handle().window_id();
     let view = cx.new(|cx| {
         let mut d = ExportDialog::new(connection, source, page_rows, cx);

@@ -223,12 +223,12 @@ pub fn preview_statements(
 }
 
 /// A JSON string literal, for the shell.
-fn json_string(s: &str) -> String {
+pub(crate) fn json_string(s: &str) -> String {
     serde_json::to_string(s).unwrap_or_else(|_| format!("\"{}\"", s.replace('"', "\\\"")))
 }
 
 /// A value in MongoDB shell syntax, by the kind of its column.
-fn mongo_literal(v: &Value, kind: ValueKind) -> String {
+pub(crate) fn mongo_literal(v: &Value, kind: ValueKind) -> String {
     match v {
         Value::Null => "null".into(),
         Value::Bool(b) => b.to_string(),
