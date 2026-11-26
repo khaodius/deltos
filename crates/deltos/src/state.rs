@@ -1186,6 +1186,30 @@ pub fn init(
         state
     });
     crate::history_file::start(&state, cx);
+    let weak = state.downgrade();
+    crate::ui::transfer::set_opener(
+        move |conn, text, cx| {
+            let Some(state) = weak.upgrade() else {
+                return false;
+            };
+            let id = state
+                .read(cx)
+                .sessions
+                .iter()
+                .find(|s| std::ptr::addr_eq(Arc::as_ptr(&s.conn), Arc::as_ptr(conn)))
+                .map(|s| s.id.clone());
+            let Some(id) = id else {
+                return false;
+            };
+            let kind = deltos_settings::PanelKind::Query {
+                connection: Some(id),
+                text,
+            };
+            state.update(cx, |s, cx| s.open(kind, true, cx));
+            true
+        },
+        cx,
+    );
     let paths = state.read(cx).paths.clone();
     crate::snippets::start(paths.as_ref(), cx);
     state

@@ -13,7 +13,7 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
-use deltos_data::{Connection, Error, ObjectKind, ObjectRef};
+use deltos_data::{Connection, Error, ObjectEntry, ObjectKind, ObjectRef};
 use deltos_grid::{BrowseConfig, BrowseLoader, BrowseQuery, ExportOptions, RowWriter};
 
 use super::export::{safe_file_name, temp_path};
@@ -43,53 +43,16 @@ pub async fn tables(
     under: &[Vec<String>],
     describe: bool,
 ) -> Result<Vec<Table>, Error> {
-    let namespaces = conn.namespaces().await?;
-    let mut paths: Vec<Vec<String>> = namespaces
+    let mut found: Vec<Table> = entries(conn, under, false)
+        .await?
         .into_iter()
-        .map(|n| n.path)
-        .filter(|p| under.is_empty() || under.iter().any(|u| p.starts_with(u)))
+        .map(|entry| Table {
+            object: entry.object,
+            definition: None,
+            estimated_rows: entry.estimated_rows,
+            refers_to: Vec::new(),
+        })
         .collect();
-    // A namespace the listing does not show, such as one the user cannot list.
-    for u in under {
-        if !u.is_empty() && !paths.iter().any(|p| p.starts_with(u)) {
-            paths.push(u.clone());
-        }
-    }
-    let mut found: Vec<Table> = Vec::new();
-    let mut refused: Option<Error> = None;
-    let mut listed = 0usize;
-    for path in &paths {
-        let entries = match conn.objects(path).await {
-            Ok(e) => e,
-            Err(e) => {
-                refused.get_or_insert(e);
-                continue;
-            }
-        };
-        listed += 1;
-        for entry in entries {
-            if !matches!(
-                entry.object.kind,
-                ObjectKind::Table | ObjectKind::Collection
-            ) {
-                continue;
-            }
-            if found.iter().any(|t| t.object == entry.object) {
-                continue;
-            }
-            found.push(Table {
-                object: entry.object,
-                definition: None,
-                estimated_rows: entry.estimated_rows,
-                refers_to: Vec::new(),
-            });
-        }
-    }
-    if listed == 0
-        && let Some(e) = refused
-    {
-        return Err(e);
-    }
     if describe {
         for table in &mut found {
             // A table that cannot be described still has rows to write.
@@ -108,6 +71,59 @@ pub async fn tables(
         }
     }
     Ok(in_dependency_order(found))
+}
+
+/// The tables and collections under `under`, as [`tables`] finds them, and their views
+/// too when `views`, by namespace and name.
+pub async fn entries(
+    conn: &dyn Connection,
+    under: &[Vec<String>],
+    views: bool,
+) -> Result<Vec<ObjectEntry>, Error> {
+    let namespaces = conn.namespaces().await?;
+    let mut paths: Vec<Vec<String>> = namespaces
+        .into_iter()
+        .map(|n| n.path)
+        .filter(|p| under.is_empty() || under.iter().any(|u| p.starts_with(u)))
+        .collect();
+    // A namespace the listing does not show, such as one the user cannot list.
+    for u in under {
+        if !u.is_empty() && !paths.iter().any(|p| p.starts_with(u)) {
+            paths.push(u.clone());
+        }
+    }
+    let mut found: Vec<ObjectEntry> = Vec::new();
+    let mut refused: Option<Error> = None;
+    let mut listed = 0usize;
+    for path in &paths {
+        let list = match conn.objects(path).await {
+            Ok(e) => e,
+            Err(e) => {
+                refused.get_or_insert(e);
+                continue;
+            }
+        };
+        listed += 1;
+        for entry in list {
+            let wanted = match entry.object.kind {
+                ObjectKind::Table | ObjectKind::Collection => true,
+                ObjectKind::View | ObjectKind::MaterializedView => views,
+                _ => false,
+            };
+            if wanted && !found.iter().any(|t| t.object == entry.object) {
+                found.push(entry);
+            }
+        }
+    }
+    if listed == 0
+        && let Some(e) = refused
+    {
+        return Err(e);
+    }
+    found.sort_by(|a, b| {
+        (&a.object.namespace, &a.object.name).cmp(&(&b.object.namespace, &b.object.name))
+    });
+    Ok(found)
 }
 
 /// `tables` with each one after the tables it refers to, otherwise by namespace and name.

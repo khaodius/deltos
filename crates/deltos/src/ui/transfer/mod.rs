@@ -9,6 +9,8 @@
 //! never redraws the window per row.
 
 pub mod database;
+pub mod dump;
+pub mod dump_dialog;
 pub mod export;
 pub mod import;
 pub mod read;
@@ -126,6 +128,34 @@ pub fn host(cx: &mut App) -> Entity<Host> {
     });
     cx.set_global(HostGlobal(h.clone()));
     h
+}
+
+type OpenFn = Rc<dyn Fn(&Arc<dyn deltos_data::Connection>, String, &mut App) -> bool>;
+
+/// Opens text in a new query tab on a connection's session. The app state sets it.
+struct Opener(OpenFn);
+
+impl Global for Opener {}
+
+/// Sets what [`open_in_query_tab`] does.
+pub fn set_opener(
+    f: impl Fn(&Arc<dyn deltos_data::Connection>, String, &mut App) -> bool + 'static,
+    cx: &mut App,
+) {
+    cx.set_global(Opener(Rc::new(f)));
+}
+
+/// Opens `text` in a new query tab on `conn`'s session. Returns `false` when there is no
+/// such session to open it on.
+pub fn open_in_query_tab(
+    conn: &Arc<dyn deltos_data::Connection>,
+    text: String,
+    cx: &mut App,
+) -> bool {
+    let Some(f) = cx.try_global::<Opener>().map(|o| o.0.clone()) else {
+        return false;
+    };
+    f(conn, text, cx)
 }
 
 /// The dialog and job cards for one window, drawn over everything else in it.

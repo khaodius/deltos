@@ -4,6 +4,26 @@ Packages for every version are attached to its
 [release](https://github.com/khaodius/deltos/releases), with SHA-256 checksums and a signed
 update manifest.
 
+## 0.2.3 - 2026-11-26
+
+- **Export laid out like Adminer's.** Export on a database, schema or table opens one
+  dialog with Output (Open, Save, Gzip), Format (SQL, CSV with a comma, CSV with a
+  semicolon, TSV, JSON), and for SQL what happens to each database (USE, DROP+CREATE,
+  CREATE, with Routines and Events), each table (DROP+CREATE or CREATE, with Auto Increment
+  and Triggers) and its rows (TRUNCATE+INSERT, INSERT, INSERT+UPDATE). Below them, every
+  table has a box for its structure and one for its data, each column has a box that sets
+  them all, and each row shows the table's estimated row count. Open puts a dump in a new
+  query tab; Gzip writes `.sql.gz`. The choices are kept for the next export.
+- **Dumps that run back.** MySQL dumps keep routines and events between `DELIMITER ;;`
+  lines and leave the `AUTO_INCREMENT=` counter out unless asked. PostgreSQL dumps make
+  the sequences the tables use and set them to where they were after the rows, and use the
+  schema for the database options. Triggers go last, so loading the rows does not fire
+  them. INSERT+UPDATE writes `ON DUPLICATE KEY UPDATE` on MySQL and `ON CONFLICT` on
+  PostgreSQL and SQLite.
+- **MongoDB in the same dialog.** Shell exports a database as calls that Deltos' shell and
+  `mongosh` both run: `dropDatabase`, the collections with their indexes, `insertMany`,
+  and for INSERT+UPDATE a `replaceOne` with `upsert` per document.
+
 ## 0.2.2 - 2026-11-20
 
 - **Graph view.** A new panel shows the connection's databases and schemas as areas, its
